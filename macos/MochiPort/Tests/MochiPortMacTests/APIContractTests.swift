@@ -2032,14 +2032,14 @@ final class APIContractTests: XCTestCase {
     func testNavigationContainsPhaseZeroSections() {
         XCTAssertEqual(
             AppSection.allCases.map(\.title),
-            ["概览", "Codex 接入", "AI 网关", "消息渠道", "会话", "请求日志"]
+            ["概览", "Codex 接入", "AI 网关", "账号池", "消息渠道", "会话", "请求日志"]
         )
     }
 
     func testNavigationGroupsFollowSetupOrder() {
         XCTAssertEqual(
             AppSectionGroup.allCases.flatMap { $0.sections }.map(\.title),
-            ["概览", "Codex 接入", "AI 网关", "消息渠道", "会话", "请求日志"]
+            ["概览", "Codex 接入", "AI 网关", "账号池", "消息渠道", "会话", "请求日志"]
         )
         XCTAssertEqual(
             AppSectionGroup.allCases.map(\.title),
@@ -5137,6 +5137,124 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(boundaryPresentation.tone, .normal)
         XCTAssertEqual(gatewayQuotaSiteDisplayName("https://vip.mdkj.lol"), "mdkj")
         XCTAssertEqual(gatewayQuotaSiteDisplayName("https://api.wanfeng.me/v1"), "wanfeng")
+    }
+
+    func testGatewayQuotaBalanceSourceFallsBackToUsageWhenAccountBalanceMissing() throws {
+        func makeAccount(balance: ManageSub2ApiAccountPoolResponse.Account.Balance)
+            -> ManageSub2ApiAccountPoolResponse.Account
+        {
+            ManageSub2ApiAccountPoolResponse.Account(
+                id: 30,
+                name: "AtlasAPI",
+                siteUrl: "https://api.aixoras.com/v1",
+                platform: "openai",
+                accountType: "apikey",
+                status: "active",
+                schedulable: false,
+                localRateMultiplier: 1.0,
+                upstreamBilling: ManageSub2ApiAccountPoolResponse.Account.Billing(
+                    state: "unsupported",
+                    resolvedRateMultiplier: nil,
+                    effectiveRateMultiplier: nil,
+                    observedAt: nil,
+                    freshUntil: nil,
+                    stale: true
+                ),
+                upstreamBalance: balance
+            )
+        }
+
+        func decodeUsage(_ json: String) throws -> ManageProviderUsageResponse.Usage {
+            try JSONDecoder().decode(
+                ManageProviderUsageResponse.self,
+                from: Data(json.utf8)
+            ).usage
+        }
+
+        let unlimitedUsage = try decodeUsage(
+            #"{"ok":true,"providerName":"openai","usage":{"source":"sub2api","balanceStatus":"available","billingStatus":"available","remaining":-1,"unlimited":true,"unit":"USD","accountValid":true,"planName":"sub"}}"#
+        )
+
+        // An account balance carrying a value always wins.
+        let valuedAccount = makeAccount(
+            balance: ManageSub2ApiAccountPoolResponse.Account.Balance(
+                state: "available",
+                remaining: 7.74,
+                unlimited: false,
+                unit: "USD",
+                mode: "unrestricted",
+                planName: nil,
+                accountValid: true,
+                accountStatus: "active",
+                observedAt: nil
+            )
+        )
+        XCTAssertEqual(
+            gatewayQuotaBalanceSource(account: valuedAccount, usage: unlimitedUsage),
+            .account(valuedAccount)
+        )
+        // Unlimited account balances win too.
+        let unlimitedAccount = makeAccount(
+            balance: ManageSub2ApiAccountPoolResponse.Account.Balance(
+                state: "available",
+                remaining: nil,
+                unlimited: true,
+                unit: "USD",
+                mode: nil,
+                planName: nil,
+                accountValid: true,
+                accountStatus: "active",
+                observedAt: nil
+            )
+        )
+        XCTAssertEqual(
+            gatewayQuotaBalanceSource(account: unlimitedAccount, usage: unlimitedUsage),
+            .account(unlimitedAccount)
+        )
+
+        // Sub2API builds without the usage-probe endpoint permanently report
+        // `not_exposed`; the provider usage snapshot must take over.
+        let notExposedAccount = makeAccount(
+            balance: ManageSub2ApiAccountPoolResponse.Account.Balance(
+                state: "not_exposed",
+                remaining: nil,
+                unlimited: false,
+                unit: nil,
+                mode: nil,
+                planName: nil,
+                accountValid: nil,
+                accountStatus: nil,
+                observedAt: nil
+            )
+        )
+        XCTAssertEqual(
+            gatewayQuotaBalanceSource(account: notExposedAccount, usage: unlimitedUsage),
+            .usage(unlimitedUsage)
+        )
+        XCTAssertEqual(
+            gatewayQuotaBalanceText(unlimitedUsage),
+            "无限额度"
+        )
+
+        // Without a usable usage snapshot the account's capability state
+        // remains the answer instead of collapsing to "no data".
+        XCTAssertEqual(
+            gatewayQuotaBalanceSource(account: notExposedAccount, usage: nil),
+            .account(notExposedAccount)
+        )
+        XCTAssertEqual(sub2ApiBalanceText(notExposedAccount.upstreamBalance), "未提供")
+
+        // A disabled provider key is surfaced even when no balance is present.
+        let disabledKeyUsage = try decodeUsage(
+            #"{"ok":true,"providerName":"openai","usage":{"source":"sub2api","balanceStatus":"unavailable","billingStatus":"unavailable","unlimited":false,"accountValid":false}}"#
+        )
+        XCTAssertEqual(
+            gatewayQuotaBalanceSource(account: notExposedAccount, usage: disabledKeyUsage),
+            .usage(disabledKeyUsage)
+        )
+
+        // No account and no usage means the dock falls through to its idle copy.
+        XCTAssertNil(gatewayQuotaBalanceSource(account: nil, usage: nil))
     }
 
     func testSub2ApiAdminConnectionIsWriteOnlyAndUsesExpectedRoutes() async throws {

@@ -159,6 +159,36 @@ func gatewayQuotaBalanceText(_ usage: ManageProviderUsageResponse.Usage) -> Stri
     return providerUsageBalanceText(usage)
 }
 
+/// Which snapshot drives the dock's 剩余额度 display. The latest Sub2API
+/// account wins when its upstream balance probe produced a value. Sub2API
+/// builds without the usage-probe endpoint permanently report balances as
+/// `not_exposed` (no remaining, not unlimited); in that case the provider
+/// usage snapshot — the provider key's own wallet/subscription state — is the
+/// only answer the user can act on, so it takes over before the account's
+/// bare capability state does.
+enum GatewayQuotaBalanceSource: Equatable {
+    case account(ManageSub2ApiAccountPoolResponse.Account)
+    case usage(ManageProviderUsageResponse.Usage)
+}
+
+func gatewayQuotaBalanceSource(
+    account: ManageSub2ApiAccountPoolResponse.Account?,
+    usage: ManageProviderUsageResponse.Usage?
+) -> GatewayQuotaBalanceSource? {
+    if let account, account.upstreamBalance.unlimited || account.upstreamBalance.remaining != nil {
+        return .account(account)
+    }
+    if let usage,
+       usage.unlimited || usage.remaining != nil || usage.accountValid == false
+    {
+        return .usage(usage)
+    }
+    if let account {
+        return .account(account)
+    }
+    return nil
+}
+
 func gatewayQuotaSub2ApiRateText(
     _ account: ManageSub2ApiAccountPoolResponse.Account,
     fallbackUsage: ManageProviderUsageResponse.Usage?
@@ -537,21 +567,27 @@ struct GatewayQuotaDock: View {
         providerUsageLoading || recentAccountLoading || model.sub2ApiAccountPoolLoading
     }
 
+    private var balanceSource: GatewayQuotaBalanceSource? {
+        gatewayQuotaBalanceSource(account: recentAccount, usage: providerUsage?.usage)
+    }
+
     private var balanceText: String {
-        if let account = recentAccount {
+        switch balanceSource {
+        case let .account(account):
             return sub2ApiBalanceText(account.upstreamBalance)
-        }
-        if let usage = providerUsage?.usage {
+        case let .usage(usage):
             return gatewayQuotaBalanceText(usage)
+        case nil:
+            if selectedProvider?.secretSet == false { return "未保存 API Key" }
+            if providerUsageLoading { return "正在读取" }
+            if providerUsageError != nil { return "暂不可用" }
+            return selectedProvider == nil ? "未配置" : "尚未读取"
         }
-        if selectedProvider?.secretSet == false { return "未保存 API Key" }
-        if providerUsageLoading { return "正在读取" }
-        if providerUsageError != nil { return "暂不可用" }
-        return selectedProvider == nil ? "未配置" : "尚未读取"
     }
 
     private var meterPresentation: GatewayQuotaMeterPresentation {
-        if let account = recentAccount {
+        switch balanceSource {
+        case let .account(account):
             let presentation = gatewayQuotaMeterPresentation(account.upstreamBalance)
             let cachedState: GatewayQuotaCachedState = if model.sub2ApiAccountPoolLoading {
                 .refreshing
@@ -561,8 +597,7 @@ struct GatewayQuotaDock: View {
                 .fresh
             }
             return gatewayQuotaCachedPresentation(presentation, state: cachedState)
-        }
-        if let usage = providerUsage?.usage {
+        case let .usage(usage):
             let presentation = gatewayQuotaMeterPresentation(usage)
             let cachedState: GatewayQuotaCachedState = if providerUsageLoading {
                 .refreshing
@@ -572,37 +607,38 @@ struct GatewayQuotaDock: View {
                 .fresh
             }
             return gatewayQuotaCachedPresentation(presentation, state: cachedState)
-        }
-        if selectedProvider?.secretSet == false {
+        case nil:
+            if selectedProvider?.secretSet == false {
+                return GatewayQuotaMeterPresentation(
+                    fraction: nil,
+                    statusText: "需要 API Key",
+                    tone: .unavailable,
+                    warningThreshold: nil
+                )
+            }
+            if providerUsageLoading {
+                return GatewayQuotaMeterPresentation(
+                    fraction: nil,
+                    statusText: "正在读取",
+                    tone: .unavailable,
+                    warningThreshold: nil
+                )
+            }
+            if providerUsageError != nil {
+                return GatewayQuotaMeterPresentation(
+                    fraction: nil,
+                    statusText: "读取失败",
+                    tone: .critical,
+                    warningThreshold: nil
+                )
+            }
             return GatewayQuotaMeterPresentation(
                 fraction: nil,
-                statusText: "需要 API Key",
+                statusText: selectedProvider == nil ? "未配置" : "等待刷新",
                 tone: .unavailable,
                 warningThreshold: nil
             )
         }
-        if providerUsageLoading {
-            return GatewayQuotaMeterPresentation(
-                fraction: nil,
-                statusText: "正在读取",
-                tone: .unavailable,
-                warningThreshold: nil
-            )
-        }
-        if providerUsageError != nil {
-            return GatewayQuotaMeterPresentation(
-                fraction: nil,
-                statusText: "读取失败",
-                tone: .critical,
-                warningThreshold: nil
-            )
-        }
-        return GatewayQuotaMeterPresentation(
-            fraction: nil,
-            statusText: selectedProvider == nil ? "未配置" : "等待刷新",
-            tone: .unavailable,
-            warningThreshold: nil
-        )
     }
 
     private var meterTint: Color {
@@ -883,90 +919,122 @@ private struct GatewayQuotaDetailsPopover: View {
 
             Divider()
 
-            if let recentAccount {
-                LabeledContent("最近使用账号", value: recentAccount.name)
-                LabeledContent(
-                    "剩余额度",
-                    value: sub2ApiBalanceText(recentAccount.upstreamBalance)
-                )
-                LabeledContent(
-                    "当前倍率",
-                    value: gatewayQuotaSub2ApiRateText(
-                        recentAccount,
-                        fallbackUsage: usageResponse?.usage
-                    ) ?? sub2ApiUpstreamRateText(recentAccount.upstreamBilling)
-                )
-                if let plan = recentAccount.upstreamBalance.planName, !plan.isEmpty {
-                    LabeledContent("账户方案", value: plan)
-                }
-                if let observedAt = recentAccount.upstreamBalance.observedAt,
-                   !observedAt.isEmpty
-                {
-                    LabeledContent("余额观测", value: observedAt)
-                }
-                if let warningThreshold = presentation.warningThreshold {
-                    let unit = recentAccount.upstreamBalance.unit
-                    LabeledContent(
-                        "进度参考值",
-                        value: gatewayQuotaAmountText(
-                            gatewayQuotaProgressReference(unit: unit),
-                            unit: unit
-                        )
-                    )
-                    LabeledContent(
-                        "余额偏低线",
-                        value: gatewayQuotaAmountText(warningThreshold, unit: unit)
-                    )
-                }
-            } else if let usage = usageResponse?.usage {
-                LabeledContent("剩余额度", value: gatewayQuotaBalanceText(usage))
-                LabeledContent(
-                    "当前倍率",
-                    value: providerUsageMultiplierText(
-                        usage.effectiveRateMultiplier ?? usage.resolvedRateMultiplier
-                    ) ?? providerUsageBillingText(usage)
-                )
-                if let plan = usage.planName, !plan.isEmpty {
-                    LabeledContent("账户方案", value: plan)
-                }
-                if let observedAt = usage.observedAt, !observedAt.isEmpty {
-                    LabeledContent("上游观测", value: observedAt)
-                }
-                if let warningThreshold = presentation.warningThreshold {
-                    LabeledContent(
-                        "进度参考值",
-                        value: gatewayQuotaAmountText(
-                            gatewayQuotaProgressReference(unit: usage.unit),
-                            unit: usage.unit
-                        )
-                    )
-                    LabeledContent(
-                        "余额偏低线",
-                        value: gatewayQuotaAmountText(warningThreshold, unit: usage.unit)
-                    )
-                }
-                if let error {
-                    Label("刷新失败，当前显示上次成功读取的数据。", systemImage: "exclamationmark.triangle.fill")
-                        .font(.callout)
-                        .foregroundStyle(.orange)
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            } else if let error {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text(provider?.secretSet == false ? "请先保存 Provider API Key。" : "尚未读取额度。")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+            switch gatewayQuotaBalanceSource(
+                account: recentAccount,
+                usage: usageResponse?.usage
+            ) {
+            case let .account(account):
+                accountDetailRows(account)
+            case let .usage(usage):
+                usageDetailRows(usage)
+            case nil:
+                emptyDetailRows
             }
         }
         .padding(18)
         .frame(width: 340)
+    }
+
+    @ViewBuilder
+    private func accountDetailRows(
+        _ account: ManageSub2ApiAccountPoolResponse.Account
+    ) -> some View {
+        LabeledContent("最近使用账号", value: account.name)
+        LabeledContent(
+            "剩余额度",
+            value: sub2ApiBalanceText(account.upstreamBalance)
+        )
+        LabeledContent(
+            "当前倍率",
+            value: gatewayQuotaSub2ApiRateText(
+                account,
+                fallbackUsage: usageResponse?.usage
+            ) ?? sub2ApiUpstreamRateText(account.upstreamBilling)
+        )
+        if let plan = account.upstreamBalance.planName, !plan.isEmpty {
+            LabeledContent("账户方案", value: plan)
+        }
+        if let observedAt = account.upstreamBalance.observedAt,
+           !observedAt.isEmpty
+        {
+            LabeledContent("余额观测", value: observedAt)
+        }
+        if let warningThreshold = presentation.warningThreshold {
+            let unit = account.upstreamBalance.unit
+            LabeledContent(
+                "进度参考值",
+                value: gatewayQuotaAmountText(
+                    gatewayQuotaProgressReference(unit: unit),
+                    unit: unit
+                )
+            )
+            LabeledContent(
+                "余额偏低线",
+                value: gatewayQuotaAmountText(warningThreshold, unit: unit)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func usageDetailRows(
+        _ usage: ManageProviderUsageResponse.Usage
+    ) -> some View {
+        if let account = recentAccount {
+            LabeledContent("最近使用账号", value: account.name)
+            LabeledContent(
+                "上游账号余额",
+                value: sub2ApiBalanceText(account.upstreamBalance)
+            )
+        }
+        LabeledContent("剩余额度", value: gatewayQuotaBalanceText(usage))
+        LabeledContent(
+            "当前倍率",
+            value: providerUsageMultiplierText(
+                usage.effectiveRateMultiplier ?? usage.resolvedRateMultiplier
+            ) ?? providerUsageBillingText(usage)
+        )
+        if let plan = usage.planName, !plan.isEmpty {
+            LabeledContent("账户方案", value: plan)
+        }
+        if let observedAt = usage.observedAt, !observedAt.isEmpty {
+            LabeledContent("上游观测", value: observedAt)
+        }
+        if let warningThreshold = presentation.warningThreshold {
+            LabeledContent(
+                "进度参考值",
+                value: gatewayQuotaAmountText(
+                    gatewayQuotaProgressReference(unit: usage.unit),
+                    unit: usage.unit
+                )
+            )
+            LabeledContent(
+                "余额偏低线",
+                value: gatewayQuotaAmountText(warningThreshold, unit: usage.unit)
+            )
+        }
+        if let error {
+            Label("刷新失败，当前显示上次成功读取的数据。", systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private var emptyDetailRows: some View {
+        if let error {
+            Label(error, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Text(provider?.secretSet == false ? "请先保存 Provider API Key。" : "尚未读取额度。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private func accountSubtitle(_ provider: ManageGatewayProvider) -> String {
