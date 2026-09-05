@@ -890,6 +890,9 @@ final class AppModel: ObservableObject {
             gatewayProviderChannel = nil
             sub2ApiAdmin = nil
             invalidateSub2ApiAccountPool()
+        case .accountPool:
+            sub2ApiAdmin = nil
+            invalidateSub2ApiAccountPool()
         case .requestLogs:
             resetRequestLogPagination(clearLogs: true)
             requestLogDetail = nil
@@ -1109,6 +1112,15 @@ final class AppModel: ObservableObject {
                 guard isCurrentLoad(section, generation: generation) else { return false }
                 gateway = response
                 sub2ApiAdmin = admin
+            case .accountPool:
+                // The gateway config is fetched only to suggest a Sub2API
+                // base URL in the connect form; the pool refresh itself is
+                // cache-guarded and skips the request within its lifetime.
+                if gateway == nil {
+                    gateway = try? await apiClient.gateway()
+                }
+                guard isCurrentLoad(section, generation: generation) else { return false }
+                await refreshSub2ApiAccountPool(forceBillingRefresh: force)
             case .requestLogs:
                 let filters = requestLogFilters
                 let dataGeneration = beginRequestLogFirstPageLoad()
@@ -1768,7 +1780,7 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func saveSub2ApiAdmin(baseUrl: String, adminApiKey: String?) async -> Bool {
-        await performManagementAction(section: .gateway) {
+        await performManagementAction(section: .accountPool) {
             self.sub2ApiAdmin = try await self.apiClient.updateSub2ApiAdmin(
                 baseUrl: baseUrl,
                 adminApiKey: adminApiKey
@@ -1780,7 +1792,7 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func disconnectSub2ApiAdmin() async -> Bool {
-        await performManagementAction(section: .gateway) {
+        await performManagementAction(section: .accountPool) {
             self.sub2ApiAdmin = try await self.apiClient.disconnectSub2ApiAdmin()
             self.invalidateSub2ApiAccountPool()
             return "已断开 Sub2API 账号池"
@@ -3189,6 +3201,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     case overview
     case codex
     case gateway
+    case accountPool
     case messaging
     case sessions
     case requestLogs
@@ -3200,6 +3213,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .overview: "概览"
         case .codex: "Codex 接入"
         case .gateway: "AI 网关"
+        case .accountPool: "账号池"
         case .messaging: "消息渠道"
         case .sessions: "会话"
         case .requestLogs: "请求日志"
@@ -3211,6 +3225,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .overview: "rectangle.grid.1x2"
         case .codex: "chevron.left.forwardslash.chevron.right"
         case .gateway: "point.3.connected.trianglepath.dotted"
+        case .accountPool: "person.3.sequence"
         case .messaging: "bubble.left.and.bubble.right"
         case .sessions: "clock.arrow.circlepath"
         case .requestLogs: "list.bullet.rectangle"
@@ -3220,7 +3235,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     var group: AppSectionGroup {
         switch self {
         case .overview: .overview
-        case .codex, .gateway: .configuration
+        case .codex, .gateway, .accountPool: .configuration
         case .messaging, .sessions: .configuration
         case .requestLogs: .diagnostics
         }

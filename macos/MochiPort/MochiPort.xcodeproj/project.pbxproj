@@ -9,6 +9,7 @@
 		A10000000000000000000001 /* MochiPortApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* MochiPortApp.swift */; };
 		A10000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* AppModel.swift */; };
 		A10000000000000000000003 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* APIClient.swift */; };
+		A10000000000000000000019 /* AccountPoolView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000019 /* AccountPoolView.swift */; };
 		A10000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* RootView.swift */; };
 		A10000000000000000000005 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* SettingsView.swift */; };
 		A10000000000000000000007 /* DesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* DesignSystem.swift */; };
@@ -62,6 +63,7 @@
 		A20000000000000000000001 /* MochiPortApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MochiPortApp.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		A20000000000000000000019 /* AccountPoolView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountPoolView.swift; sourceTree = "<group>"; };
 		A20000000000000000000004 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		A20000000000000000000005 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A20000000000000000000006 /* Version.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Version.xcconfig; sourceTree = "<group>"; };
@@ -146,6 +148,7 @@
 				A20000000000000000000001 /* MochiPortApp.swift */,
 				A20000000000000000000002 /* AppModel.swift */,
 				A20000000000000000000003 /* APIClient.swift */,
+				A20000000000000000000019 /* AccountPoolView.swift */,
 				A20000000000000000000004 /* RootView.swift */,
 				A20000000000000000000005 /* SettingsView.swift */,
 				A20000000000000000000007 /* DesignSystem.swift */,
@@ -286,6 +289,7 @@
 				A10000000000000000000001 /* MochiPortApp.swift in Sources */,
 				A10000000000000000000002 /* AppModel.swift in Sources */,
 				A10000000000000000000003 /* APIClient.swift in Sources */,
+				A10000000000000000000019 /* AccountPoolView.swift in Sources */,
 				A10000000000000000000004 /* RootView.swift in Sources */,
 				A10000000000000000000005 /* SettingsView.swift in Sources */,
 				A10000000000000000000007 /* DesignSystem.swift in Sources */,

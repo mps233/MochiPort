@@ -1141,7 +1141,6 @@ struct SessionsView: View {
 private enum GatewaySection: String, CaseIterable, Identifiable, MochiPortSegmentItem {
     case general
     case providers
-    case accountPool
 
     var id: Self { self }
 
@@ -1149,7 +1148,6 @@ private enum GatewaySection: String, CaseIterable, Identifiable, MochiPortSegmen
         switch self {
         case .general: "概览"
         case .providers: "模型服务"
-        case .accountPool: "账号"
         }
     }
 
@@ -1157,7 +1155,6 @@ private enum GatewaySection: String, CaseIterable, Identifiable, MochiPortSegmen
         switch self {
         case .general: "switch.2"
         case .providers: "server.rack"
-        case .accountPool: "person.2"
         }
     }
 }
@@ -1194,14 +1191,8 @@ struct GatewayView: View {
     @State private var providerToDelete: ManageGatewayProvider?
     @State private var providerQuery = ""
     @State private var providerFilter: GatewayProviderFilter = .all
-    @State private var sub2ApiBaseURL = ""
-    @State private var sub2ApiAdminKey = ""
-    @State private var sub2ApiFormInitialized = false
-    @State private var sub2ApiSaving = false
-    @State private var confirmSub2ApiDisconnect = false
     @State private var section: GatewaySection = .general
     @State private var preferencesSaving = false
-    @State private var sub2ApiEditing = false
 
     init(startAtProviders: Bool = false, startAddingProvider: Bool = false) {
         _section = State(initialValue: startAtProviders ? .providers : .general)
@@ -1218,7 +1209,7 @@ struct GatewayView: View {
             case .providers:
                 gatewayRoot
                     .searchable(text: $providerQuery, placement: .toolbar, prompt: "搜索模型服务")
-            case .general, .accountPool:
+            case .general:
                 gatewayRoot
             }
         }
@@ -1251,14 +1242,9 @@ struct GatewayView: View {
             // catalog keeps the plain text editor as the only input.
             modelCatalog = await model.loadCodexModelCatalog() ?? []
             synchronizeGateway(model.gateway)
-            synchronizeSub2ApiAdmin(model.sub2ApiAdmin, gateway: model.gateway)
         }
         .onChange(of: model.gateway) { _, gateway in
             synchronizeGateway(gateway)
-            synchronizeSub2ApiAdmin(model.sub2ApiAdmin, gateway: gateway)
-        }
-        .onChange(of: model.sub2ApiAdmin) { _, admin in
-            synchronizeSub2ApiAdmin(admin, gateway: model.gateway)
         }
         .sheet(item: $editor) { state in
             GatewayProviderEditor(state: state) { originalName, provider, apiKey, clearAPIKey in
@@ -1290,17 +1276,6 @@ struct GatewayView: View {
         } message: {
             Text("删除后，该 Provider 将立即停止参与模型路由。")
         }
-        .confirmationDialog(
-            "断开 Sub2API 账号池？",
-            isPresented: $confirmSub2ApiDisconnect
-        ) {
-            Button("断开连接", role: .destructive) {
-                Task { await disconnectSub2ApiAccountPool() }
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("只会删除本机保存的管理连接，不会修改 Sub2API 中的账号。")
-        }
     }
 
     private var gatewayRoot: some View {
@@ -1310,7 +1285,7 @@ struct GatewayView: View {
                 accessibilityLabel: "AI 网关设置区域",
                 help: { "显示\($0.title)" }
             )
-                .frame(width: 440)
+                .frame(width: 300)
                 .padding(.horizontal, MochiPortPageLayout.horizontalPadding)
                 .padding(.top, MochiPortPageLayout.topPadding)
                 .padding(.bottom, 12)
@@ -1331,8 +1306,6 @@ struct GatewayView: View {
                     generalPage(gateway)
                 case .providers:
                     modelsAndProvidersPage(gateway.providers)
-                case .accountPool:
-                    accountPoolPage
                 }
             } else {
                 Spacer(minLength: 0)
@@ -1618,18 +1591,6 @@ struct GatewayView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var accountPoolPage: some View {
-        Form {
-            Section("Sub2API 账号池") {
-                sub2ApiAccountPoolContent
-            }
-        }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
-        .managementPageInsets(topPadding: 0)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
     private var providerTableHeader: some View {
         HStack(spacing: 12) {
             Text("供应商")
@@ -1649,128 +1610,6 @@ struct GatewayView: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
-    }
-
-    private var sub2ApiAccountPoolContent: some View {
-        let admin = model.sub2ApiAdmin
-        let configured = admin?.configured == true
-        let hasSavedKey = admin?.secretSet == true
-        let trimmedURL = sub2ApiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedKey = sub2ApiAdminKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let canSave = !trimmedURL.isEmpty
-            && (hasSavedKey || !trimmedKey.isEmpty)
-            && !sub2ApiSaving
-
-        return Group {
-            HStack(spacing: 10) {
-                Image(systemName: configured ? "checkmark.circle.fill" : "circle.dashed")
-                    .foregroundStyle(configured ? Color.green : .secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(configured ? "管理连接已就绪" : "尚未连接账号池")
-                        .font(.body.weight(.medium))
-                    Text(configured ? "概览会显示账号状态、倍率和上游余额。" : "连接后可以在概览查看账号池状态。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 12)
-                if configured {
-                    Button(sub2ApiEditing ? "取消" : "修改") {
-                        sub2ApiEditing.toggle()
-                    }
-                    if !sub2ApiEditing {
-                        Button("断开", role: .destructive) {
-                            confirmSub2ApiDisconnect = true
-                        }
-                        .disabled(sub2ApiSaving)
-                    }
-                }
-            }
-
-            if !configured || sub2ApiEditing {
-                Divider()
-                LabeledContent("管理地址") {
-                    TextField("https://sub2api.example.com", text: $sub2ApiBaseURL)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 560)
-                        .accessibilityLabel("Sub2API 管理地址")
-                }
-                LabeledContent("Admin API Key") {
-                    SecureField(
-                        hasSavedKey ? "留空以继续使用已保存的密钥" : "输入管理密钥",
-                        text: $sub2ApiAdminKey
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 560)
-                    .accessibilityLabel("Sub2API Admin API Key")
-                }
-                HStack {
-                    Label(
-                        hasSavedKey ? "管理密钥已保存在本机，界面不会回显。" : "需要管理权限的 API Key。",
-                        systemImage: hasSavedKey ? "key.fill" : "key"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    Spacer(minLength: 12)
-                    Button {
-                        Task { await saveSub2ApiAccountPool() }
-                    } label: {
-                        if sub2ApiSaving {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Label(configured ? "更新连接" : "连接", systemImage: "link")
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canSave)
-                }
-            }
-        }
-    }
-
-    private func synchronizeSub2ApiAdmin(
-        _ admin: ManageSub2ApiAdmin?,
-        gateway: ManageGateway?
-    ) {
-        guard let admin else { return }
-        if admin.configured || !admin.baseUrl.isEmpty {
-            sub2ApiBaseURL = admin.baseUrl
-        } else if !sub2ApiFormInitialized, sub2ApiBaseURL.isEmpty {
-            sub2ApiBaseURL = suggestedSub2ApiBaseURL(gateway)
-        }
-        sub2ApiFormInitialized = true
-    }
-
-    private func suggestedSub2ApiBaseURL(_ gateway: ManageGateway?) -> String {
-        gateway?.providers.first(where: { provider in
-            provider.name.localizedCaseInsensitiveContains("sub2api")
-                || provider.baseUrl.localizedCaseInsensitiveContains("sub2api")
-        })?.baseUrl ?? ""
-    }
-
-    @MainActor
-    private func saveSub2ApiAccountPool() async {
-        guard !sub2ApiSaving else { return }
-        sub2ApiSaving = true
-        defer { sub2ApiSaving = false }
-        let key = sub2ApiAdminKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let saved = await model.saveSub2ApiAdmin(
-            baseUrl: sub2ApiBaseURL,
-            adminApiKey: key.isEmpty ? nil : key
-        )
-        if saved {
-            sub2ApiAdminKey = ""
-        }
-    }
-
-    @MainActor
-    private func disconnectSub2ApiAccountPool() async {
-        guard !sub2ApiSaving else { return }
-        sub2ApiSaving = true
-        defer { sub2ApiSaving = false }
-        guard await model.disconnectSub2ApiAdmin() else { return }
-        sub2ApiAdminKey = ""
-        sub2ApiBaseURL = suggestedSub2ApiBaseURL(model.gateway)
     }
 
     private func catalogBinding(_ id: String) -> Binding<Bool> {
