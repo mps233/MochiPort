@@ -26,14 +26,14 @@ jobs:
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-        matrix:
-          include:
-            - runner: xcode-27
-              file_slug: universal
-              asset_key: macos-universal
-              sparkle_key: macos-sparkle-universal
-              manifest_name: latest-macos.json
-              intel_manifest_name: latest-macos-intel.json
+      matrix:
+        include:
+          - runner: xcode-27
+            file_slug: universal
+            asset_key: macos-universal
+            sparkle_key: macos-sparkle-universal
+            manifest_name: latest-macos.json
+            intel_manifest_name: latest-macos-intel.json
     env:
       HAS_MACOS_CODESIGN: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.KEYCHAIN_PASSWORD != '' && secrets.APPLE_CODESIGN_IDENTITY != '' && (secrets.NOTARY_KEYCHAIN_PROFILE != '' || (secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' && secrets.APPLE_API_KEY_P8 != '') || (secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '')) }}
       MACOS_FILE_SLUG: ${{ matrix.file_slug }}
