@@ -24,7 +24,7 @@ enum Theme {
         _ = service
         return (0.31, 0.79, 0.64) // Codex mint #4FC9A3
     }
-    /// 사용률 상태 색. warn/crit은 설정 임계값 주입용 (기본 70/90 — 기존 호출부 호환).
+    /// 使用率状态色。warn/crit 由设置阈值注入（默认 70/90——兼容旧调用方）。
     static func statusColor(percent: Double, warn: Double = 70, crit: Double = 90) -> Color {
         if percent >= crit { return .red }
         if percent >= warn { return .orange }
@@ -40,7 +40,7 @@ enum Theme {
 struct GaugeBar: View {
     let percent: Double
     let tint: Color
-    /// nil이면 기존처럼 즉시 표시. 값이 있으면 onAppear 시 0→값으로 슈욱 (delay초 뒤, 행 stagger용).
+    /// nil 时与以前一样立即显示；有值时 onAppear 后从 0 长到目标值（延迟 delay 秒，用于行 stagger）。
     var appearDelay: Double? = nil
     @State private var appeared = false
 

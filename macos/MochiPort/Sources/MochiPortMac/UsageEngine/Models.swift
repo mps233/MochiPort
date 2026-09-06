@@ -101,7 +101,7 @@ public struct TokenEvent: Equatable, Sendable {
     public let sessionID: String?
     /// Cumulative session usage used only as a replay discriminator.
     public let cumulativeUsage: CodexCumulativeUsage?
-    /// 이벤트가 발생한 프로젝트 (cwd lastPathComponent). nil = 미파악.
+    /// 事件发生的项目（cwd 的 lastPathComponent）。nil = 尚未识别。
     public let project: String?
     /// Session provider/source (for example `ai-gateway`, `custom`, or
     /// `sub2api`). This is a Codex configuration name, not a billing

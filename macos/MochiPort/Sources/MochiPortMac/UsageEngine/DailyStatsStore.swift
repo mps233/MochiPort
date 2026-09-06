@@ -34,12 +34,12 @@ public struct DailyStatsRow: Hashable, Sendable {
     }
 }
 
-/// SQLite 기반 일별 토큰 통계 영구 저장소.
+/// 基于 SQLite 的每日 Token 统计持久化存储。
 ///
-/// (day, service, source, model, project) 단위로 집계해 `INSERT OR REPLACE`로 저장한다.
-/// **주의: REPLACE는 누적이 아니라 대체**이므로, 호출자는 해당 일자의 전체 이벤트를
-/// 넘겨야 멱등성이 유지된다 (`UsageStore.events`가 8일 보존이므로 매번 최근 8일 전체를
-/// 넘기는 것이 안전).
+/// 以 (day, service, source, model, project) 为单位聚合，用 `INSERT OR REPLACE` 写入。
+/// **注意：REPLACE 是替换而非累加**，因此调用方必须传入该日期的
+/// 全部事件才能保持幂等（`UsageStore.events` 保留 8 天，所以每次传入最近 8 天
+/// 的全量最安全）。
 @MainActor
 public final class DailyStatsStore {
     // SQLite owns this pointer and all access is serialized on the main actor.
@@ -65,11 +65,11 @@ public final class DailyStatsStore {
     /// Old rows are retained until a complete raw-log rebuild succeeds.
     public private(set) var needsCodexRebuild = false
 
-    // SQLite가 바인딩 문자열을 자체 복사하도록 강제하는 transient destructor.
+    // 强制 SQLite 自行复制绑定字符串的 transient destructor。
     private static let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    // day 컬럼용 로컬 자연일 "yyyy-MM-dd" 포맷터. AI Token Monitor는
-    // timestamp를 현재 시스템 시간대로 변환한 뒤 날짜를 집계한다.
+    // day 列用的本地自然日 "yyyy-MM-dd" 格式化器。AI Token Monitor
+    // 是把 timestamp 转换为当前系统时区后再聚合日期的。
     private static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.calendar = Calendar(identifier: .gregorian)
@@ -79,7 +79,7 @@ public final class DailyStatsStore {
         return f
     }()
 
-    /// DB 파일을 열고(없으면 생성) 스키마를 보장한다. 실패 시 nil.
+    /// 打开 DB 文件（不存在则创建）并确保 schema。失败时返回 nil。
     public init?(path: String) {
         let dir = (path as NSString).deletingLastPathComponent
         if !dir.isEmpty {
@@ -381,16 +381,16 @@ public final class DailyStatsStore {
         var input = 0, output = 0, cacheRead = 0, cacheCreate = 0, usageTotal = 0
     }
 
-    /// 이벤트를 (day, service, source, model, project)로 집계해 `INSERT OR REPLACE`한다.
-    /// project가 nil이면 빈 문자열로 저장한다.
+    /// 将事件按 (day, service, source, model, project) 聚合后 `INSERT OR REPLACE`。
+    /// project 为 nil 时以空字符串存储。
     public func upsert(events: [TokenEvent], calendar: Calendar = .current) {
         // Until the one-time raw-log rebuild completes, writing the bounded
         // event tail beside legacy rows would double-count the same day.
         guard !events.isEmpty, !needsCodexRebuild else { return }
         var grouped: [Key: Agg] = [:]
-        // DateFormatter.string이 이벤트당 ~수 µs라 수만 이벤트 × 60초 persist마다
-        // 메인 스레드를 수십 ms 막는다 — 시(epoch hour) 단위로 캐시한다
-        // (로컬 날 경계는 시 경계에 정렬되므로 같은 hour는 같은 day 문자열).
+        // DateFormatter.string 每次事件约需数 µs，数万事件 × 每 60 秒 persist 会
+        // 把主线程阻塞数十毫秒——按小时（epoch hour）缓存。
+        //（本地日边界与小时边界对齐，因此同一 hour 得到相同的 day 字符串）。
         var dayCache: [Int: String] = [:]
         for e in events {
             let hour = Int(e.timestamp.timeIntervalSince1970.rounded(.down)) / 3600
@@ -522,16 +522,16 @@ public final class DailyStatsStore {
         return URL(fileURLWithPath: path + ".pre-reported-total-v4.bak")
     }
 
-    // 지정 days 범위의 시작일(로컬 자연일 문자열) 계산.
+    // 计算指定 days 范围的起始日（本地自然日字符串）。
     private func cutoffDayString(days: Int, now: Date, calendar: Calendar) -> String {
         let start = calendar.date(byAdding: .day, value: -(days - 1), to: calendar.startOfDay(for: now)) ?? now
         return Self.dayFormatter.string(from: start)
     }
 
-    /// 일별×서비스별 Codex reported-total 합계. 최근 `days`일.
-    /// cache_read/cache_create는 스키마에 보존되며 비용 계산에는 계속 사용된다.
-    /// 반환 순서는 결정적: (day 오름차순, service는 ServiceID.allCases 고정 순).
-    /// 차트 스택/시리즈가 렌더마다 뒤바뀌지 않도록 보장한다.
+    /// 每日×每服务的 Codex reported-total 合计。最近 `days` 天。
+    /// cache_read/cache_create 保留在 schema 中并继续用于成本计算。
+    /// 返回顺序是确定的：（day 升序，service 按 ServiceID.allCases 固定顺序）。
+    /// 保证图表的堆叠/系列在每次渲染中不会被打乱。
     public func dailyTotalsByService(days: Int, now: Date, calendar: Calendar = .current,
                                      source: String? = nil) -> [(day: Date, service: ServiceID, tokens: Int)] {
         let cutoff = cutoffDayString(days: days, now: now, calendar: calendar)
@@ -564,8 +564,8 @@ public final class DailyStatsStore {
             let tokens = Int(sqlite3_column_int64(stmt, 2))
             result.append((day: day, service: service, tokens: tokens))
         }
-        // SQL은 (day, service) 그룹의 service 순서를 보장하지 않으므로
-        // (day 오름차순, service는 allCases 인덱스) 고정 순으로 정렬한다.
+        // SQL 不保证 (day, service) 组内的 service 顺序，因此
+        // 按（day 升序，service 按 allCases 索引）的固定顺序排序。
         let order = Dictionary(uniqueKeysWithValues: ServiceID.allCases.enumerated().map { ($1, $0) })
         return result.sorted { a, b in
             if a.day != b.day { return a.day < b.day }
@@ -573,9 +573,9 @@ public final class DailyStatsStore {
         }
     }
 
-    /// 일별 토큰 합계(서비스 합산). 최근 `days`일, day 오름차순.
-    /// `services`가 주어지면 해당 서비스만 합산(잔디 히트맵의 enabled 필터용). nil이면 전체.
-    /// 토큰이 0인 날은 행이 없으므로 생략된다(호출자가 빈 셀로 처리).
+    /// 每日 Token 合计（服务合计）。最近 `days` 天，day 升序。
+    /// 给定 `services` 时只合计这些服务（用于分布图的 enabled 过滤）。nil 则全部。
+    /// Token 为 0 的天没有行，会被省略（调用方按空格子处理）。
     public func dailyTotals(days: Int, now: Date, calendar: Calendar = .current,
                             services: Set<ServiceID>? = nil,
                             source: String? = nil) -> [(day: Date, tokens: Int)] {
@@ -589,7 +589,7 @@ public final class DailyStatsStore {
     }
 
 
-    /// 최근 `days`일의 추정 비용 합계(USD). model 컬럼 기준으로 CostEstimator 단가를 적용한다.
+    /// 最近 `days` 天的估算成本合计（USD）。按 model 列应用 CostEstimator 单价。
     public func totalCost(days: Int, now: Date, calendar: Calendar = .current,
                           source: String? = nil) -> Double {
         let cutoff = cutoffDayString(days: days, now: now, calendar: calendar)
@@ -615,7 +615,7 @@ public final class DailyStatsStore {
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard let modelC = sqlite3_column_text(stmt, 0) else { continue }
             let model = String(cString: modelC)
-            // 임시 이벤트로 단가 계산 위임 (service/timestamp/project는 비용에 무관).
+            // 用临时事件委托单价计算（service/timestamp/project 与成本无关）。
             let synth = TokenEvent(service: .codex, timestamp: now, model: model,
                                    inputTokens: Int(sqlite3_column_int64(stmt, 1)),
                                    outputTokens: Int(sqlite3_column_int64(stmt, 2)),
@@ -626,9 +626,9 @@ public final class DailyStatsStore {
         return total
     }
 
-    /// 명시적 일 범위 `[from, to)`(로컬 자연일 기준, from 포함·to 제외)의 추정 비용 합계(USD).
-    /// `totalCost(days:)`가 "최근 N일"만 지원해 주간 리포트의 지난주 [D-7, D-1] 비용을
-    /// 정확히 못 구하던 문제를 해결한다(전전주 비용이 섞였음).
+    /// 显式日期区间 `[from, to)`（本地自然日，含 from、不含 to）的估算成本合计（USD）。
+    /// 解决 `totalCost(days:)` 只支持"最近 N 天"、无法精确计算周报的上周 [D-7, D-1]
+    /// 成本的问题（此前会混入上上周的成本）。
     public func totalCost(from: Date, to: Date, calendar: Calendar = .current,
                           source: String? = nil) -> Double {
         let fromStr = Self.dayFormatter.string(from: from)
@@ -666,11 +666,11 @@ public final class DailyStatsStore {
         return total
     }
 
-    // MARK: - 신기록 / 스트릭 (재미 로직)
+    // MARK: - 破纪录 / 连续使用（趣味逻辑）
 
-    /// 일별 reported-total 합의 **최댓값**을 반환한다.
-    /// `excludingDay`에 해당하는 로컬 날짜는 제외.
-    /// 다른 날이 하나도 없으면 nil (신기록 비교 기준이 없음).
+    /// 返回每日 reported-total 合计的**最大值**。
+    /// 排除 `excludingDay` 对应的本地日期。
+    /// 若其他天一个都没有则返回 nil（没有破纪录的比较基准）。
     public func maxDailyTokens(excludingDay: Date, calendar: Calendar = .current,
                                source: String? = nil) -> Int? {
         let excludeStr = Self.dayFormatter.string(from: excludingDay)
@@ -695,11 +695,11 @@ public final class DailyStatsStore {
         return Int(sqlite3_column_int64(stmt, 1))
     }
 
-    /// `endingOn`(오늘)부터 거꾸로 **연속으로 요청 토큰 > 0**인 일수.
-    /// 오늘 토큰이 0이면 streak 0 (오늘 포함 기준). 중간 공백을 만나면 중단.
+    /// 从 `endingOn`（今天）往回**连续请求 Token > 0** 的天数。
+    /// 今天 Token 为 0 则 streak 为 0（含今天口径）。遇到中间空档即中断。
     public func streakDays(endingOn: Date, calendar: Calendar = .current,
                            source: String? = nil) -> Int {
-        // 토큰 > 0 인 날들의 day 문자열 집합.
+        // Token > 0 的天的 day 字符串集合。
         let sql = """
         SELECT day FROM daily_stats
         WHERE service = 'codex'
@@ -734,11 +734,11 @@ public final class DailyStatsStore {
         return count
     }
 
-    // MARK: - percent 스냅샷 (주간 일단위 소진 추정용)
+    // MARK: - percent 快照（用于周粒度耗尽估算）
 
-    /// (day, service, kind)에 사용률(%) 스냅샷을 `INSERT OR REPLACE`로 기록한다.
-    /// REPLACE이므로 같은 날 여러 번 호출하면 **마지막 관측값**만 남는다.
-    /// `day`는 로컬 "yyyy-MM-dd"로 정규화된다 (daily_stats와 동일 기준).
+    /// 将 (day, service, kind) 的使用率（%）快照用 `INSERT OR REPLACE` 记录。
+    /// 因为是 REPLACE，同一天多次调用只保留**最后一次观测值**。
+    /// `day` 会被规范化为本地 "yyyy-MM-dd"（与 daily_stats 相同口径）。
     public func recordPercentSnapshot(service: ServiceID, kind: LimitWindow.Kind, percent: Double, day: Date) {
         let dayStr = Self.dayFormatter.string(from: day)
         let sql = """
@@ -755,8 +755,8 @@ public final class DailyStatsStore {
         sqlite3_step(stmt)
     }
 
-    /// (service, kind)의 최근 `days`일 percent 스냅샷을 day 오름차순으로 반환한다.
-    /// day는 로컬 자정 Date로 복원된다.
+    /// 返回 (service, kind) 最近 `days` 天的 percent 快照，day 升序。
+    /// day 会还原为本地午夜的 Date。
     public func percentSnapshots(service: ServiceID, kind: LimitWindow.Kind, days: Int,
                                  now: Date = Date(), calendar: Calendar = .current) -> [(day: Date, percent: Double)] {
         let cutoff = cutoffDayString(days: days, now: now, calendar: calendar)

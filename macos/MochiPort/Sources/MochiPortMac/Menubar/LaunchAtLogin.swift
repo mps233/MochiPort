@@ -1,11 +1,11 @@
 import Foundation
 import ServiceManagement
 
-/// 로그인 시 자동 시작 (SMAppService.mainApp).
-/// swift run 환경에서는 .app 번들이 아니므로 no-op (등록 시도가 무의미/오류).
+/// 登录时自动启动（SMAppService.mainApp）。
+/// swift run 环境下不是 .app 包，因此为 no-op（注册无意义且会报错）。
 enum LaunchAtLogin {
-    /// .app 번들로 실행 중일 때만 동작. (swift run에서도 bundleIdentifier가 nil이 아닐 수 있어
-    /// 확실한 가드로 번들 URL의 확장자가 .app인지 확인한다.)
+    /// 仅在以 .app 包运行时生效。（swift run 下 bundleIdentifier 也可能非 nil，
+    /// 所以用可靠的守卫：检查包 URL 的扩展名是否为 .app。）
     static var isAvailable: Bool {
         Bundle.main.bundleURL.pathExtension == "app"
     }

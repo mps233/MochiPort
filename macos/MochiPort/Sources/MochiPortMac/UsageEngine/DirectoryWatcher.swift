@@ -1,7 +1,7 @@
 import Foundation
 import CoreServices
 
-/// FSEvents로 디렉토리들을 감시. 변경 시 콜백 (메인 큐, 1초 latency 코얼레싱).
+/// 用 FSEvents 监视多个目录。变更时回调（主队列，1 秒延迟合并）。
 public final class DirectoryWatcher: @unchecked Sendable {
     private var stream: FSEventStreamRef?
     private let callback: @MainActor @Sendable () -> Void

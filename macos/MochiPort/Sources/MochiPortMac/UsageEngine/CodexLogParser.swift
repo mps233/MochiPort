@@ -2,7 +2,7 @@ import Foundation
 
 public struct CodexParsed: Equatable, Sendable {
     public let timestamp: Date
-    public let event: TokenEvent?       // info가 null이면 nil
+    public let event: TokenEvent?       // info 为 null 时是 nil
     public let limits: [LimitWindow]    // primary→session5h, secondary→weekly
 }
 
@@ -23,12 +23,12 @@ public struct CodexSessionMeta: Equatable, Sendable {
 }
 
 public enum CodexLogParser {
-    /// 홈 디렉토리 경로 주입 (테스트용). nil이면 `NSHomeDirectory()`.
+    /// 注入主目录路径（测试用）。nil 时使用 `NSHomeDirectory()`。
     nonisolated(unsafe) public static var homeDirectoryOverride: String?
 
-    /// session_meta 라인에서 cwd → 프로젝트명을 반환.
-    /// cwd가 홈 디렉토리와 정확히 일치하면 "~", 아니면 lastPathComponent.
-    /// type != "session_meta" 이거나 파싱 실패 시 nil.
+    /// 从 session_meta 行的 cwd 返回项目名。
+    /// cwd 与主目录完全一致时返回 "~"，否则返回 lastPathComponent。
+    /// type != "session_meta" 或解析失败时返回 nil。
     public static func parseSessionMeta(line: String) -> String? {
         parseSessionMetaDetails(line: line)?.project
     }
@@ -97,7 +97,7 @@ public enum CodexLogParser {
             func window(_ key: String, kind: LimitWindow.Kind) -> LimitWindow? {
                 guard let w = rateLimits[key] as? [String: Any],
                       let used = (w["used_percent"] as? NSNumber)?.doubleValue else { return nil }
-                // 최신 Codex CLI는 절대 epoch 초 `resets_at`, 구버전은 상대 `resets_in_seconds`.
+                // 最新 Codex CLI 用绝对 epoch 秒 `resets_at`，旧版用相对 `resets_in_seconds`。
                 let resets: Date?
                 if let epoch = w["resets_at"] as? NSNumber {
                     resets = Date(timeIntervalSince1970: epoch.doubleValue)

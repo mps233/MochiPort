@@ -1,14 +1,14 @@
 import Foundation
 
-/// 한도 소진 예측 결과.
+/// 额度耗尽预测结果。
 public struct Depletion: Equatable, Sendable {
-    /// 어느 윈도우(5h/주간/일일)에 대한 예측인지.
+    /// 预测针对哪个窗口（5h/周/日）。
     public let kind: LimitWindow.Kind
-    /// 현재 추세로 100%에 도달할 추정 시각.
+    /// 按当前趋势达到 100% 的预计时刻。
     public let etaTo100: Date
-    /// 리셋보다 먼저 소진될지 여부 (resetsAt이 있고 etaTo100 < resetsAt).
+    /// 是否会在重置前耗尽（resetsAt 存在且 etaTo100 < resetsAt）。
     public let willDepleteBeforeReset: Bool
-    /// 해당 윈도우의 리셋 시각 (비율 기반 발화 판정에 사용). 모르면 nil.
+    /// 该窗口的重置时刻（用于基于比例的触发判断）。未知为 nil。
     public let resetsAt: Date?
     public init(kind: LimitWindow.Kind, etaTo100: Date, willDepleteBeforeReset: Bool, resetsAt: Date? = nil) {
         self.kind = kind
@@ -18,18 +18,18 @@ public struct Depletion: Equatable, Sendable {
     }
 }
 
-/// 사용률(%) 시계열에서 선형 추세로 소진 시점을 추정하는 순수 함수 묶음.
+/// 从使用率（%）时间序列按线性趋势估计耗尽时点的纯函数集合。
 public enum DepletionEstimator {
-    /// 최소제곱 선형 회귀로 %/min 기울기를 구해 100% 도달 시각을 추정한다.
+    /// 用最小二乘线性回归求 %/min 斜率，估计到达 100% 的时刻。
     ///
-    /// 추정 조건 (하나라도 불충족 시 nil):
-    /// - 샘플 ≥ 3
-    /// - 시간 범위 ≥ 5분
-    /// - 기울기 > 0.05 %/min
+    /// 估计条件（任一不满足返回 nil）：
+    /// - 样本 ≥ 3
+    /// - 时间跨度 ≥ 5 分钟
+    /// - 斜率 > 0.05 %/min
     ///
-    /// `etaTo100 = now + (100 - 최신%) / slope` 분.
+    /// `etaTo100 = now + (100 - 最新%) / slope` 分钟。
     /// `willDepleteBeforeReset = resetsAt != nil && etaTo100 < resetsAt`.
-    /// `kind`는 결과 Depletion에 그대로 실린다 (기본 .session5h — 분 단위 기울기 추정의 주 용도).
+    /// `kind` 原样写入结果 Depletion（默认 .session5h——分钟级斜率估计的主要用途）。
     public static func estimate(samples: [(Date, Double)], resetsAt: Date?, now: Date,
                                 kind: LimitWindow.Kind = .session5h) -> Depletion? {
         guard samples.count >= 3 else { return nil }
@@ -38,7 +38,7 @@ public enum DepletionEstimator {
         let rangeMinutes = last.0.timeIntervalSince(first.0) / 60
         guard rangeMinutes >= 5 else { return nil }
 
-        // x = 분(첫 샘플 기준), y = percent
+        // x = 分钟（以首个样本为基准），y = percent
         let xs = sorted.map { $0.0.timeIntervalSince(first.0) / 60 }
         let ys = sorted.map { $0.1 }
         let n = Double(sorted.count)
@@ -59,13 +59,13 @@ public enum DepletionEstimator {
         return Depletion(kind: kind, etaTo100: eta, willDepleteBeforeReset: willDeplete, resetsAt: resetsAt)
     }
 
-    /// 일 단위 소모율(%/day) 추정 — 주간 윈도우용.
+    /// 日粒度消耗率（%/day）估计——用于周窗口。
     ///
-    /// 인접 스냅샷 페어의 delta를 실제 일수(dayDiff)로 나눠 %/day를 구한다.
-    /// 이렇게 하면 스냅샷 사이 간격이 1일·2일·5일처럼 불균등해도 왜곡 없이 정규화된다.
-    /// 리셋을 걸쳐 음수가 되는 페어(delta ≤ 0)나 dayDiff < 0.5인 페어는 제외.
-    /// 양수 비율 페어가 1개 미만이면 nil.
-    /// `snapshots`는 (day, percent) 쌍 — 호출자가 일 오름차순으로 넘기지 않아도 내부 정렬.
+    /// 相邻快照对的 delta 除以实际天数（dayDiff）得到 %/day。
+    /// 这样即使快照间隔是 1 天、2 天、5 天不均匀，也能无失真地归一化。
+    /// 跨越重置出现负数的对（delta ≤ 0）和 dayDiff < 0.5 的对会被排除。
+    /// 正比率的对不足 1 个时返回 nil。
+    /// `snapshots` 是 (day, percent) 对——调用方不必按 day 升序传入，内部会排序。
     public static func weeklyDailyRate(snapshots: [(day: Date, percent: Double)]) -> Double? {
         guard snapshots.count >= 2 else { return nil }
         let sorted = snapshots.sorted { $0.day < $1.day }
@@ -80,10 +80,10 @@ public enum DepletionEstimator {
         return positives.reduce(0, +) / Double(positives.count)
     }
 
-    /// 주간 한도의 일 단위 소진 예측.
+    /// 周额度的日粒度耗尽预测。
     ///
-    /// `daysTo100 = (100 - current) / rate` → `etaTo100 = now + daysTo100일`.
-    /// rate가 미미하면(≤ 0.5%/일) 노이즈로 보고 nil. current가 이미 100% 이상이어도 nil.
+    /// `daysTo100 = (100 - current) / rate` → `etaTo100 = now + daysTo100 天`。
+    /// rate 很小（≤ 0.5%/日）时视为噪声返回 nil。current 已达 100% 也返回 nil。
     /// `willDepleteBeforeReset = resetsAt != nil && etaTo100 < resetsAt`.
     public static func weeklyDepletion(current: Double, rate: Double, resetsAt: Date?, now: Date) -> Depletion? {
         guard rate > 0.5 else { return nil }

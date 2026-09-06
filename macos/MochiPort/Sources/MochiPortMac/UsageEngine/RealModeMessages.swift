@@ -1,12 +1,12 @@
 import Foundation
 
-/// REAL Mode 멘트 풀 — AI를 의인화한 엄살·이별·츤데레 톤의 제목 후보 모음.
+/// REAL 模式文案池——把 AI 拟人化（撒娇·告别·傲娇）的标题候选集合。
 ///
-/// 적용 규칙: REAL Mode가 켜지면 이벤트 **제목(title)만** 이 풀에서 무작위로 골라 교체하고,
-/// 부제(subtitle)의 정보성 문구(%, 남은 시간, 토큰 수 등)는 그대로 유지한다 — 재미와 정보를 둘 다 살림.
-/// 풀은 항상 1개 이상이라 `randomElement()`는 nil이 아니지만, 호출자는 안전하게 기본값으로 폴백한다.
+/// 应用规则：REAL 模式开启时，事件**仅标题（title）**从这个池中随机挑选替换，
+/// 副标题（subtitle）的信息性文案（%、剩余时间、Token 数等）保持不变——趣味与信息兼得。
+/// 池保证至少 1 条，`randomElement()` 不会为 nil，但调用方仍应安全地回退到默认值。
 public enum RealModeMessages {
-    /// 이벤트 종류별 제목 후보. associated value(서비스 등)는 매칭에 영향 없음.
+    /// 按事件类型的标题候选。关联值（服务等）不影响匹配。
     public static func pool(for kind: HUDEvent.Kind) -> [String] {
         switch kind {
         case .depletionRisk:
@@ -74,33 +74,33 @@ public enum RealModeMessages {
         }
     }
 
-    /// REAL Mode가 켜져 있으면 풀에서 무작위 제목을, 아니면 기본 제목을 돌려준다.
+    /// REAL 模式开启时从池中随机取标题，否则返回默认标题。
     public static func title(for kind: HUDEvent.Kind, default fallback: String, realMode: Bool) -> String {
         guard realMode else { return fallback }
         return pool(for: kind).randomElement() ?? fallback
     }
 
-    /// 커스텀 메시지·REAL Mode·기본 제목을 통합 결정하는 **단일 진입점**.
+    /// 整合自定义消息、REAL 模式与默认标题的**单一入口**。
     ///
-    /// 우선순위 (분기를 한 곳에 모아 정합성 유지):
-    /// 1. 커스텀 메시지(비공백)가 있으면 그것만 무작위 로테이션
-    /// 2. 없으면 REAL이면 감성 풀, 아니면 기본 제목
-    /// 후보에서 무작위 선택 → 플레이스홀더 치환 → 공백 정리. 결과가 비면 기본 제목으로 폴백
-    /// (빈 제목 발화 절대 금지). 부제 정보는 호출자가 유지하므로 여기선 제목만 다룬다.
+    /// 优先级（分支集中在一处以保持一致性）：
+    /// 1. 有非空自定义消息时只在其中随机轮换
+    /// 2. 没有时 REAL 用情感文案池，否则用默认标题
+    /// 从候选中随机选择 → 占位符替换 → 清理空白。结果为空时回退默认标题
+    /// （绝不发出空标题）。副标题信息由调用方维护，这里只处理标题。
     public static func resolve(kind: HUDEvent.Kind, defaultTitle: String, realMode: Bool,
                                custom: CustomMessageConfig?, context: MessageContext) -> String {
-        // 공백뿐인 줄은 무시 (편집 중 빈 줄·빈 배열 → 자동으로 기본 풀 폴백).
+        // 忽略只有空白的行（编辑中的空行·空数组 → 自动回退默认池）。
         let customMsgs = custom?.messages.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? []
         let candidates = !customMsgs.isEmpty ? customMsgs : (realMode ? pool(for: kind) : [defaultTitle])
         let raw = candidates.randomElement() ?? defaultTitle
         let result = clean(substitute(raw, context: context))
         if !result.isEmpty { return result }
-        // 치환 후 공백만 남은 경우 등 → 기본 제목(역시 치환·정리)으로 안전 폴백.
+        // 替换后只剩空白等情况 → 安全回退到默认标题（同样替换·清理）。
         let fallback = clean(substitute(defaultTitle, context: context))
         return fallback.isEmpty ? defaultTitle : fallback
     }
 
-    /// 플레이스홀더를 컨텍스트 값으로 치환. 값이 없는 변수는 빈 문자열로 제거된다.
+    /// 用上下文值替换占位符。没有值的变量会被移除为空字符串。
     static func substitute(_ template: String, context: MessageContext) -> String {
         var s = template
         s = s.replacingOccurrences(of: "{AGENT}", with: context.agent ?? "")
@@ -110,7 +110,7 @@ public enum RealModeMessages {
         return s
     }
 
-    /// 빈 변수 치환으로 생긴 연속 공백을 1개로 줄이고 양끝을 다듬는다.
+    /// 把变量替换产生的连续空格压缩为一个并修剪首尾。
     static func clean(_ s: String) -> String {
         let collapsed = s.split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
         return collapsed.trimmingCharacters(in: .whitespaces)
@@ -126,20 +126,20 @@ public enum RealModeMessages {
     }
 }
 
-/// 알림 제목 치환에 쓰는 컨텍스트. 발화 지점에서 얻을 수 있는 값만 채우고 나머진 nil(자동 생략).
+/// 用于通知标题替换的上下文。只填触发点能拿到的值，其余为 nil（自动省略）。
 public struct MessageContext: Sendable, Equatable {
-    public var agent: String?    // {AGENT} — 서비스명
-    public var usage: Double?    // {USAGE} — 사용률 0~100 (정수%로 치환)
-    public var tokens: Int?      // {TOKENS} — 토큰 수 (M/K 포맷)
-    public var reset: String?    // {RESET} — 리셋까지 남은 시간 텍스트
+    public var agent: String?    // {AGENT}——服务名
+    public var usage: Double?    // {USAGE}——使用率 0~100（按整数% 替换）
+    public var tokens: Int?      // {TOKENS}——Token 数（M/K 格式）
+    public var reset: String?    // {RESET}——距重置剩余时间的文本
     public init(agent: String? = nil, usage: Double? = nil, tokens: Int? = nil, reset: String? = nil) {
         self.agent = agent; self.usage = usage; self.tokens = tokens; self.reset = reset
     }
     public static let empty = MessageContext()
 }
 
-/// 이벤트별 사용자 커스텀 메시지 설정. 단일 JSON 키로 저장(키 흩뿌리지 않음).
-/// 커스텀 메시지가 있으면 그 안에서만 무작위 로테이션한다 (기존 멘트와 섞지 않음).
+/// 每种事件的自定义消息设置。以单个 JSON 键存储（不散落多个键）。
+/// 有自定义消息时只在其内部随机轮换（不与内置文案混合）。
 public struct CustomMessageConfig: Codable, Equatable, Sendable {
     public var messages: [String]
     public init(messages: [String] = []) {
@@ -147,7 +147,7 @@ public struct CustomMessageConfig: Codable, Equatable, Sendable {
     }
 }
 
-/// 커스텀 편집 UI·저장 키에 쓰는 평면 이벤트 목록(HUDEvent.Kind는 associated value가 있어 순회 불가).
+/// 自定义编辑 UI 与存储键使用的扁平事件列表（HUDEvent.Kind 带关联值，无法直接遍历）。
 public enum CustomizableEvent: String, CaseIterable, Identifiable, Sendable {
     case limitThreshold, depletionRisk, windowReset, burnSpike
     case comeback, milestone, record, update
@@ -171,8 +171,8 @@ public enum CustomizableEvent: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    /// 편집기 seed·미리보기에 쓰는 기본 제목. 변수를 활용하는 이벤트는 플레이스홀더를 그대로 노출해
-    /// (예: "{AGENT} 한도 임박") 사용자가 변수 사용법을 보고 수정하기 좋게 한다 — 실제 발화 시 치환됨.
+    /// 编辑器种子与预览用的默认标题。使用变量的事件直接暴露占位符
+    /// （如 "{AGENT} 额度临近"），方便用户理解变量用法——实际触发时会被替换。
     public var sampleDefaultTitle: String {
         switch self {
         case .limitThreshold: return "{AGENT} 额度接近上限（{USAGE}）"
@@ -191,7 +191,7 @@ public enum CustomizableEvent: String, CaseIterable, Identifiable, Sendable {
 }
 
 public extension HUDEvent.Kind {
-    /// 커스텀 메시지 조회·저장에 쓰는 안정적 키 (CustomizableEvent.rawValue와 일치).
+    /// 查询·保存自定义消息用的稳定键（与 CustomizableEvent.rawValue 一致）。
     var customKey: String {
         switch self {
         case .limitThreshold: return "limitThreshold"

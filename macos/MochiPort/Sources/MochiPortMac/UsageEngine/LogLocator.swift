@@ -19,7 +19,7 @@ public enum LogLocator {
         return result.sorted { $0.path < $1.path }
     }
 
-    /// dir 아래를 재귀 탐색해 suffix로 끝나고 최근 N일 내 수정된 파일을 반환.
+    /// 递归搜索 dir 下以 suffix 结尾且最近 N 天内修改过的文件。
     public static func recentFiles(under dir: URL, suffix: String,
                                    modifiedWithinDays: Int = 8) -> [URL] {
         let cutoff = Date().addingTimeInterval(-Double(modifiedWithinDays) * 24 * 3600)

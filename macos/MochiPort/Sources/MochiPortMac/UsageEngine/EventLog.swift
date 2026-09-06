@@ -22,7 +22,7 @@ public final class EventLog {
 
     public init() {}
 
-    /// 이벤트를 기록 앞에 추가한다. cap(30) 초과 시 오래된 것을 제거한다.
+    /// 将事件插入记录列表头部。超过 cap（30）时移除最旧的。
     public func append(_ event: HUDEvent, at date: Date = Date()) {
         records.insert(Record(event: event, date: date), at: 0)
         if records.count > Self.cap {

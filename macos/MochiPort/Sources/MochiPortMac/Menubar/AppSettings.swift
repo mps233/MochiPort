@@ -1,16 +1,16 @@
 import Foundation
 import Observation
 
-/// 메뉴바 표시 모드. 자동 로테이션 없음 — 고정 표시 (깜빡임 방지, 사용자 결정).
-/// 구버전 todayAndBurn/serviceRotation 저장값은 raw 불일치로 기본값(todayTokens) 폴백.
+/// 菜单栏显示模式。无自动轮换——固定显示（避免闪烁，由用户决定）。
+/// 旧版 todayAndBurn/serviceRotation 存储值因 raw 不匹配会回退到默认值（todayTokens）。
 enum MenubarMode: String, CaseIterable, Identifiable {
-    /// 오늘 누적 토큰 "✦ 612M" (기본).
+    /// 今日累计 Token "✦ 612M"（默认）。
     case todayTokens
-    /// 소모 속도 "✦ 38K/m".
+    /// 消耗速度 "✦ 38K/m"。
     case burnRate
-    /// 켜진 에이전트 중 최고 사용률 "✦ N%".
+    /// 已开启代理中的最高使用率 "✦ N%"。
     case maxPercent
-    /// "✦"만 표시 (위험도 색).
+    /// 只显示 "✦"（按风险着色）。
     case iconOnly
 
     var id: String { rawValue }
@@ -24,13 +24,13 @@ enum MenubarMode: String, CaseIterable, Identifiable {
     }
 }
 
-/// 메뉴바에 동시 표시할 수 있는 항목 (다중 선택). 고정 순서로 렌더된다.
+/// 可同时在菜单栏显示的条目（多选）。按固定顺序渲染。
 enum MenubarItem: String, CaseIterable, Identifiable {
-    // 선언 순 = 메뉴바 렌더 순 = 설정 옵션 순.
-    case usagePercent   // 사용률
-    case resetCountdown // 리셋까지 남은 시간 (로테이션 서비스) "2h 15m"
-    case todayTokens    // 오늘 누적 토큰 "612M"
-    case burnRate       // 소모 속도 "38K/m"
+    // 声明顺序 = 菜单栏渲染顺序 = 设置选项顺序。
+    case usagePercent   // 使用率
+    case resetCountdown // 距重置剩余时间（轮换服务）"2h 15m"
+    case todayTokens    // 今日累计 Token "612M"
+    case burnRate       // 消耗速度 "38K/m"
 
     var id: String { rawValue }
     var label: String {
@@ -42,7 +42,7 @@ enum MenubarItem: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 주어진 집합을 allCases 고정 순으로 정렬한 배열 (렌더 순서).
+    /// 将给定集合按 allCases 固定顺序排序的数组（渲染顺序）。
     static func ordered(_ items: Set<MenubarItem>) -> [MenubarItem] {
         allCases.filter { items.contains($0) }
     }
@@ -50,7 +50,7 @@ enum MenubarItem: String, CaseIterable, Identifiable {
 
 /// 用户设置。UserDefaults 持久化，键名空间 `mochiport.*`；
 /// 旧版 `aiglass.*` 键在首次读取前由 `migrateLegacyKeys()` 一次性搬迁。
-/// 단위 테스트는 코어가 아니므로 생략(수동 검증).
+/// 非核心逻辑，省略单元测试（人工验证）。
 @MainActor
 @Observable
 final class AppSettings {
@@ -107,43 +107,43 @@ final class AppSettings {
     var critThreshold: Double {
         didSet { defaults.set(critThreshold, forKey: Key.critThreshold) }
     }
-    /// 시스템 알림센터(macOS 배너)로도 보낼지. 기본 off.
+    /// 是否同时发送到系统通知中心（macOS 横幅）。默认关。
     var notificationsEnabled: Bool {
         didSet { defaults.set(notificationsEnabled, forKey: Key.notificationsEnabled) }
     }
-    /// 사용량 알림 — 한도 임박(70/90% 교차). 기본 on.
+    /// 用量通知——接近上限（跨过 70/90%）。默认开。
     var notifyLimitThreshold: Bool {
         didSet { defaults.set(notifyLimitThreshold, forKey: Key.notifyLimitThreshold) }
     }
-    /// 사용량 알림 — 소진 임박(리셋 전 소진 예측). 기본 on.
+    /// 用量通知——即将耗尽（重置前耗尽预测）。默认开。
     var notifyDepletion: Bool {
         didSet { defaults.set(notifyDepletion, forKey: Key.notifyDepletion) }
     }
-    /// 사용량 알림 — 새 윈도우 시작(한도 리셋 감지). 기본 on.
+    /// 用量通知——新窗口开始（检测到额度重置）。默认开。
     var notifyWindowReset: Bool {
         didSet { defaults.set(notifyWindowReset, forKey: Key.notifyWindowReset) }
     }
-    /// 사용량 알림 — 토큰 사용량 급증(평소의 N배). 기본 on.
+    /// 用量通知——Token 消耗骤增（平时 N 倍）。默认开。
     var notifyBurnSpike: Bool {
         didSet { defaults.set(notifyBurnSpike, forKey: Key.notifyBurnSpike) }
     }
-    /// 활동 알림 — 컴백(공백 후 재개 인사). 기본 on.
+    /// 活动通知——回归（空闲后重新开始时的问候）。默认开。
     var notifyComeback: Bool {
         didSet { defaults.set(notifyComeback, forKey: Key.notifyComeback) }
     }
-    /// 활동 알림 — 시간대별 브리핑(아침/점심/저녁 요약). 기본 on.
+    /// 活动通知——时段简报（早/午/晚摘要）。默认开。
     var notifyBriefing: Bool {
         didSet { defaults.set(notifyBriefing, forKey: Key.notifyBriefing) }
     }
-    /// 활동 알림 — 새 앱 버전 출시. 기본 on.
+    /// 活动通知——新版本发布。默认开。
     var notifyUpdate: Bool {
         didSet { defaults.set(notifyUpdate, forKey: Key.notifyUpdate) }
     }
-    /// REAL Mode — 알림 제목을 AI 의인화 멘트(엄살·이별·츤데레)로 교체. 기본 off.
+    /// REAL 模式——通知标题替换为 AI 拟人化文案（撒娇·告别·傲娇）。默认关。
     var realMode: Bool {
         didSet { defaults.set(realMode, forKey: Key.realMode) }
     }
-    /// 이벤트별 사용자 커스텀 메시지 (customKey → config). 단일 JSON으로 직렬화 저장.
+    /// 每种事件的自定义消息（customKey → config），序列化为单个 JSON 存储。
     var customMessages: [String: CustomMessageConfig] {
         didSet {
             if let data = try? JSONEncoder().encode(customMessages) {
@@ -151,50 +151,50 @@ final class AppSettings {
             }
         }
     }
-    /// SMAppService와 동기화 (배선은 LaunchAtLogin에서).
+    /// 与 SMAppService 同步（接线在 LaunchAtLogin 中）。
     var launchAtLogin: Bool {
         didSet { defaults.set(launchAtLogin, forKey: Key.launchAtLogin) }
     }
-    /// 메뉴바 표시 모드 (MenubarMode rawValue). 기본 todayTokens.
-    /// (레거시 — menubarItems로 마이그레이션됨. 신규 코드는 menubarItems 사용.)
+    /// 菜单栏显示模式（MenubarMode rawValue）。默认 todayTokens。
+    /// （旧版——已迁移到 menubarItems，新代码请使用 menubarItems。）
     var menubarMode: MenubarMode {
         didSet { defaults.set(menubarMode.rawValue, forKey: Key.menubarMode) }
     }
-    /// 메뉴바에 동시 표시할 항목 집합 (다중). 빈 집합이면 ✦ 아이콘만. 기본 [.todayTokens].
+    /// 同时在菜单栏显示的条目集合（多选）。空集合时只显示 ✦ 图标。默认 [.todayTokens]。
     var menubarItems: Set<MenubarItem> {
         didSet { defaults.set(menubarItems.map(\.rawValue).sorted(), forKey: Key.menubarItems) }
     }
 
-    /// 구 단일 모드 → 신 항목 집합 1:1 변환.
+    /// 旧单一模式 → 新条目集合的一对一转换。
     static func migratedItems(from mode: MenubarMode) -> Set<MenubarItem> {
         switch mode {
         case .todayTokens: return [.todayTokens]
         case .burnRate:    return [.burnRate]
-        case .maxPercent:  return [.usagePercent]  // 최고%(고정) → 사용률(로테이션)으로 대체
-        case .iconOnly:    return []        // 빈 집합 = ✦ fallback
+        case .maxPercent:  return [.usagePercent]  // 最高%（固定）→ 用轮换的使用率替代
+        case .iconOnly:    return []        // 空集合 = 回退到 ✦
         }
     }
-    /// 재미 — 마일스톤 알림. 기본 on.
+    /// 趣味——里程碑通知。默认开。
     var funMilestone: Bool {
         didSet { defaults.set(funMilestone, forKey: Key.funMilestone) }
     }
-    /// 재미 — 신기록 알림. 기본 on.
+    /// 趣味——破纪录通知。默认开。
     var funRecord: Bool {
         didSet { defaults.set(funRecord, forKey: Key.funRecord) }
     }
-    /// 재미 — 스트릭(연속 사용일) 브리핑 표기. 기본 on.
+    /// 趣味——简报中的连续使用天数标注。默认开。
     var funStreak: Bool {
         didSet { defaults.set(funStreak, forKey: Key.funStreak) }
     }
-    /// 재미 — 월요일 주간 리포트. 기본 on.
+    /// 趣味——周一的周报。默认开。
     var funWeeklyReport: Bool {
         didSet { defaults.set(funWeeklyReport, forKey: Key.funWeeklyReport) }
     }
-    /// 재미 — 알림성 이벤트 시 사운드 재생. 기본 off.
+    /// 趣味——通知类事件播放音效。默认关。
     var funSoundEnabled: Bool {
         didSet { defaults.set(funSoundEnabled, forKey: Key.funSoundEnabled) }
     }
-    /// 첫 실행 온보딩 완료 여부. false면 앱 시작 시 온보딩 위저드 표시. 기본 false.
+    /// 首次启动引导是否已完成。false 时启动显示引导向导。默认 false。
     var onboardingCompleted: Bool {
         didSet { defaults.set(onboardingCompleted, forKey: Key.onboardingCompleted) }
     }
@@ -219,7 +219,7 @@ final class AppSettings {
             customMessages = [:]
         }
         launchAtLogin = defaults.object(forKey: Key.launchAtLogin) as? Bool ?? false
-        // 구버전 raw(todayAndBurn/serviceRotation 등) 불일치 시 기본값 폴백 = 마이그레이션.
+        // 旧版 raw（todayAndBurn/serviceRotation 等）不匹配时回退默认值 = 已迁移。
         let resolvedMode = MenubarMode(rawValue: defaults.string(forKey: Key.menubarMode) ?? "") ?? .todayTokens
         menubarMode = resolvedMode
         funMilestone = defaults.object(forKey: Key.funMilestone) as? Bool ?? true
@@ -228,7 +228,7 @@ final class AppSettings {
         funWeeklyReport = defaults.object(forKey: Key.funWeeklyReport) as? Bool ?? true
         funSoundEnabled = defaults.object(forKey: Key.funSoundEnabled) as? Bool ?? false
         onboardingCompleted = defaults.object(forKey: Key.onboardingCompleted) as? Bool ?? false
-        // 메뉴바 항목: 신 포맷 키가 있으면 그대로, 없으면 구 menubarMode에서 1회 마이그레이션.
+        // 菜单栏条目：有新格式键就直接使用，否则从旧 menubarMode 迁移一次。
         if let rawItems = defaults.stringArray(forKey: Key.menubarItems) {
             menubarItems = Set(rawItems.compactMap(MenubarItem.init(rawValue:)))
         } else {

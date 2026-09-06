@@ -1,14 +1,14 @@
 import Foundation
 
-/// MochiPort GitHub Releases 기반 새 버전 확인.
+/// 基于 MochiPort GitHub Releases 的版本检查。
 ///
-/// 하루 1회 `releases/latest`를 조회해 현재 버전보다 높으면 알림/배지로 안내한다.
-/// 자동 설치는 하지 않는다 — 클릭 시 릴리스 페이지를 열 뿐 (Sparkle 없이 최소 구현).
+/// 每天查询一次 `releases/latest`，若高于当前版本则以通知/徽标提示。
+/// 不自动安装——点击只是打开 releases 页面（无 Sparkle 的最小实现）。
 public enum ReleaseChecker {
     public struct Release: Equatable, Sendable {
-        /// "0.11.0" — 태그의 "v" 접두사를 제거한 버전.
+        /// "0.11.0"——去掉 tag 的 "v" 前缀后的版本号。
         public let version: String
-        /// 릴리스 페이지 (html_url).
+        /// 发布页（html_url）。
         public let url: URL
 
         public init(version: String, url: URL) {
@@ -20,7 +20,7 @@ public enum ReleaseChecker {
     public static let latestReleaseURL =
         URL(string: "https://api.github.com/repos/mps233/mochiport/releases/latest")!
 
-    /// `releases/latest` 응답 JSON에서 버전·페이지 URL을 뽑는다. 형식이 다르면 nil.
+    /// 从 `releases/latest` 的 JSON 中提取版本号与页面 URL。格式不符返回 nil。
     public static func parseLatestRelease(jsonData: Data) -> Release? {
         guard let obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
               let tag = obj["tag_name"] as? String,
@@ -34,8 +34,8 @@ public enum ReleaseChecker {
         return Release(version: version, url: url)
     }
 
-    /// semver 자리수별 숫자 비교 — candidate가 current보다 높으면 true.
-    /// 자리수가 모자라면 0으로 채움 ("0.10" == "0.10.0"). 숫자 아닌 조각은 0 취급.
+    /// 按语义化版本逐位数字比较——candidate 高于 current 时返回 true。
+    /// 位数不足补 0（"0.10" == "0.10.0"），非数字片段按 0 处理。
     public static func isNewer(_ candidate: String, than current: String) -> Bool {
         let a = candidate.split(separator: ".").map { Int($0) ?? 0 }
         let b = current.split(separator: ".").map { Int($0) ?? 0 }
@@ -47,7 +47,7 @@ public enum ReleaseChecker {
         return false
     }
 
-    /// 최신 릴리스를 조회한다. 네트워크/파싱 실패 시 nil (조용히 다음 주기).
+    /// 查询最新 release。网络/解析失败返回 nil（静默进入下一个周期）。
     public static func fetchLatest() async -> Release? {
         var request = URLRequest(url: latestReleaseURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")

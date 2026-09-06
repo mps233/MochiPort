@@ -3,24 +3,24 @@ import Charts
 
 struct DashboardView: View {
     let store: UsageStore
-    /// 30일 영구 통계 (옵셔널 — nil이면 추이 탭의 30일 토글 숨김).
+    /// 30 天持久统计（可选——nil 时隐藏趋势页的 30 天切换）。
     var statsStore: DailyStatsStore? = nil
     let settings: AppSettings
     /// Real Sub2API cost for the current provider, when the gateway exposes it.
     var providerUsage: ManageProviderUsageResponse? = nil
     /// Most recently used Sub2API channel for the current provider.
     var providerChannel: ManageSub2ApiAccountPoolResponse.Account? = nil
-    /// 알림 기록 (옵셔널 — nil이면 기록 탭은 빈 상태).
+    /// 通知记录（可选——nil 时记录页为空）。
     var eventLog: EventLog? = nil
-    /// 새 버전 배지 (옵셔널 — available일 때만 헤더에 ↓ 표시).
+    /// 新版本徽标（可选——available 时才在头部显示 ↓）。
     var updateState: UpdateState? = nil
-    /// 톱니바퀴 → 설정 창 열기.
+    /// 齿轮图标 → 打开设置窗口。
     var onSettings: () -> Void = {}
     @State private var tab: Tab = .overview
-    /// 탭 진입 누적 횟수 — 재진입마다 탭 콘텐츠 identity를 갈아서(`.id`)
-    /// 첫 오픈과 동일한 grow+stagger+카운트업 애니메이션을 재생한다.
-    /// (전환 애니메이션 도중 같은 탭으로 되돌아오면 떠나던 뷰의 @State가 재사용되어
-    ///  게이지가 현재값에서 출렁이는 회귀가 있었다.)
+    /// 页签进入的累计次数——每次重进都更换页签内容的 identity（`.id`）
+    /// 以重放与首次打开一致的 grow+stagger+计数动画。
+    /// （切换动画途中返回同一页签时，会复用离开视图的 @State，
+    ///  导致仪表从当前值回跳的回归问题，因此这样做。）
     @State private var tabVisit = 0
 
     enum Tab: String, CaseIterable, Identifiable {
@@ -28,8 +28,8 @@ struct DashboardView: View {
         var id: String { rawValue }
     }
 
-    /// 탭이 실제로 바뀔 때 tabVisit을 동기 증가시키는 바인딩.
-    /// (.onChange는 뷰 갱신 뒤에 불려 identity 교체가 한 박자 늦어 이중 등장이 생기므로 set에서 처리.)
+    /// 在页签真正切换时同步递增 tabVisit 的绑定。
+    /// （.onChange 在视图刷新之后才调用，identity 替换慢一拍会出现重复出现，因此在 set 里处理。）
     private var tabSelection: Binding<Tab> {
         Binding(
             get: { tab },
@@ -40,7 +40,7 @@ struct DashboardView: View {
             })
     }
 
-    /// 탭 전환: 통짜 .move 슬라이드 대신 페이드 + 12pt 미세 오프셋 (이동 거리 톤다운).
+    /// 页签切换：不用整体 .move 滑动，改为淡入淡出 + 12pt 微位移（弱化移动距离）。
     private static let tabTransition: AnyTransition =
         .opacity.combined(with: .offset(x: 12))
 
@@ -75,8 +75,8 @@ struct DashboardView: View {
             }
 
             ZStack(alignment: .top) {
-                // `.id(tabVisit)`: 진입마다 fresh identity → onAppear/`.task` 등장 애니메이션이
-                // 첫 오픈과 동일하게 재생된다 (전환 중 복귀 시 뷰 재사용 방지).
+                // `.id(tabVisit)`：每次进入都是全新 identity → onAppear/`.task` 的入场动画
+                // 与首次打开完全一致地重放（防止切换中返回时复用旧视图）。
                 switch tab {
                 case .overview:
                     OverviewTab(
@@ -116,7 +116,7 @@ private struct OverviewTab: View {
     var providerUsage: ManageProviderUsageResponse? = nil
     var providerChannel: ManageSub2ApiAccountPoolResponse.Account? = nil
 
-    /// 서비스당 표시 순서: 5h → 주간 → 일일 (호버 카드와 동일 의미론).
+    /// 每个服务的显示顺序：5h → 周 → 日（与悬停卡片语义一致）。
     private static let kindOrder: [LimitWindow.Kind] = [.session5h, .weekly, .daily]
 
     var body: some View {
@@ -154,8 +154,8 @@ private struct OverviewTab: View {
         }
     }
 
-    /// 서비스의 윈도우별 소진 예측 (kind → Depletion). 5h는 store, 주간은 statsStore 스냅샷 기반.
-    /// 둘 다 `willDepleteBeforeReset`일 때만 포함된다 (App.evaluateEvents와 동일 규칙).
+    /// 每个服务按窗口的耗尽预测（kind → Depletion）。5h 基于 store，周基于 statsStore 快照。
+    /// 只有两者都是 `willDepleteBeforeReset` 时才包含（与 App.evaluateEvents 规则相同）。
     private func depletions(for service: ServiceID, now: Date) -> [LimitWindow.Kind: Depletion] {
         var result: [LimitWindow.Kind: Depletion] = [:]
         if let d = store.depletion(for: service, now: now) { result[d.kind] = d }
@@ -172,7 +172,7 @@ private struct OverviewTab: View {
         return result
     }
 
-    /// 서비스별 정렬 윈도우 + 전체 게이지 행 누적 인덱스(stagger 딜레이용).
+    /// 服务排序后的窗口 + 全部仪表行的累计索引（用于 stagger 延迟）。
     private func serviceRows(_ services: [ServiceID])
         -> [(service: ServiceID, windows: [LimitWindow], base: Int)] {
         var result: [(ServiceID, [LimitWindow], Int)] = []
@@ -234,7 +234,7 @@ private struct UsageMetricSnapshot {
     }
 }
 
-/// 개요 탭 서비스 블록: 헤더(점+이름+최댓값%) 아래 윈도우별 게이지 행.
+/// 概览页签的服务块：头部（圆点+名称+最大值%）下方是各窗口的仪表行。
 private struct ServiceRow: View {
     let service: ServiceID
     let windows: [LimitWindow]
@@ -244,11 +244,11 @@ private struct ServiceRow: View {
     /// Most recently used Sub2API channel for the current provider.
     var providerChannel: ManageSub2ApiAccountPoolResponse.Account? = nil
     let approxReset: (LimitWindow.Kind) -> Date?
-    /// 윈도우 kind별 소진 경고 (해당 윈도우 행 바로 아래에 표시).
+    /// 按窗口类型的耗尽警告（显示在对应窗口行正下方）。
     var depletions: [LimitWindow.Kind: Depletion] = [:]
     let warn: Double
     let crit: Double
-    /// 전체 개요에서 이 서비스 첫 게이지 행의 인덱스 — delay 0.06*i.
+    /// 该服务在整体概览中第一条仪表行的索引——delay 0.06*i。
     var staggerBase: Int = 0
 
     /// Codex logs currently expose the primary 5-hour and secondary weekly
@@ -321,8 +321,8 @@ private struct ServiceRow: View {
         }
     }
 
-    /// 윈도우별 소진 경고 줄 — 해당 윈도우 행 바로 아래.
-    /// 5h: ⚠️ + orange(긴급), 주간: ⚠️ 없이 secondary(차분한 추세 안내).
+    /// 各窗口的耗尽警告行——紧跟在对应窗口行下方。
+    /// 5h：⚠️ + 橙色（紧急）；周：不带 ⚠️、secondary（平稳的趋势提示）。
     @ViewBuilder
     private func depletionLine(_ depletion: Depletion) -> some View {
         let now = Date()
@@ -340,9 +340,9 @@ private struct ServiceRow: View {
         }
     }
 
-    /// 한 윈도우 줄: 라벨 + 게이지(슈욱) + % + 리셋 카운트다운.
-    /// `~`는 **리셋 시각이 근사일 때 시간에만** 붙는다 (사용량 %는 항상 정확값).
-    /// 근사 시간은 tertiary로 톤 다운해 %와 시각적으로 분리한다.
+    /// 一条窗口行：标签 + 仪表（生长动画）+ % + 重置倒计时。
+    /// `~` 只在**重置时间为近似值时**加在时间上（用量 % 始终是精确值）。
+    /// 近似时间用 tertiary 弱化，与 % 在视觉上区分。
     private func windowRow(_ window: LimitWindow, delay: Double) -> some View {
         let tint = Theme.statusColor(percent: window.usedPercent, warn: warn, crit: crit)
         let reset = resetLabel(window)
@@ -361,7 +361,7 @@ private struct ServiceRow: View {
                 .foregroundStyle(reset?.isApprox == true ? AnyShapeStyle(.tertiary)
                                                          : AnyShapeStyle(.secondary))
                 .lineLimit(1)
-                // "~6d 23h 58m"까지 한 줄 수용 (52에서는 d-포맷이 줄바꿈/잘림).
+                // 一行可容纳 "~6d 23h 58m"（52pt 时 d 格式会换行/截断）。
                 .frame(width: 60, alignment: .trailing)
         }
         .padding(.leading, 14)
@@ -451,8 +451,8 @@ private struct ServiceRow: View {
         return balance.unlimited || (balance.remaining?.isFinite == true)
     }
 
-    /// resetsAt(미래)이 있으면 정확 카운트다운, 없거나 이미 지났으면 근사 리셋(`~` + 톤 다운),
-    /// 둘 다 없으면 nil.
+    /// resetsAt（未来）存在时显示精确倒计时；没有或已过则显示近似重置（`~` + 弱化），
+    /// 两者都没有则返回 nil。
     private func resetLabel(_ window: LimitWindow) -> (text: String, isApprox: Bool)? {
         let now = Date()
         if let resets = window.resetsAt, resets > now {
@@ -465,7 +465,7 @@ private struct ServiceRow: View {
     }
 }
 
-/// 숫자 카운트업 카드: onAppear 시 0→값을 0.45초 6스텝 보간 (.numericText 전환).
+/// 数字计数卡片：onAppear 时 0→目标值按 0.45 秒 6 步插值（.numericText 过渡）。
 private struct StatCard: View {
     let value: Double
     let format: (Double) -> String
@@ -762,7 +762,7 @@ func usageTrendDateDomain(days: Int, now: Date, calendar: Calendar = .current) -
 
 private struct TrendsTab: View {
     let store: UsageStore
-    /// nil이면 30일/잔디 토글 숨김.
+    /// nil 时隐藏 30 天/分布图切换。
     var statsStore: DailyStatsStore? = nil
     let settings: AppSettings
     @State private var range: UsageTrendRange = .week
@@ -793,8 +793,8 @@ private struct TrendsTab: View {
 }
 
 private struct UsageTrendContent: View {
-    /// id가 (day, service)로 안정적이어야 growFactor 변화 시 Chart가 같은 바로 인식해
-    /// y값을 보간(차오름)한다. UUID()는 body 평가마다 바뀌어 애니메이션이 끊겼다.
+    /// id 必须以 (day, service) 保持稳定，growFactor 变化时 Chart 才能识别为同一根柱
+    /// 并对 y 值插值（生长动画）。UUID() 每次 body 求值都变，会打断动画。
     private struct Point: Identifiable {
         let day: Date
         let service: ServiceID
@@ -812,8 +812,8 @@ private struct UsageTrendContent: View {
     var keepsStableHeight = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
-    /// 0.0→1.0으로 증가하며 BarMark y값에만 곱해진다.
-    /// 축/눈금/레이아웃은 최종 데이터로 고정되어 움직이지 않는다.
+    /// 从 0.0 增长到 1.0，只乘在 BarMark 的 y 值上。
+    /// 轴/刻度/布局固定为最终数据，不随动画移动。
     @State private var growFactor: Double = 0
 
     private let enabled: [ServiceID] = [.codex]
@@ -840,7 +840,7 @@ private struct UsageTrendContent: View {
         range == .week ? .current : .utc
     }
 
-    /// 전체 날짜 범위 (양 끝에 반나절 여백 포함).
+    /// 完整日期范围（两端各留半天余量）。
     private var xDomain: ClosedRange<Date> {
         usageTrendDateDomain(days: range.days, now: Date(), calendar: chartCalendar)
     }
@@ -878,7 +878,7 @@ private struct UsageTrendContent: View {
     }
 
     private var chart: some View {
-        // rawData(이벤트 풀스캔/SQLite 조회)는 body 평가당 1회만 — y축 최댓값도 여기서 도출.
+        // rawData（事件全量扫描/SQLite 查询）每次 body 求值只执行一次——y 轴最大值也在这里得出。
         let rows = rawData
         let data = rows.map { Point(day: $0.day, service: $0.service, tokens: $0.tokens) }
         let services = enabled
@@ -987,7 +987,7 @@ private struct ProjectsTab: View {
         }
     }
 
-    /// enabled 서비스만 남기고 합계 재계산, 0이 된 프로젝트는 제거.
+    /// 只保留启用的服务并重算合计，归零的项目移除。
     private func filteredProjects() -> [(project: String, byService: [ServiceID: Int], total: Int)] {
         store.projectServiceBreakdown(days: 7, now: Date())
             .compactMap { item in
@@ -998,8 +998,8 @@ private struct ProjectsTab: View {
     }
 }
 
-/// 프로젝트 행의 서비스별 색 비례 세그먼트 스택 (높이 6, Capsule 클립).
-/// onAppear 시 폭 0→값으로 자라며 행별 stagger.
+/// 项目行中按服务颜色比例分段的堆叠条（高 6，Capsule 裁剪）。
+/// onAppear 时宽度从 0 长到目标值，行间 stagger。
 private struct StackBar: View {
     let byService: [ServiceID: Int]
     let total: Int
