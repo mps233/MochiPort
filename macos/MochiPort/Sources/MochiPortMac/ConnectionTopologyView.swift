@@ -5,8 +5,17 @@ import SwiftUI
 /// to MochiPort. This intentionally behaves like a bridge diagram rather
 /// than a free-form service graph: there are only two endpoint rails and one
 /// local service in the middle.
+/// 各拓扑节点真实渲染中心的锚点——连线画布据此绘图，保证与节点位置严格一致。
+private struct TopologyAnchorKey: PreferenceKey {
+    static var defaultValue: [String: Anchor<CGPoint>] { [:] }
+    static func reduce(value: inout [String: Anchor<CGPoint>], nextValue: () -> [String: Anchor<CGPoint>]) {
+        value.merge(nextValue()) { current, _ in current }
+    }
+}
+
 struct ConnectionTopologyView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var nodePoints: [String: CGPoint] = [:]
 
     private let nodeHeight: CGFloat = 52
     private let compactNodeHeight: CGFloat = 28
@@ -38,6 +47,11 @@ struct ConnectionTopologyView: View {
 
             GeometryReader { proxy in
                 topologyLayout(in: proxy.size)
+                    .onPreferenceChange(TopologyAnchorKey.self) { anchors in
+                        var points: [String: CGPoint] = [:]
+                        for (id, anchor) in anchors { points[id] = proxy[anchor] }
+                        if points != nodePoints { nodePoints = points }
+                    }
             }
             .frame(minHeight: topologyHeight, idealHeight: topologyHeight, maxHeight: topologyHeight)
         }
@@ -50,7 +64,8 @@ struct ConnectionTopologyView: View {
         let metrics = TopologyLayoutMetrics(size: size)
         topologyStack(
             size: CGSize(width: metrics.layoutWidth, height: size.height),
-            metrics: metrics
+            metrics: metrics,
+            points: nodePoints
         )
         .frame(width: metrics.layoutWidth, height: size.height)
         .frame(maxWidth: .infinity)
@@ -58,21 +73,17 @@ struct ConnectionTopologyView: View {
 
     private func topologyStack(
         size: CGSize,
-        metrics: TopologyLayoutMetrics
+        metrics: TopologyLayoutMetrics,
+        points: [String: CGPoint]
     ) -> some View {
         ZStack {
             TopologyConnectorCanvas(
                 size: size,
-                leftHeights: leftNodes.map { $0.isCompact ? compactNodeHeight : nodeHeight },
-                rightHeights: rightNodes.map { $0.isCompact ? compactNodeHeight : nodeHeight },
-                nodeSpacing: nodeSpacing,
+                points: points,
+                leftNodes: leftNodes,
+                rightNodes: rightNodes,
                 sideWidth: metrics.sideWidth,
-                serviceWidth: metrics.serviceWidth,
-                gap: metrics.gap,
-                layoutPadding: metrics.layoutPadding,
-                verticalPadding: topologyVerticalPadding,
-                leftBranchTints: leftNodes.map(\.tint),
-                rightBranchTints: rightNodes.map(\.tint)
+                serviceWidth: metrics.serviceWidth
             )
 
             HStack(alignment: .center, spacing: metrics.gap) {
@@ -83,6 +94,9 @@ struct ConnectionTopologyView: View {
                     bridgeTint: bridgeTint
                 )
                 .frame(width: metrics.serviceWidth)
+                .anchorPreference(key: TopologyAnchorKey.self, value: .center) {
+                    ["service": $0]
+                }
                 .accessibilityIdentifier("topology.node.local-service")
                 nodeColumn(rightNodes, width: metrics.sideWidth, side: .right)
             }
@@ -104,6 +118,9 @@ struct ConnectionTopologyView: View {
         VStack(alignment: .leading, spacing: nodeSpacing) {
             ForEach(nodes) { node in
                 TopologyNodeView(node: node)
+                    .anchorPreference(key: TopologyAnchorKey.self, value: .center) {
+                        [node.id: $0]
+                    }
             }
         }
         .frame(width: width, alignment: .top)
@@ -604,75 +621,45 @@ private struct TopologyStatusMark: View {
 
 private struct TopologyConnectorCanvas: View {
     let size: CGSize
-    let leftHeights: [CGFloat]
-    let rightHeights: [CGFloat]
-    let nodeSpacing: CGFloat
+    /// 节点 id → 真实渲染中心；由 anchorPreference + GeometryProxy 解析，永远与节点一致。
+    let points: [String: CGPoint]
+    let leftNodes: [TopologyNode]
+    let rightNodes: [TopologyNode]
     let sideWidth: CGFloat
     let serviceWidth: CGFloat
-    let gap: CGFloat
-    let layoutPadding: CGFloat
-    let verticalPadding: CGFloat
-    let leftBranchTints: [StatusTint]
-    let rightBranchTints: [StatusTint]
 
     var body: some View {
         Canvas { context, _ in
-            // 行高 = 最高的一列；两列在行内垂直居中（与 HStack .center 渲染一致）。
-            let rowTotal = { (h: [CGFloat]) -> CGFloat in
-                h.reduce(0, +) + CGFloat(max(0, h.count - 1)) * nodeSpacing
-            }
-            let leftTotal = rowTotal(leftHeights)
-            let rightTotal = rowTotal(rightHeights)
-            let rowHeight = max(leftTotal, rightTotal)
-            let leftCenters = centers(heights: leftHeights, rowTop: verticalPadding + (rowHeight - leftTotal) / 2)
-            let rightCenters = centers(heights: rightHeights, rowTop: verticalPadding + (rowHeight - rightTotal) / 2)
-            let serviceLeft = layoutPadding + sideWidth + gap
-            let serviceRight = serviceLeft + serviceWidth
-            let leftNodeEdge = layoutPadding + sideWidth
-            let rightNodeEdge = serviceRight + gap
-            // 收敛点 = 服务节点的中心：行高的一半 + 垂直边距（不是画布高度的一半，
-            // 否则会比节点中线低一个垂直边距，曲线明显"没对到中间"）。
-            let middleY = verticalPadding + rowHeight / 2
+            guard let serviceCenter = points["service"] else { return }
+            let serviceLeft = serviceCenter.x - serviceWidth / 2
+            let serviceRight = serviceCenter.x + serviceWidth / 2
 
             for activePass in [false, true] {
-                for (index, center) in leftCenters.enumerated() {
-                    let tint = branchTint(leftBranchTints, index)
+                for node in leftNodes {
+                    guard let center = points[node.id] else { continue }
+                    let tint = node.tint
                     guard (tint != .secondary) == activePass else { continue }
                     drawLink(
                         context: &context,
-                        from: CGPoint(x: leftNodeEdge, y: center),
-                        to: CGPoint(x: serviceLeft, y: middleY),
+                        from: CGPoint(x: center.x + sideWidth / 2, y: center.y),
+                        to: CGPoint(x: serviceLeft, y: serviceCenter.y),
                         tint: tint
                     )
                 }
-                for (index, center) in rightCenters.enumerated() {
-                    let tint = branchTint(rightBranchTints, index)
+                for node in rightNodes {
+                    guard let center = points[node.id] else { continue }
+                    let tint = node.tint
                     guard (tint != .secondary) == activePass else { continue }
                     drawLink(
                         context: &context,
-                        from: CGPoint(x: serviceRight, y: middleY),
-                        to: CGPoint(x: rightNodeEdge, y: center),
+                        from: CGPoint(x: serviceRight, y: serviceCenter.y),
+                        to: CGPoint(x: center.x - sideWidth / 2, y: center.y),
                         tint: tint
                     )
                 }
             }
         }
         .allowsHitTesting(false)
-    }
-
-    private func centers(heights: [CGFloat], rowTop: CGFloat) -> [CGFloat] {
-        let top = rowTop
-        var centers: [CGFloat] = []
-        var offset = top
-        for height in heights {
-            centers.append(offset + height / 2)
-            offset += height + nodeSpacing
-        }
-        return centers
-    }
-
-    private func branchTint(_ tints: [StatusTint], _ index: Int) -> StatusTint {
-        tints.indices.contains(index) ? tints[index] : .secondary
     }
 
     /// 平滑 S 曲线连接：消息是双向的，因此不画方向箭头，
