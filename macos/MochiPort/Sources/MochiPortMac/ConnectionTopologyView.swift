@@ -630,7 +630,9 @@ private struct TopologyConnectorCanvas: View {
             let serviceRight = serviceLeft + serviceWidth
             let leftNodeEdge = layoutPadding + sideWidth
             let rightNodeEdge = serviceRight + gap
-            let middleY = size.height / 2
+            // 收敛点 = 服务节点的中心：行高的一半 + 垂直边距（不是画布高度的一半，
+            // 否则会比节点中线低一个垂直边距，曲线明显"没对到中间"）。
+            let middleY = verticalPadding + rowHeight / 2
 
             for activePass in [false, true] {
                 for (index, center) in leftCenters.enumerated() {
