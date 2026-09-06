@@ -381,66 +381,84 @@ struct GatewayQuotaDock: View {
         }
     }
 
+    /// 只有一个启用的 Provider 时没有可切换的余地：隐藏下拉箭头，标题改为静态展示。
+    private var showsProviderPicker: Bool {
+        providers.filter(\.enabled).count > 1
+    }
+
+    @ViewBuilder
     private func providerPicker(usesCompactDetails: Bool) -> some View {
-        Menu {
-            if providers.isEmpty {
-                Text("尚未配置 Provider")
-            } else {
-                ForEach(providers) { provider in
-                    Button {
-                        selectedProviderName = provider.name
-                    } label: {
-                        if provider.name == selectedProviderName {
-                            Label(provider.name, systemImage: "checkmark")
-                        } else {
-                            Text(provider.name)
+        if showsProviderPicker {
+            Menu {
+                if providers.isEmpty {
+                    Text("尚未配置 Provider")
+                } else {
+                    ForEach(providers) { provider in
+                        Button {
+                            selectedProviderName = provider.name
+                        } label: {
+                            if provider.name == selectedProviderName {
+                                Label(provider.name, systemImage: "checkmark")
+                            } else {
+                                Text(provider.name)
+                            }
                         }
                     }
                 }
+            } label: {
+                providerIdentity(usesCompactDetails: usesCompactDetails, showsChevron: true)
             }
-        } label: {
-            HStack(spacing: 10) {
-                if let provider = selectedProvider {
-                    ProviderLogoView(
-                        providerType: provider.providerType,
-                        compatibility: provider.compatibility,
-                        providerName: provider.name,
-                        size: 28
-                    )
-                } else {
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
-                }
+            .menuStyle(.borderlessButton)
+            .disabled(providers.isEmpty)
+            .help(recentAccount == nil ? "选择要查看额度的 Provider" : "最近使用账号；点此切换 Provider")
+            .accessibilityLabel("选择额度 Provider")
+            .accessibilityValue(accountTitle)
+        } else {
+            providerIdentity(usesCompactDetails: usesCompactDetails, showsChevron: false)
+                .accessibilityElement(children: .combine)
+        }
+    }
 
-                if usesCompactDetails {
+    @ViewBuilder
+    private func providerIdentity(usesCompactDetails: Bool, showsChevron: Bool) -> some View {
+        HStack(spacing: 10) {
+            if let provider = selectedProvider {
+                ProviderLogoView(
+                    providerType: provider.providerType,
+                    compatibility: provider.compatibility,
+                    providerName: provider.name,
+                    size: 28
+                )
+            } else {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+            }
+
+            if usesCompactDetails {
+                Text(accountTitle)
+                    .font(.callout.weight(.semibold))
+                    .lineLimit(1)
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(accountTitle)
                         .font(.callout.weight(.semibold))
                         .lineLimit(1)
-                } else {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(accountTitle)
-                            .font(.callout.weight(.semibold))
-                            .lineLimit(1)
-                        Text(accountSubtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
+                    Text(accountSubtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
+            }
+            if showsChevron {
                 Spacer(minLength: 2)
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.tertiary)
             }
-            .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
-        .disabled(providers.isEmpty)
-        .help(recentAccount == nil ? "选择要查看额度的 Provider" : "最近使用账号；点此切换 Provider")
-        .accessibilityLabel("选择额度 Provider")
-        .accessibilityValue(accountTitle)
+        .contentShape(Rectangle())
     }
 
     private var accountTitle: String {
