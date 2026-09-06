@@ -311,6 +311,13 @@ private struct OverviewView: View {
                 }
 
                 OverviewStartHereView(
+                    state: OverviewStartHereState(
+                        gatewayConfigured: (model.dashboard?.aiGatewayProviderCount ?? 0) > 0
+                            || (model.codexStatus?.providerOk ?? false),
+                        messagingConnected: !model.imAccounts.isEmpty,
+                        codexConnected: model.dashboard?.remoteControlConnected == true,
+                        firstMessageReceived: model.imAccounts.contains { $0.lastInboundAtMs != nil }
+                    ),
                     onOpenGateway: onOpenGateway,
                     onOpenMessaging: onOpenMessaging,
                     onOpenCodex: onOpenCodex
@@ -360,8 +367,25 @@ private struct OverviewView: View {
     }
 }
 
+/// 引导四步的实际完成状态，由概览页从模型快照推导。
+struct OverviewStartHereState: Equatable {
+    var gatewayConfigured = false
+    var messagingConnected = false
+    var codexConnected = false
+    var firstMessageReceived = false
+
+    var doneCount: Int {
+        [gatewayConfigured, messagingConnected, codexConnected, firstMessageReceived]
+            .filter(\.self)
+            .count
+    }
+
+    var allDone: Bool { doneCount == 4 }
+}
+
 private struct OverviewStartHereView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let state: OverviewStartHereState
     let onOpenGateway: () -> Void
     let onOpenMessaging: () -> Void
     let onOpenCodex: () -> Void
@@ -372,6 +396,8 @@ private struct OverviewStartHereView: View {
         GridItem(.flexible(minimum: 180), spacing: 22, alignment: .topLeading),
         GridItem(.flexible(minimum: 180), spacing: 22, alignment: .topLeading),
     ]
+
+    private var remainingCount: Int { 4 - state.doneCount }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -384,25 +410,37 @@ private struct OverviewStartHereView: View {
                 }
             } label: {
                 HStack(alignment: isExpanded ? .top : .center, spacing: 12) {
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.system(size: 19, weight: .medium))
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 34, height: 34)
-                        .accessibilityHidden(true)
+                    if state.allDone {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 19, weight: .medium))
+                            .foregroundStyle(.tint)
+                            .frame(width: 34, height: 34)
+                            .accessibilityHidden(true)
+                    } else {
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.system(size: 19, weight: .medium))
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 34, height: 34)
+                            .accessibilityHidden(true)
+                    }
 
                     VStack(alignment: .leading, spacing: isExpanded ? 4 : 1) {
                         HStack(spacing: 6) {
-                            Text("从这里开始")
+                            Text(state.allDone ? "全部就绪" : "从这里开始")
                                 .font(.headline.weight(.semibold))
 
                             if !isExpanded {
                                 Text("·")
                                     .foregroundStyle(.tertiary)
-                                Text("4 步")
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(.tertiary)
-                                    .transition(.opacity)
+                                Text(
+                                    state.allDone
+                                        ? "已可从手机使用"
+                                        : "还差 \(remainingCount) 步"
+                                )
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                                .transition(.opacity)
                             }
                         }
 
@@ -461,7 +499,7 @@ private struct OverviewStartHereView: View {
                         detail: "填写 API 地址和 Key，保存即可。",
                         action: "配置模型",
                         symbol: "server.rack",
-                        isProminent: true,
+                        isDone: state.gatewayConfigured,
                         onAction: onOpenGateway
                     )
                     startStep(
@@ -470,7 +508,7 @@ private struct OverviewStartHereView: View {
                         detail: "连接 Telegram、飞书、微信或企业微信中的一个。",
                         action: "连接消息渠道",
                         symbol: "message.badge.waveform",
-                        isProminent: false,
+                        isDone: state.messagingConnected,
                         onAction: onOpenMessaging
                     )
                     startStep(
@@ -479,7 +517,7 @@ private struct OverviewStartHereView: View {
                         detail: "打开开关，让 Codex 连接 MochiPort。",
                         action: "连接 Codex",
                         symbol: "link",
-                        isProminent: false,
+                        isDone: state.codexConnected,
                         onAction: onOpenCodex
                     )
                     startStep(
@@ -488,7 +526,7 @@ private struct OverviewStartHereView: View {
                         detail: "在手机上给机器人发一条消息。",
                         action: nil,
                         symbol: "checkmark.circle",
-                        isProminent: false,
+                        isDone: state.firstMessageReceived,
                         onAction: nil
                     )
                 }
@@ -509,6 +547,21 @@ private struct OverviewStartHereView: View {
         .startHereGlassSurface()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("overview.start-here")
+        .onAppear {
+            collapseWhenAllDone()
+        }
+        .onChange(of: state.allDone) { _, allDone in
+            if allDone {
+                collapseWhenAllDone()
+            }
+        }
+    }
+
+    /// 全部完成后默认收成一行；用户仍可随时点击展开查看详情。
+    private func collapseWhenAllDone() {
+        if state.allDone, isExpanded {
+            isExpanded = false
+        }
     }
 
     @ViewBuilder
@@ -518,30 +571,39 @@ private struct OverviewStartHereView: View {
         detail: String,
         action: String?,
         symbol: String,
-        isProminent: Bool,
+        isDone: Bool,
         onAction: (() -> Void)?
     ) -> some View {
         HStack(alignment: .top, spacing: 9) {
-            Text(number)
-                .font(.caption.weight(.semibold).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 26, height: 26)
-                .background(Color.primary.opacity(0.045), in: Circle())
-                .overlay {
-                    Circle()
-                        .strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5)
-                }
+            if isDone {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.tint)
+                    .frame(width: 26, height: 26)
+                    .accessibilityLabel("已完成")
+            } else {
+                Text(number)
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 26, height: 26)
+                    .background(Color.primary.opacity(0.045), in: Circle())
+                    .overlay {
+                        Circle()
+                            .strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5)
+                    }
+            }
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(title)
                     .font(.callout.weight(.semibold))
-                Text(detail)
+                    .foregroundStyle(isDone ? Color.secondary : Color.primary)
+                Text(isDone ? "已完成" : detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                if let action, let onAction {
-                    if isProminent {
+                if !isDone, let action, let onAction {
+                    if number == "1" {
                         Button {
                             onAction()
                         } label: {
