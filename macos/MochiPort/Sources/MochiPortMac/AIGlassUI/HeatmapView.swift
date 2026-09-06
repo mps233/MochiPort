@@ -208,12 +208,27 @@ struct HeatmapView: View {
                             week.days[row],
                             maxTokens: maxTokens,
                             staggerIndex: week.index,
-                            size: cellSize
+                            size: cellSize,
+                            bubbleAlignment: bubbleAlignment(
+                                weekIndex: week.index,
+                                weekCount: weeks.count
+                            )
                         )
                     }
                 }
             }
         }
+    }
+
+    private enum BubbleEdge {
+        case leading, center, trailing
+    }
+
+    /// 悬浮气泡默认居中；靠边的周改为对齐内侧，避免被卡片边缘裁剪。
+    private func bubbleAlignment(weekIndex: Int, weekCount: Int) -> Alignment {
+        if weekIndex < 2 { return .topLeading }
+        if weekIndex >= weekCount - 2 { return .topTrailing }
+        return .top
     }
 
     private func weekdayAxis(cellSize: CGFloat) -> some View {
@@ -262,21 +277,33 @@ struct HeatmapView: View {
         _ gridDay: GridDay?,
         maxTokens: Int,
         staggerIndex: Int,
-        size: CGFloat
+        size: CGFloat,
+        bubbleAlignment: Alignment = .top
     ) -> some View {
         if let gridDay {
             let lvl = level(for: gridDay.tokens, maxTokens: maxTokens)
             let isToday = calendar.isDate(gridDay.day, inSameDayAs: todayStart)
+            let isHoveredCell = hovered == gridDay
             heatmapSquare(level: lvl, size: size)
                 .overlay(
                     RoundedRectangle(cornerRadius: cellCornerRadius(for: size))
                         .strokeBorder(isToday ? Color.primary.opacity(0.72) : .clear, lineWidth: 1.2)
                 )
+                .overlay(alignment: bubbleAlignment) {
+                    if isHoveredCell {
+                        hoverBubble(for: gridDay)
+                            .offset(y: -(size / 2 + 16))
+                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
+                }
                 // 주 단위 stagger: 최신 주일수록 살짝 늦게 차오른다(1회성).
                 .opacity(appeared ? 1 : 0)
-                .scaleEffect(appeared ? 1 : 0.4)
+                .scaleEffect(appeared ? (isHoveredCell ? 1.32 : 1) : 0.4)
+                .offset(y: isHoveredCell ? -2 : 0)
+                .shadow(color: isHoveredCell ? Color.black.opacity(0.3) : .clear, radius: 5, y: 2)
+                .zIndex(isHoveredCell ? 2 : 0)
                 .animation(.spring(duration: 0.5).delay(Double(staggerIndex) * 0.02), value: appeared)
-                .help("\(Self.captionDateFormatter.string(from: gridDay.day)) · \(formatTokens(gridDay.tokens)) 请求 Token")
+                .animation(.spring(duration: 0.18), value: isHoveredCell)
                 .onHover { inside in
                     hovered = inside ? gridDay : (hovered == gridDay ? nil : hovered)
                 }
@@ -285,6 +312,27 @@ struct HeatmapView: View {
             Color.clear
                 .frame(width: size, height: size)
         }
+    }
+
+    /// 悬浮在格子上方的即时标签：日期与 Token 分两行，Token 加粗为主信息。
+    private func hoverBubble(for gridDay: GridDay) -> some View {
+        VStack(spacing: 1) {
+            Text(Self.captionDateFormatter.string(from: gridDay.day))
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+            Text("\(formatTokens(gridDay.tokens)) 请求 Token")
+                .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.16), radius: 5, y: 2)
+        .fixedSize()
     }
 
     private func bottomCaption(weekCount: Int, cellSize: CGFloat) -> some View {
