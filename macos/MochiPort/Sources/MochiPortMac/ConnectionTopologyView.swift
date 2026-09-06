@@ -9,6 +9,7 @@ struct ConnectionTopologyView: View {
     @EnvironmentObject private var model: AppModel
 
     private let nodeHeight: CGFloat = 52
+    private let compactNodeHeight: CGFloat = 28
     private let nodeSpacing: CGFloat = 10
     private let topologyHeight: CGFloat = 286
 
@@ -55,9 +56,8 @@ struct ConnectionTopologyView: View {
         ZStack {
             TopologyConnectorCanvas(
                 size: size,
-                leftCount: leftNodes.count,
-                rightCount: rightNodes.count,
-                nodeHeight: nodeHeight,
+                leftHeights: leftNodes.map { $0.isCompact ? compactNodeHeight : nodeHeight },
+                rightHeights: rightNodes.map { $0.isCompact ? compactNodeHeight : nodeHeight },
                 nodeSpacing: nodeSpacing,
                 sideWidth: metrics.sideWidth,
                 serviceWidth: metrics.serviceWidth,
@@ -142,12 +142,36 @@ struct ConnectionTopologyView: View {
     private var rightNodes: [TopologyNode] {
         let channels = model.dashboard?.messageChannels
         let legacy = channels?.legacyUnattributed.accountCount ?? 0 > 0
-        return [
+        var nodes = [
             channelNode("telegram", "Telegram", channels?.telegram, "paperplane", legacy: legacy),
             channelNode("feishu", "飞书", channels?.feishu, "bubble.left.and.text.bubble.right", legacy: legacy),
             channelNode("wechat", "微信", channels?.wechat, "message", legacy: legacy),
             channelNode("wecom", "企业微信", channels?.wecom, "person.2", legacy: legacy),
         ]
+
+        // 未配置的渠道折叠成一行紧凑节点：它们不携带实时状态，
+        // 不应该和活的连接等大等重地占用版面。
+        let unconfiguredTitles = nodes
+            .filter { $0.tint == .secondary }
+            .map(\.title)
+        if !unconfiguredTitles.isEmpty {
+            let joined = unconfiguredTitles.joined(separator: " · ")
+            nodes.removeAll { $0.tint == .secondary }
+            nodes.append(
+                TopologyNode(
+                    id: "unconfigured-channels",
+                    title: joined,
+                    compactTitle: joined,
+                    detail: "未配置",
+                    symbol: "circle.dashed",
+                    tint: .secondary,
+                    accounts: [],
+                    logo: nil,
+                    isCompact: true
+                )
+            )
+        }
+        return nodes
     }
 
     private func channelNode(
@@ -337,6 +361,7 @@ private struct TopologyNode: Identifiable {
     let tint: StatusTint
     let accounts: [MessagingAccountSummary]
     let logo: ClientLogoKind?
+    var isCompact = false
 }
 
 private struct TopologyNodeView: View {
@@ -344,6 +369,40 @@ private struct TopologyNodeView: View {
     @State private var isHovering = false
 
     var body: some View {
+        if node.isCompact {
+            compactRow
+        } else {
+            fullNode
+        }
+    }
+
+    /// 未配置渠道的紧凑行：占位但不与活节点争夺视觉重量。
+    private var compactRow: some View {
+        HStack(spacing: 7) {
+            Image(systemName: node.symbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .frame(width: 20)
+            Text(node.title)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+            Spacer(minLength: 6)
+            Text(node.detail)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 11)
+        .frame(maxWidth: .infinity, minHeight: 28, maxHeight: 28)
+        .background(
+            RoundedRectangle(cornerRadius: MochiPortRadius.content, style: .continuous)
+                .fill(Color.primary.opacity(0.015))
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("topology.node.\(node.id)")
+    }
+
+    private var fullNode: some View {
         HStack(spacing: 9) {
             // Both endpoint rails use the same reading order.  The channel
             // avatar belongs beside its name, while the status dot stays at
@@ -536,9 +595,8 @@ private struct TopologyStatusMark: View {
 
 private struct TopologyConnectorCanvas: View {
     let size: CGSize
-    let leftCount: Int
-    let rightCount: Int
-    let nodeHeight: CGFloat
+    let leftHeights: [CGFloat]
+    let rightHeights: [CGFloat]
     let nodeSpacing: CGFloat
     let sideWidth: CGFloat
     let serviceWidth: CGFloat
@@ -549,8 +607,8 @@ private struct TopologyConnectorCanvas: View {
 
     var body: some View {
         Canvas { context, _ in
-            let leftCenters = centers(count: leftCount)
-            let rightCenters = centers(count: rightCount)
+            let leftCenters = centers(heights: leftHeights)
+            let rightCenters = centers(heights: rightHeights)
             let serviceLeft = layoutPadding + sideWidth + gap
             let serviceRight = serviceLeft + serviceWidth
             let leftNodeEdge = layoutPadding + sideWidth
@@ -565,8 +623,7 @@ private struct TopologyConnectorCanvas: View {
                         context: &context,
                         from: CGPoint(x: leftNodeEdge, y: center),
                         to: CGPoint(x: serviceLeft, y: middleY),
-                        tint: tint,
-                        arrowDirection: 1
+                        tint: tint
                     )
                 }
                 for (index, center) in rightCenters.enumerated() {
@@ -576,8 +633,7 @@ private struct TopologyConnectorCanvas: View {
                         context: &context,
                         from: CGPoint(x: serviceRight, y: middleY),
                         to: CGPoint(x: rightNodeEdge, y: center),
-                        tint: tint,
-                        arrowDirection: 1
+                        tint: tint
                     )
                 }
             }
@@ -585,29 +641,38 @@ private struct TopologyConnectorCanvas: View {
         .allowsHitTesting(false)
     }
 
-    private func centers(count: Int) -> [CGFloat] {
-        let total = CGFloat(count) * nodeHeight + CGFloat(max(0, count - 1)) * nodeSpacing
+    private func centers(heights: [CGFloat]) -> [CGFloat] {
+        let total = heights.reduce(0, +) + CGFloat(max(0, heights.count - 1)) * nodeSpacing
         let top = max(0, (size.height - total) / 2)
-        return (0..<count).map { top + CGFloat($0) * (nodeHeight + nodeSpacing) + nodeHeight / 2 }
+        var centers: [CGFloat] = []
+        var offset = top
+        for height in heights {
+            centers.append(offset + height / 2)
+            offset += height + nodeSpacing
+        }
+        return centers
     }
 
     private func branchTint(_ tints: [StatusTint], _ index: Int) -> StatusTint {
         tints.indices.contains(index) ? tints[index] : .secondary
     }
 
+    /// 平滑 S 曲线连接：消息是双向的，因此不画方向箭头，
+    /// 端口圆点与节点自身状态承担状态表达。
     private func drawLink(
         context: inout GraphicsContext,
         from: CGPoint,
         to: CGPoint,
-        tint: StatusTint,
-        arrowDirection: CGFloat
+        tint: StatusTint
     ) {
-        let branchX = (from.x + to.x) / 2
+        let midX = (from.x + to.x) / 2
         var path = Path()
         path.move(to: from)
-        path.addLine(to: CGPoint(x: branchX, y: from.y))
-        path.addLine(to: CGPoint(x: branchX, y: to.y))
-        path.addLine(to: to)
+        path.addCurve(
+            to: to,
+            control1: CGPoint(x: midX, y: from.y),
+            control2: CGPoint(x: midX, y: to.y)
+        )
 
         guard tint != .secondary else {
             context.stroke(
@@ -631,14 +696,6 @@ private struct TopologyConnectorCanvas: View {
             with: .color(tint.color.opacity(0.72)),
             style: StrokeStyle(lineWidth: 1.35, lineCap: .round, lineJoin: .round)
         )
-
-        let arrowPoint = CGPoint(x: to.x - arrowDirection * 5, y: to.y)
-        var arrow = Path()
-        arrow.move(to: arrowPoint)
-        arrow.addLine(to: CGPoint(x: arrowPoint.x - arrowDirection * 7, y: arrowPoint.y - 3.8))
-        arrow.addLine(to: CGPoint(x: arrowPoint.x - arrowDirection * 7, y: arrowPoint.y + 3.8))
-        arrow.closeSubpath()
-        context.fill(arrow, with: .color(tint.color.opacity(0.82)))
 
         for point in [from, to] {
             let port = CGRect(x: point.x - 2.2, y: point.y - 2.2, width: 4.4, height: 4.4)
