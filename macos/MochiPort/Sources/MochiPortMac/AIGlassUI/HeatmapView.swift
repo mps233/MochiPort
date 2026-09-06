@@ -1,15 +1,15 @@
 import SwiftUI
 
-/// GitHub 잔디 스타일 사용량 히트맵.
+/// GitHub 分布图样式的用量热力图。
 ///
-/// 최근 15주 × 7일(월~일) 그리드. 열 = 주(왼쪽=과거, 오른쪽=최신),
-/// 행 = 요일(위=월, 아래=일). 셀 농도 = 일 토큰 / 기간 최대 토큰을 5단계로 양자화.
-/// hover 시 셀 위 네이티브 툴팁(날짜 + 토큰)과 하단 고정 캡션을 함께 표시한다.
-/// 오늘 셀은 테두리로 강조하고, 등장 시 주 단위 stagger로 농도가 0→값으로 차오른다(1회성).
+/// 最近 15 周 × 7 天（周一至周日）网格。列 = 周（左旧右新），
+/// 行 = 星期（上为周一）。格子浓度 = 当日 Token / 期间最大 Token，量化为 5 档。
+/// 悬停时格子放大上浮，并在上方弹出"日期 + 当日 Token"标签；
+/// `legendPlacement == .bottom` 时底部说明行同步显示悬停信息。
+/// 今日格子用描边强调；出现时按周 stagger 逐列填充（一次性入场动画）。
 struct HeatmapView: View {
     enum LegendPlacement {
         case bottom
-        case trailing
         case none
     }
 
@@ -21,7 +21,6 @@ struct HeatmapView: View {
 
     private static let minimumWeeks = 15
     private static let maximumWeeks = 53
-    private static let trailingLegendSpacing: CGFloat = 14
     private static let weekdayAxisWidth: CGFloat = 26
     private static let axisGap: CGFloat = 8
     private static let monthAxisHeight: CGFloat = 16
@@ -44,17 +43,17 @@ struct HeatmapView: View {
     @State private var appeared = false
     @State private var hovered: GridDay? = nil
 
-    // 그리드의 한 칸 = 하나의 날짜(또는 빈 칸).
+    // 网格的一格 = 一个日期（或空位）。
     private struct GridDay: Identifiable, Equatable {
         let day: Date
         let tokens: Int
         var id: TimeInterval { day.timeIntervalSinceReferenceDate }
     }
 
-    // 그리드 컬럼(주) — 각 주는 월~일 7칸. 미래 날짜는 nil로 비운다.
+    // 网格的列（周）——每周周一至周日 7 格。未来日期留空（nil）。
     private struct Week: Identifiable {
-        let index: Int          // 0 = 가장 과거 주, 마지막 = 최신 주 (stagger 순서)
-        let days: [GridDay?]    // 7칸 (월~일)
+        let index: Int          // 0 = 最早的周，最后一列 = 当前周（stagger 顺序）
+        let days: [GridDay?]    // 7 格（周一至周日）
         var id: Int { index }
     }
 
@@ -64,14 +63,14 @@ struct HeatmapView: View {
     }
 
     private var calendar: Calendar {
-        // day 저장 포맷이 UTC이므로(추이 30일과 동일) UTC 기준으로 격자를 구성한다.
+        // 日数据以 UTC 午夜的 Date 为键（与 30 天趋势一致），因此网格也按 UTC 构建。
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "UTC")!
-        cal.firstWeekday = 2  // 월요일 시작
+        cal.firstWeekday = 2  // 周一开头
         return cal
     }
 
-    // 일별 토큰 딕셔너리(UTC 자정 Date 키).
+    // 每日 Token 字典（UTC 午夜 Date 为键）。
     private func dailyTokens(weeks: Int) -> [Date: Int] {
         let rows = statsStore.dailyTotals(days: weeks * 7, now: Date(),
                                           calendar: calendar, services: enabledServices)
@@ -82,14 +81,12 @@ struct HeatmapView: View {
 
     private var todayStart: Date { calendar.startOfDay(for: Date()) }
 
-    // 오른쪽(최신) 열이 이번 주가 되도록, 이번 주가 속한 월요일에서
-    // (weekCount-1)주 전 월요일까지를 시작점으로 잡는다.
+    // 让最右列（最新）落在当前周：从本周周一开始，向回取 (weekCount-1) 周。
     private func grid(weeks weekCount: Int) -> [Week] {
         let tokens = dailyTokens(weeks: weekCount)
         let today = todayStart
-        // 이번 주 월요일.
-        let weekday = calendar.component(.weekday, from: today)  // 1=일 … 2=월
-        let daysSinceMonday = (weekday + 5) % 7                  // 월=0, 일=6
+        let weekday = calendar.component(.weekday, from: today)  // 1=周日 … 2=周一
+        let daysSinceMonday = (weekday + 5) % 7                  // 周一=0, 周日=6
         guard let thisMonday = calendar.date(byAdding: .day, value: -daysSinceMonday, to: today),
               let firstMonday = calendar.date(byAdding: .day, value: -(weekCount - 1) * 7, to: thisMonday)
         else { return [] }
@@ -103,7 +100,7 @@ struct HeatmapView: View {
                     days.append(nil); continue
                 }
                 if cellDay > today {
-                    days.append(nil)  // 미래 날짜는 빈 칸
+                    days.append(nil)  // 未来日期留空
                 } else {
                     days.append(GridDay(day: cellDay, tokens: tokens[cellDay] ?? 0))
                 }
@@ -117,7 +114,7 @@ struct HeatmapView: View {
         max(1, weeks.flatMap { $0.days.compactMap { $0?.tokens } }.max() ?? 0)
     }
 
-    // 5단계 양자화: 0 = 빈 셀, 1~4 = 민트 농도.
+    // 5 档量化：0 = 空格，1~4 = 浓度递增。
     private func level(for tokens: Int, maxTokens: Int) -> Int {
         guard tokens > 0 else { return 0 }
         let ratio = Double(tokens) / Double(maxTokens)
@@ -127,8 +124,7 @@ struct HeatmapView: View {
         return 4
     }
 
-    // Neutral grayscale levels keep usage visualizations quiet and let the
-    // state indicators reserve color for connection health.
+    // 中性灰阶让用量图保持安静，把彩色留给连接健康状态。
     private func cellColor(level: Int) -> Color {
         switch level {
         case 1: return Color.primary.opacity(0.18)
@@ -142,33 +138,22 @@ struct HeatmapView: View {
     var body: some View {
         GeometryReader { proxy in
             let hasBottomCaption = legendPlacement == .bottom
-            let reservedTrailingWidth = legendPlacement == .trailing
-                ? cellSize + Self.trailingLegendSpacing
-                : 0
             let layout = layout(
-                for: proxy.size.width - reservedTrailingWidth,
+                for: proxy.size.width,
                 height: proxy.size.height,
                 includesBottomCaption: hasBottomCaption
             )
             let weeks = grid(weeks: layout.weekCount)
             let maxTokens = maxTokens(in: weeks)
 
-            if legendPlacement == .trailing {
-                HStack(alignment: .center, spacing: Self.trailingLegendSpacing) {
-                    heatmapContent(weeks: weeks, maxTokens: maxTokens, cellSize: layout.cellSize)
-                    trailingCaption(cellSize: layout.cellSize)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            } else {
-                VStack(alignment: .leading, spacing: Self.contentSpacing) {
-                    heatmapContent(weeks: weeks, maxTokens: maxTokens, cellSize: layout.cellSize)
+            VStack(alignment: .leading, spacing: Self.contentSpacing) {
+                heatmapContent(weeks: weeks, maxTokens: maxTokens, cellSize: layout.cellSize)
 
-                    if hasBottomCaption {
-                        bottomCaption(weekCount: layout.weekCount, cellSize: layout.cellSize)
-                    }
+                if hasBottomCaption {
+                    bottomCaption(weekCount: layout.weekCount, cellSize: layout.cellSize)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         }
         .frame(minHeight: minimumHeight)
         .onAppear {
@@ -296,7 +281,7 @@ struct HeatmapView: View {
                             .transition(.opacity.combined(with: .move(edge: .bottom)))
                     }
                 }
-                // 주 단위 stagger: 최신 주일수록 살짝 늦게 차오른다(1회성).
+                // 按周 stagger：越新的周越晚填充（一次性入场动画）。
                 .opacity(appeared ? 1 : 0)
                 .scaleEffect(appeared ? (isHoveredCell ? 1.32 : 1) : 0.4)
                 .offset(y: isHoveredCell ? -2 : 0)
@@ -308,14 +293,14 @@ struct HeatmapView: View {
                     hovered = inside ? gridDay : (hovered == gridDay ? nil : hovered)
                 }
         } else {
-            // 빈 칸(미래/격자 패딩) — 자리만 차지.
+            // 空格（未来日期/网格留白）——只占位。
             Color.clear
                 .frame(width: size, height: size)
         }
     }
 
     /// 悬浮在格子上方的即时标签：日期与 Token 分两行，Token 加粗为主信息。
-    /// 使用不透明背景——半透明材质会让热力图格子透过气泡，影响可读性。
+    /// 使用字面不透明深色——任何系统材质/动态色语义都可能引入透明度。
     private func hoverBubble(for gridDay: GridDay) -> some View {
         VStack(spacing: 1) {
             Text(Self.captionDateFormatter.string(from: gridDay.day))
@@ -328,7 +313,6 @@ struct HeatmapView: View {
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
         .background(
-            // 字面不透明深色：任何系统材质/动态色语义都可能引入透明度。
             Color(red: 0.12, green: 0.12, blue: 0.13),
             in: RoundedRectangle(cornerRadius: 7, style: .continuous)
         )
@@ -354,18 +338,6 @@ struct HeatmapView: View {
         .font(.system(size: 10))
         .foregroundStyle(.secondary)
         .frame(maxWidth: .infinity)
-    }
-
-    private func trailingCaption(cellSize: CGFloat) -> some View {
-        VStack(spacing: 4) {
-            Text("多").font(.system(size: 9)).foregroundStyle(.secondary)
-            ForEach((0..<5).reversed(), id: \.self) { level in
-                heatmapSquare(level: level, size: cellSize)
-            }
-            Text("少").font(.system(size: 9)).foregroundStyle(.secondary)
-        }
-        .fixedSize()
-        .accessibilityLabel(hovered.map { "\(Self.captionDateFormatter.string(from: $0.day)) \(formatTokens($0.tokens)) 请求 Token" } ?? "使用强度")
     }
 
     private func intensityLegend(cellSize: CGFloat) -> some View {
