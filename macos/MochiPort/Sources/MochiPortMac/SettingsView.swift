@@ -3,7 +3,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
-    @EnvironmentObject private var glass: AIGlassCoordinator
+    @EnvironmentObject private var menubar: MenubarCoordinator
     @Environment(\.openURL) private var openURL
     @AppStorage("closeBehavior") private var closeBehavior = "menuBar"
     @State private var language = "zh-CN"
@@ -31,7 +31,7 @@ struct SettingsView: View {
             networkSettings
                 .tabItem { Label("网络", systemImage: "network") }
 
-            AIGlassSettingsView(settings: glass.settings)
+            MenubarSettingsView(settings: menubar.settings)
                 .tabItem { Label("使用量", systemImage: "chart.bar.xaxis") }
 
             diagnosticsSettings

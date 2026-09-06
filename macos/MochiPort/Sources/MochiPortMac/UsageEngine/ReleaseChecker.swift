@@ -4,7 +4,7 @@ import Foundation
 ///
 /// 하루 1회 `releases/latest`를 조회해 현재 버전보다 높으면 알림/배지로 안내한다.
 /// 자동 설치는 하지 않는다 — 클릭 시 릴리스 페이지를 열 뿐 (Sparkle 없이 최소 구현).
-public enum AIGlassUpdateChecker {
+public enum ReleaseChecker {
     public struct Release: Equatable, Sendable {
         /// "0.11.0" — 태그의 "v" 접두사를 제거한 버전.
         public let version: String

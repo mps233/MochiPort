@@ -1,13 +1,6 @@
 import SwiftUI
 import Charts
 
-/// 패널이 열릴 때마다 count를 올려 콘텐츠(`.id`)를 재생성 → onAppear 애니메이션 재생.
-@MainActor
-@Observable
-final class OpenToken {
-    var count = 0
-}
-
 struct DashboardView: View {
     let store: UsageStore
     /// 30일 영구 통계 (옵셔널 — nil이면 추이 탭의 30일 토글 숨김).
@@ -23,10 +16,6 @@ struct DashboardView: View {
     var updateState: UpdateState? = nil
     /// 톱니바퀴 → 설정 창 열기.
     var onSettings: () -> Void = {}
-    /// 탭 전환 등 콘텐츠 높이 변화 시 패널 리사이즈 요청.
-    var onResize: () -> Void = {}
-    /// 패널이 열릴 때마다 count 증가 — `.id`로 콘텐츠 재생성해 첫 진입 애니메이션 재생.
-    var openToken: OpenToken? = nil
     @State private var tab: Tab = .overview
     /// 탭 진입 누적 횟수 — 재진입마다 탭 콘텐츠 identity를 갈아서(`.id`)
     /// 첫 오픈과 동일한 grow+stagger+카운트업 애니메이션을 재생한다.
@@ -100,7 +89,7 @@ struct DashboardView: View {
                         .id(tabVisit)
                         .transition(Self.tabTransition)
                 case .trends:
-                    TrendsTab(store: store, statsStore: statsStore, settings: settings, onResize: onResize)
+                    TrendsTab(store: store, statsStore: statsStore, settings: settings)
                         .id(tabVisit)
                         .transition(Self.tabTransition)
                 case .projects:
@@ -115,10 +104,8 @@ struct DashboardView: View {
             }
             .animation(.spring(duration: 0.32), value: tab)
         }
-        .id(openToken?.count ?? 0)
         .padding(14)
         .frame(width: 320)
-        .onChange(of: tab) { _, _ in onResize() }
     }
 }
 
@@ -778,8 +765,6 @@ private struct TrendsTab: View {
     /// nil이면 30일/잔디 토글 숨김.
     var statsStore: DailyStatsStore? = nil
     let settings: AppSettings
-    /// 세그먼트 변경 시 잔디(높이 ≠ 차트)로 패널 크기가 달라지므로 리사이즈를 트리거한다.
-    var onResize: () -> Void = {}
     @State private var range: UsageTrendRange = .week
     @Environment(\.colorScheme) private var colorScheme
 
@@ -793,10 +778,6 @@ private struct TrendsTab: View {
                 .labelsHidden()
                 .controlSize(.small)
                 .tint(colorScheme == .light ? Theme.usageLightOpaqueGray : .accentColor)
-                .onChange(of: range) { _, _ in
-                    // 잔디↔차트 높이가 달라 패널 크기 재조정 필요.
-                    onResize()
-                }
             }
             UsageTrendContent(
                 store: store,

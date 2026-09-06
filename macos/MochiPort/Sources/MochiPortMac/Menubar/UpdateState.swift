@@ -6,5 +6,5 @@ import Observation
 @Observable
 final class UpdateState {
     /// nil이면 최신 (배지 숨김).
-    var available: AIGlassUpdateChecker.Release?
+    var available: ReleaseChecker.Release?
 }

@@ -292,7 +292,7 @@ private struct MochiPortSidebarFooter: View {
 
 private struct OverviewView: View {
     @EnvironmentObject private var model: AppModel
-    @EnvironmentObject private var glass: AIGlassCoordinator
+    @EnvironmentObject private var menubar: MenubarCoordinator
     let onOpenGateway: () -> Void
     let onOpenMessaging: () -> Void
     let onOpenCodex: () -> Void
@@ -324,8 +324,8 @@ private struct OverviewView: View {
                 )
 
                 OverviewUsageInsightsView(
-                    store: glass.store,
-                    statsStore: glass.statsStore,
+                    store: menubar.store,
+                    statsStore: menubar.statsStore,
                     providerUsage: model.gatewayProviderUsage
                 )
                 .task {
@@ -349,7 +349,7 @@ private struct OverviewView: View {
             .padding(.top, MochiPortPageLayout.topPadding)
             .padding(.bottom, MochiPortPageLayout.bottomPadding)
         }
-        // Keep the scroll view edge-to-edge so the system sidebar glass can
+        // Keep the scroll view edge-to-edge so the system sidebar menubar can
         // sample live detail content underneath it; the resting inset still
         // keeps cards and headings clear of the sidebar via scroll margins.
         .contentMargins(

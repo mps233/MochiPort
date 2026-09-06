@@ -140,12 +140,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct MochiPortApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model: AppModel
-    @StateObject private var glass: AIGlassCoordinator
+    @StateObject private var menubar: MenubarCoordinator
 
     init() {
         let appModel = AppModel(fixtureStatus: Self.fixtureStatusFromEnvironment())
         _model = StateObject(wrappedValue: appModel)
-        _glass = StateObject(wrappedValue: AIGlassCoordinator())
+        _menubar = StateObject(wrappedValue: MenubarCoordinator())
 
         // SwiftUI may defer both the main window and the menu-bar content.
         // Start the first daemon probe from the App lifecycle itself so a
@@ -169,7 +169,7 @@ struct MochiPortApp: App {
         Window("MochiPort", id: "main") {
             RootView()
                 .environmentObject(model)
-                .environmentObject(glass)
+                .environmentObject(menubar)
                 .preferredColorScheme(preferredColorScheme)
                 .frame(minWidth: 760, minHeight: 540)
                 .background(WindowVisibilityObserver { visible in
@@ -200,19 +200,19 @@ struct MochiPortApp: App {
         }
 
         MenuBarExtra {
-            MenuBarStatusView(glass: glass, model: model)
+            MenuBarStatusView(menubar: menubar, model: model)
         } label: {
             MenuBarStatusLabel(model: model,
                                status: model.serviceStatus,
-                               glass: glass,
-                               settings: glass.settings)
+                               menubar: menubar,
+                               settings: menubar.settings)
         }
         .menuBarExtraStyle(.window)
 
         Settings {
             SettingsView()
                 .environmentObject(model)
-                .environmentObject(glass)
+                .environmentObject(menubar)
                 .preferredColorScheme(preferredColorScheme)
         }
     }
@@ -334,7 +334,7 @@ private struct WindowVisibilityObserver: NSViewRepresentable {
 private struct MenuBarStatusLabel: View {
     @ObservedObject var model: AppModel
     let status: ServiceStatus
-    @ObservedObject var glass: AIGlassCoordinator
+    @ObservedObject var menubar: MenubarCoordinator
     @Bindable var settings: AppSettings
 
     private var tint: Color {
@@ -390,11 +390,11 @@ private struct MenuBarStatusLabel: View {
         let now = Date()
         switch item {
         case .todayTokens:
-            return formatTokens(glass.store.todayTokens(now: now))
+            return formatTokens(menubar.store.todayTokens(now: now))
         case .burnRate:
-            return formatRate(glass.store.tokensPerMinute(windowMinutes: 3, now: now)) + "/m"
+            return formatRate(menubar.store.tokensPerMinute(windowMinutes: 3, now: now)) + "/m"
         case .usagePercent:
-            return Theme.formatUsagePercent(glass.store.maxUsedPercent)
+            return Theme.formatUsagePercent(menubar.store.maxUsedPercent)
         case .resetCountdown:
             return nearestResetCountdown(now: now) ?? "—"
         }
@@ -409,7 +409,7 @@ private struct MenuBarStatusLabel: View {
     }
 
     private func nearestResetCountdown(now: Date) -> String? {
-        let dates = glass.store.limits.values
+        let dates = menubar.store.limits.values
             .flatMap { $0 }
             .compactMap(\.resetsAt)
             .filter { $0 > now }
@@ -418,22 +418,22 @@ private struct MenuBarStatusLabel: View {
     }
 }
 
-/// The menu bar uses ai-glass's real dashboard implementation. HUD-specific
+/// The menu bar uses ai-menubar's real dashboard implementation. HUD-specific
 /// panels and hotkeys are intentionally absent; history and notifications stay
 /// available through the coordinator.
 private struct MenuBarStatusView: View {
-    @ObservedObject var glass: AIGlassCoordinator
+    @ObservedObject var menubar: MenubarCoordinator
     @ObservedObject var model: AppModel
 
     var body: some View {
         DashboardView(
-            store: glass.store,
-            statsStore: glass.statsStore,
-            settings: glass.settings,
+            store: menubar.store,
+            statsStore: menubar.statsStore,
+            settings: menubar.settings,
             providerUsage: model.gatewayProviderUsage,
             providerChannel: model.gatewayProviderChannel,
-            eventLog: glass.eventLog,
-            updateState: glass.updateState,
+            eventLog: menubar.eventLog,
+            updateState: menubar.updateState,
             onSettings: openSettings)
             .padding(8)
             .modifier(MenuBarWindowBackgroundModifier())

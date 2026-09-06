@@ -6,7 +6,7 @@ import Foundation
 /// lifecycle responsibilities: it reads local client logs, updates the
 /// dashboard stores, and turns usage milestones into history/notifications.
 @MainActor
-final class AIGlassCoordinator: ObservableObject {
+final class MenubarCoordinator: ObservableObject {
     let store = UsageStore()
     let settings = AppSettings()
     let eventLog = EventLog()
@@ -34,9 +34,16 @@ final class AIGlassCoordinator: ObservableObject {
     private var lastRecordDay: String?
 
     init() {
-        // 与原 ai-glass 共用历史数据库，确保迁移后趋势和 Codex 数值连续。
-        let path = Self.homePath("Library/Application Support/AIGlass/stats.db")
-        statsStore = DailyStatsStore(path: path.path)
+        // 历史用量数据库并入 MochiPort 目录：旧 AIGlass 路径仅作一次性搬迁来源，
+        // 保证迁移后趋势和 Codex 数值连续。
+        let support = Self.homePath("Library/Application Support")
+        let newPath = support.appendingPathComponent("MochiPort/stats.db")
+        let legacyPath = support.appendingPathComponent("AIGlass/stats.db")
+        if !FileManager.default.fileExists(atPath: newPath.path),
+           FileManager.default.fileExists(atPath: legacyPath.path) {
+            try? FileManager.default.copyItem(atPath: legacyPath.path, toPath: newPath.path)
+        }
+        statsStore = DailyStatsStore(path: newPath.path)
         start()
     }
 
@@ -320,8 +327,8 @@ final class AIGlassCoordinator: ObservableObject {
 
     func checkForUpdates() async {
         guard let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-              let release = await AIGlassUpdateChecker.fetchLatest(),
-              AIGlassUpdateChecker.isNewer(release.version, than: current) else { return }
+              let release = await ReleaseChecker.fetchLatest(),
+              ReleaseChecker.isNewer(release.version, than: current) else { return }
         updateState.available = release
         if settings.notifyUpdate { notifier.notify(title: "MochiPort 有新版本", subtitle: "v\(release.version)") }
     }

@@ -48,7 +48,8 @@ enum MenubarItem: String, CaseIterable, Identifiable {
     }
 }
 
-/// 사용자 설정. UserDefaults 백킹, 네임스페이스 키 `aiglass.*`.
+/// 用户设置。UserDefaults 持久化，键名空间 `mochiport.*`；
+/// 旧版 `aiglass.*` 键在首次读取前由 `migrateLegacyKeys()` 一次性搬迁。
 /// 단위 테스트는 코어가 아니므로 생략(수동 검증).
 @MainActor
 @Observable
@@ -56,27 +57,48 @@ final class AppSettings {
     private let defaults = UserDefaults.standard
 
     private enum Key {
-        static let warnThreshold = "aiglass.warnThreshold"
-        static let critThreshold = "aiglass.critThreshold"
-        static let notificationsEnabled = "aiglass.notificationsEnabled"
-        static let launchAtLogin = "aiglass.launchAtLogin"
-        static let menubarMode = "aiglass.menubarMode"
-        static let menubarItems = "aiglass.menubarItems"
-        static let funMilestone = "aiglass.funMilestone"
-        static let funRecord = "aiglass.funRecord"
-        static let funStreak = "aiglass.funStreak"
-        static let funWeeklyReport = "aiglass.funWeeklyReport"
-        static let funSoundEnabled = "aiglass.funSoundEnabled"
-        static let onboardingCompleted = "aiglass.onboardingCompleted"
-        static let notifyLimitThreshold = "aiglass.notifyLimitThreshold"
-        static let notifyDepletion = "aiglass.notifyDepletion"
-        static let notifyWindowReset = "aiglass.notifyWindowReset"
-        static let notifyBurnSpike = "aiglass.notifyBurnSpike"
-        static let notifyComeback = "aiglass.notifyComeback"
-        static let notifyBriefing = "aiglass.notifyBriefing"
-        static let notifyUpdate = "aiglass.notifyUpdate"
-        static let realMode = "aiglass.realMode"
-        static let customMessages = "aiglass.customMessages"
+        static let warnThreshold = "mochiport.warnThreshold"
+        static let critThreshold = "mochiport.critThreshold"
+        static let notificationsEnabled = "mochiport.notificationsEnabled"
+        static let launchAtLogin = "mochiport.launchAtLogin"
+        static let menubarMode = "mochiport.menubarMode"
+        static let menubarItems = "mochiport.menubarItems"
+        static let funMilestone = "mochiport.funMilestone"
+        static let funRecord = "mochiport.funRecord"
+        static let funStreak = "mochiport.funStreak"
+        static let funWeeklyReport = "mochiport.funWeeklyReport"
+        static let funSoundEnabled = "mochiport.funSoundEnabled"
+        static let onboardingCompleted = "mochiport.onboardingCompleted"
+        static let notifyLimitThreshold = "mochiport.notifyLimitThreshold"
+        static let notifyDepletion = "mochiport.notifyDepletion"
+        static let notifyWindowReset = "mochiport.notifyWindowReset"
+        static let notifyBurnSpike = "mochiport.notifyBurnSpike"
+        static let notifyComeback = "mochiport.notifyComeback"
+        static let notifyBriefing = "mochiport.notifyBriefing"
+        static let notifyUpdate = "mochiport.notifyUpdate"
+        static let realMode = "mochiport.realMode"
+        static let customMessages = "mochiport.customMessages"
+
+        /// 旧 `aiglass.*` 键一次性搬迁到 `mochiport.*`：新键缺失且旧键存在时复制。
+        /// 旧键保留不删，便于降级时回读。
+        static func migrateLegacyKeys() {
+            let defaults = UserDefaults.standard
+            let keys = [
+                warnThreshold, critThreshold, notificationsEnabled, launchAtLogin,
+                menubarMode, menubarItems, funMilestone, funRecord, funStreak,
+                funWeeklyReport, funSoundEnabled, onboardingCompleted,
+                notifyLimitThreshold, notifyDepletion, notifyWindowReset,
+                notifyBurnSpike, notifyComeback, notifyBriefing, notifyUpdate,
+                realMode, customMessages,
+            ]
+            for key in keys {
+                let legacy = key.replacingOccurrences(of: "mochiport.", with: "aiglass.")
+                if defaults.object(forKey: key) == nil,
+                   let value = defaults.object(forKey: legacy) {
+                    defaults.set(value, forKey: key)
+                }
+            }
+        }
     }
 
     var warnThreshold: Double {
@@ -178,6 +200,7 @@ final class AppSettings {
     }
 
     init() {
+        Key.migrateLegacyKeys()
         warnThreshold = defaults.object(forKey: Key.warnThreshold) as? Double ?? 70
         critThreshold = defaults.object(forKey: Key.critThreshold) as? Double ?? 90
         notificationsEnabled = defaults.object(forKey: Key.notificationsEnabled) as? Bool ?? false

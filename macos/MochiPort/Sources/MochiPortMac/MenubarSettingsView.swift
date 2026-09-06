@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// MochiPort 的本机使用量与通知设置。悬浮窗相关功能不在本项目中启用。
-struct AIGlassSettingsView: View {
+struct MenubarSettingsView: View {
     @Bindable var settings: AppSettings
 
     var body: some View {

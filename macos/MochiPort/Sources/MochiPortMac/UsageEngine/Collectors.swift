@@ -55,7 +55,7 @@ private struct CodexRecentFile: Sendable {
 
 /// Codex 会话日志采集器。
 ///
-/// 与原 ai-glass 保持相同的数据范围：扫描最近 8 天的全部 JSONL 文件，
+/// 与原 ai-menubar 保持相同的数据范围：扫描最近 8 天的全部 JSONL 文件，
 /// 每个文件从头读取一次，后续刷新只读取新增内容。这样趋势和当日统计不会
 /// 因为文件数量或单文件大小被静默截断。
 @MainActor
