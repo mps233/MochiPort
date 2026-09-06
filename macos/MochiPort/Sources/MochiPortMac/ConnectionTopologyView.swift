@@ -11,7 +11,14 @@ struct ConnectionTopologyView: View {
     private let nodeHeight: CGFloat = 52
     private let compactNodeHeight: CGFloat = 28
     private let nodeSpacing: CGFloat = 10
-    private let topologyHeight: CGFloat = 286
+    private let topologyVerticalPadding: CGFloat = 12
+
+    /// 图高 = 最高的一列 + 上下呼吸空间；不再固定 286pt 留出大片空带。
+    private var topologyHeight: CGFloat {
+        let leftStack = leftNodes.reduce(0) { $0 + ($1.isCompact ? compactNodeHeight : nodeHeight) }
+        let rightStack = rightNodes.reduce(0) { $0 + ($1.isCompact ? compactNodeHeight : nodeHeight) }
+        return max(leftStack, rightStack) + topologyVerticalPadding * 2
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -63,6 +70,7 @@ struct ConnectionTopologyView: View {
                 serviceWidth: metrics.serviceWidth,
                 gap: metrics.gap,
                 layoutPadding: metrics.layoutPadding,
+                verticalPadding: topologyVerticalPadding,
                 leftBranchTints: leftNodes.map(\.tint),
                 rightBranchTints: rightNodes.map(\.tint)
             )
@@ -93,13 +101,12 @@ struct ConnectionTopologyView: View {
         width: CGFloat,
         side: TopologyNodeSide
     ) -> some View {
-        VStack(spacing: nodeSpacing) {
+        VStack(alignment: .leading, spacing: nodeSpacing) {
             ForEach(nodes) { node in
                 TopologyNodeView(node: node)
             }
         }
-        .frame(width: width)
-        .frame(maxHeight: .infinity, alignment: .center)
+        .frame(width: width, alignment: .top)
         .accessibilityIdentifier("topology.column.\(side.rawValue)")
     }
 
@@ -604,13 +611,21 @@ private struct TopologyConnectorCanvas: View {
     let serviceWidth: CGFloat
     let gap: CGFloat
     let layoutPadding: CGFloat
+    let verticalPadding: CGFloat
     let leftBranchTints: [StatusTint]
     let rightBranchTints: [StatusTint]
 
     var body: some View {
         Canvas { context, _ in
-            let leftCenters = centers(heights: leftHeights)
-            let rightCenters = centers(heights: rightHeights)
+            // 行高 = 最高的一列；两列在行内垂直居中（与 HStack .center 渲染一致）。
+            let rowTotal = { (h: [CGFloat]) -> CGFloat in
+                h.reduce(0, +) + CGFloat(max(0, h.count - 1)) * nodeSpacing
+            }
+            let leftTotal = rowTotal(leftHeights)
+            let rightTotal = rowTotal(rightHeights)
+            let rowHeight = max(leftTotal, rightTotal)
+            let leftCenters = centers(heights: leftHeights, rowTop: verticalPadding + (rowHeight - leftTotal) / 2)
+            let rightCenters = centers(heights: rightHeights, rowTop: verticalPadding + (rowHeight - rightTotal) / 2)
             let serviceLeft = layoutPadding + sideWidth + gap
             let serviceRight = serviceLeft + serviceWidth
             let leftNodeEdge = layoutPadding + sideWidth
@@ -643,9 +658,8 @@ private struct TopologyConnectorCanvas: View {
         .allowsHitTesting(false)
     }
 
-    private func centers(heights: [CGFloat]) -> [CGFloat] {
-        let total = heights.reduce(0, +) + CGFloat(max(0, heights.count - 1)) * nodeSpacing
-        let top = max(0, (size.height - total) / 2)
+    private func centers(heights: [CGFloat], rowTop: CGFloat) -> [CGFloat] {
+        let top = rowTop
         var centers: [CGFloat] = []
         var offset = top
         for height in heights {
