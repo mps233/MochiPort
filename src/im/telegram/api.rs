@@ -555,11 +555,26 @@ impl TelegramApi {
     }
 
     pub async fn send_text(&self, chat_id: &str, text: &str) -> Result<i64> {
-        let mut body = serde_json::json!({
-            "text": text,
-            "disable_web_page_preview": true,
-        });
-        add_message_target(&mut body, chat_id);
+        let body = send_text_body(chat_id, text, None, false);
+        let message: TelegramMessage = self.post("sendMessage", &body).await?;
+        Ok(message.message_id)
+    }
+
+    /// 静默版 `send_text`：不触发客户端响铃，用于过程性消息。
+    pub async fn send_text_silent(&self, chat_id: &str, text: &str) -> Result<i64> {
+        let body = send_text_body(chat_id, text, None, true);
+        let message: TelegramMessage = self.post("sendMessage", &body).await?;
+        Ok(message.message_id)
+    }
+
+    /// 静默版 `send_text_parse_mode`，用于多段回复的续段与过程文本。
+    pub async fn send_text_parse_mode_silent(
+        &self,
+        chat_id: &str,
+        text: &str,
+        parse_mode: TelegramParseMode,
+    ) -> Result<i64> {
+        let body = send_text_body(chat_id, text, Some(parse_mode), true);
         let message: TelegramMessage = self.post("sendMessage", &body).await?;
         Ok(message.message_id)
     }
@@ -570,12 +585,7 @@ impl TelegramApi {
         text: &str,
         parse_mode: TelegramParseMode,
     ) -> Result<i64> {
-        let mut body = serde_json::json!({
-            "text": text,
-            "parse_mode": parse_mode,
-            "disable_web_page_preview": true,
-        });
-        add_message_target(&mut body, chat_id);
+        let body = send_text_body(chat_id, text, Some(parse_mode), false);
         let message: TelegramMessage = self.post("sendMessage", &body).await?;
         Ok(message.message_id)
     }
@@ -586,12 +596,8 @@ impl TelegramApi {
         text: &str,
         reply_markup: serde_json::Value,
     ) -> Result<i64> {
-        let mut body = serde_json::json!({
-            "text": text,
-            "disable_web_page_preview": true,
-            "reply_markup": reply_markup,
-        });
-        add_message_target(&mut body, chat_id);
+        let mut body = send_text_body(chat_id, text, None, false);
+        body["reply_markup"] = reply_markup;
         let message: TelegramMessage = self.post("sendMessage", &body).await?;
         Ok(message.message_id)
     }
@@ -603,13 +609,8 @@ impl TelegramApi {
         reply_markup: serde_json::Value,
         parse_mode: TelegramParseMode,
     ) -> Result<i64> {
-        let mut body = serde_json::json!({
-            "text": text,
-            "parse_mode": parse_mode,
-            "disable_web_page_preview": true,
-            "reply_markup": reply_markup,
-        });
-        add_message_target(&mut body, chat_id);
+        let mut body = send_text_body(chat_id, text, Some(parse_mode), false);
+        body["reply_markup"] = reply_markup;
         let message: TelegramMessage = self.post("sendMessage", &body).await?;
         Ok(message.message_id)
     }
@@ -1092,7 +1093,8 @@ impl TelegramApi {
         }
 
         let url = format!(
-            "{TELEGRAM_API_BASE}/bot{}/{}",
+            "{}/bot{}/{}",
+            self.api_base(),
             self.settings.bot_token.trim(),
             method
         );
@@ -1327,6 +1329,27 @@ fn add_message_target(body: &mut serde_json::Value, target: &str) {
     add_message_thread_id(body, target);
 }
 
+/// sendMessage 文本消息的统一 body：`silent = true` 写入 `disable_notification`。
+fn send_text_body(
+    chat_id: &str,
+    text: &str,
+    parse_mode: Option<TelegramParseMode>,
+    silent: bool,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "text": text,
+        "disable_web_page_preview": true,
+    });
+    if let Some(parse_mode) = parse_mode {
+        body["parse_mode"] = serde_json::json!(parse_mode);
+    }
+    if silent {
+        body["disable_notification"] = serde_json::json!(true);
+    }
+    add_message_target(&mut body, chat_id);
+    body
+}
+
 fn add_message_thread_id(body: &mut serde_json::Value, target: &str) {
     if let (_, Some(topic_id)) = split_telegram_message_target(target) {
         body["message_thread_id"] = serde_json::json!(topic_id);
@@ -1389,7 +1412,7 @@ mod tests {
         edit_forum_topic_body, edit_message_reply_markup_body, edit_message_text_body,
         edit_rich_message_body, get_updates_request_timeout, send_chat_action_body,
         send_message_draft_body, send_photo_group_body, send_photo_group_media_body,
-        send_rich_message_body, send_rich_message_draft_body,
+        send_rich_message_body, send_rich_message_draft_body, send_text_body,
     };
     use crate::im::telegram::types::TelegramSettings;
 
@@ -1588,6 +1611,19 @@ mod tests {
             serde_json::json!([])
         );
         assert_eq!(body["disable_web_page_preview"], true);
+    }
+
+    #[test]
+    fn send_text_body_marks_silent_messages() {
+        let normal = send_text_body("42", "hi", Some(TelegramParseMode::Html), false);
+        assert_eq!(normal["parse_mode"], "HTML");
+        assert_eq!(normal["disable_web_page_preview"], true);
+        assert!(normal.get("disable_notification").is_none());
+
+        let silent = send_text_body("42", "hi", None, true);
+        assert_eq!(silent["disable_notification"], true);
+        assert!(silent.get("parse_mode").is_none());
+        assert_eq!(silent["disable_web_page_preview"], true);
     }
 
     #[test]

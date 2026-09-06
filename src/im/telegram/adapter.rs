@@ -6,7 +6,7 @@ use tokio::time::{Duration, sleep};
 use crate::{
     chain_log,
     im::core::{
-        i18n::ImText,
+        i18n::{ImLocale, ImText},
         text_utils::log_text_preview,
         thread::{ThreadCreateOption, ThreadModelChoice},
     },
@@ -14,7 +14,7 @@ use crate::{
         ObservedSetting, PendingApproval, TelegramModelSwitchRequestState,
         TelegramThreadSettingsSpeed, TelegramThreadSettingsStage, approval_request_fingerprint,
     },
-    types::split_telegram_message_target,
+    types::{now_ms, split_telegram_message_target},
 };
 
 use super::api::{
@@ -24,6 +24,10 @@ use super::api::{
 
 const TELEGRAM_MAX_MESSAGE_CHARS: usize = 4096;
 const TELEGRAM_CONTINUATION_OVERHEAD: usize = 30;
+/// 代码围栏跨段时补 ```` ``` ```` 的开销预算（语言标注最长 24 字符）。
+const TELEGRAM_FENCE_RESERVE: usize = 32;
+/// 最终回复切块数超过该值时改发文件附件，避免长输出刷屏。
+const TELEGRAM_TURN_DOCUMENT_CHUNK_LIMIT: usize = 2;
 const TELEGRAM_CHUNK_DELAY_MS: u64 = 100;
 const TELEGRAM_APPROVAL_SUMMARY_MAX_CHARS: usize = 2800;
 const TELEGRAM_APPROVAL_DECISION_MAX_CHARS: usize = 120;
@@ -31,6 +35,7 @@ const TELEGRAM_APPROVAL_DECISION_MAX_CHARS: usize = 120;
 #[derive(Clone)]
 pub struct TelegramAdapter {
     api: TelegramApi,
+    locale: ImLocale,
 }
 
 #[derive(Debug, Clone)]
@@ -42,13 +47,40 @@ pub struct TelegramThreadListEntry {
 
 impl TelegramAdapter {
     pub fn new(api: TelegramApi) -> Self {
-        Self { api }
+        Self {
+            api,
+            locale: ImLocale::ZhCn,
+        }
+    }
+
+    /// 按配置语言渲染切块续段标记等适配层文案。
+    pub fn with_locale(api: TelegramApi, locale: ImLocale) -> Self {
+        Self { api, locale }
+    }
+
+    fn chunk_markers(&self) -> (&'static str, &'static str) {
+        match self.locale {
+            ImLocale::ZhCn => ("（未完待续）", "（接上文）"),
+            ImLocale::EnUs => ("(continues...)", "(continued)"),
+        }
     }
 
     pub async fn send_text(&self, target: &str, text: &str) -> Result<String> {
+        self.send_text_with_silence(target, text, false).await
+    }
+
+    /// `silent = true` 用于“完整”颗粒度的过程文本：消息照发，但不触发响铃。
+    /// 多段回复的续段（第二段起）始终静默，只有首段会响铃。
+    pub async fn send_text_with_silence(
+        &self,
+        target: &str,
+        text: &str,
+        silent: bool,
+    ) -> Result<String> {
         let text = telegram_cleanup_text(text);
         let mut last_message_id = 0;
-        let chunks = telegram_text_chunks(&text);
+        let (continues_marker, continued_marker) = self.chunk_markers();
+        let chunks = telegram_text_chunks(&text, continues_marker, continued_marker);
         log_adapter(
             "send_text_begin",
             format!(
@@ -60,59 +92,107 @@ impl TelegramAdapter {
             ),
         );
         for (index, chunk) in chunks.iter().enumerate() {
+            let chunk_silent = silent || index > 0;
             let html = telegram_markdown_to_html(chunk);
             log_adapter(
                 "send_text_chunk_begin",
                 format!(
-                    "chat={} chunk={}/{} chars={} preview={}",
+                    "chat={} chunk={}/{} silent={} chars={} preview={}",
                     target,
                     index + 1,
                     chunks.len(),
+                    chunk_silent,
                     chunk.chars().count(),
                     log_text_preview(chunk, 500)
                 ),
             );
-            last_message_id = match self
-                .api
-                .send_text_parse_mode(target, &html, TelegramParseMode::Html)
-                .await
-            {
-                Ok(message_id) => {
-                    log_adapter(
-                        "send_text_chunk_sent",
-                        format!(
-                            "chat={} chunk={}/{} mode=html message={}",
-                            target,
-                            index + 1,
-                            chunks.len(),
-                            message_id
-                        ),
-                    );
-                    message_id
+            last_message_id = if chunk_silent {
+                match self
+                    .api
+                    .send_text_parse_mode_silent(target, &html, TelegramParseMode::Html)
+                    .await
+                {
+                    Ok(message_id) => {
+                        log_adapter(
+                            "send_text_chunk_sent",
+                            format!(
+                                "chat={} chunk={}/{} mode=html silent=true message={}",
+                                target,
+                                index + 1,
+                                chunks.len(),
+                                message_id
+                            ),
+                        );
+                        message_id
+                    }
+                    Err(err) => {
+                        log_adapter(
+                            "send_text_html_failed",
+                            format!(
+                                "chat={} chunk={}/{} fallback=plain err={}",
+                                target,
+                                index + 1,
+                                chunks.len(),
+                                err
+                            ),
+                        );
+                        let message_id = self.api.send_text_silent(target, chunk).await?;
+                        log_adapter(
+                            "send_text_chunk_sent",
+                            format!(
+                                "chat={} chunk={}/{} mode=plain silent=true message={}",
+                                target,
+                                index + 1,
+                                chunks.len(),
+                                message_id
+                            ),
+                        );
+                        message_id
+                    }
                 }
-                Err(err) => {
-                    log_adapter(
-                        "send_text_html_failed",
-                        format!(
-                            "chat={} chunk={}/{} fallback=plain err={}",
-                            target,
-                            index + 1,
-                            chunks.len(),
-                            err
-                        ),
-                    );
-                    let message_id = self.api.send_text(target, chunk).await?;
-                    log_adapter(
-                        "send_text_chunk_sent",
-                        format!(
-                            "chat={} chunk={}/{} mode=plain message={}",
-                            target,
-                            index + 1,
-                            chunks.len(),
-                            message_id
-                        ),
-                    );
-                    message_id
+            } else {
+                match self
+                    .api
+                    .send_text_parse_mode(target, &html, TelegramParseMode::Html)
+                    .await
+                {
+                    Ok(message_id) => {
+                        log_adapter(
+                            "send_text_chunk_sent",
+                            format!(
+                                "chat={} chunk={}/{} mode=html message={}",
+                                target,
+                                index + 1,
+                                chunks.len(),
+                                message_id
+                            ),
+                        );
+                        message_id
+                    }
+                    Err(err) => {
+                        log_adapter(
+                            "send_text_html_failed",
+                            format!(
+                                "chat={} chunk={}/{} fallback=plain err={}",
+                                target,
+                                index + 1,
+                                chunks.len(),
+                                err
+                            ),
+                        );
+                        let message_id = self.api.send_text(target, chunk).await?;
+                        log_adapter(
+                            "send_text_chunk_sent",
+                            format!(
+                                "chat={} chunk={}/{} mode=plain message={}",
+                                target,
+                                index + 1,
+                                chunks.len(),
+                                message_id
+                            ),
+                        );
+                        message_id
+                    }
                 }
             };
             if index + 1 < chunks.len() {
@@ -136,14 +216,34 @@ impl TelegramAdapter {
         target: &str,
         reply_text: &str,
         footer_text: &str,
+        elapsed_ms: Option<u128>,
     ) -> Result<String> {
-        let chunks = telegram_turn_completed_chunks(reply_text, footer_text);
+        let header = self.turn_completed_card_header(elapsed_ms);
+        let (continues_marker, continued_marker) = self.chunk_markers();
+        let chunks =
+            telegram_turn_completed_chunks(reply_text, &header, continues_marker, continued_marker);
+        // 超过切块上限的长回复改发文件附件：避免刷屏，保存和复制也更方便；
+        // 发送失败时回退到普通分段发送。
+        if chunks.len() > TELEGRAM_TURN_DOCUMENT_CHUNK_LIMIT {
+            match self
+                .send_turn_completed_document(target, reply_text, footer_text)
+                .await
+            {
+                Ok(message_id) => return Ok(message_id),
+                Err(err) => {
+                    log_adapter(
+                        "send_turn_document_failed",
+                        format!("chat={} chunks={} err={}", target, chunks.len(), err),
+                    );
+                }
+            }
+        }
         let mut last_message_id = String::new();
         for (index, chunk) in chunks.iter().enumerate() {
             let is_last = index + 1 == chunks.len();
             if is_last {
                 let (rich_markdown, fallback_markdown) =
-                    telegram_turn_completed_messages(chunk, footer_text);
+                    telegram_turn_completed_messages(chunk, &header);
                 let rich_message = TelegramInputRichMessage::markdown(rich_markdown);
                 last_message_id = self
                     .send_or_update_rich_message(target, None, &rich_message, &fallback_markdown)
@@ -156,13 +256,79 @@ impl TelegramAdapter {
         Ok(last_message_id)
     }
 
+    /// 超长最终回复改发 `.md` 文件；caption 放通知语和署名，正文完整进附件。
+    async fn send_turn_completed_document(
+        &self,
+        target: &str,
+        reply_text: &str,
+        footer_text: &str,
+    ) -> Result<String> {
+        let stamp = now_ms() as u64;
+        let path = std::env::temp_dir().join(format!("mochiport-turn-{stamp}.md"));
+        std::fs::write(&path, reply_text)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        let mut caption = self.turn_document_notice(reply_text.chars().count());
+        let footer = footer_text.trim();
+        if !footer.is_empty() {
+            caption.push_str("\n\n");
+            caption.push_str(footer);
+        }
+        caption = caption.chars().take(980).collect();
+        let send_result = self
+            .api
+            .send_document_file(
+                &target,
+                &path,
+                Some(&caption),
+                Some(TelegramParseMode::Html),
+            )
+            .await;
+        let _ = std::fs::remove_file(&path);
+        let message_id = send_result?;
+        log_adapter(
+            "send_turn_document_sent",
+            format!(
+                "chat={} chars={} message={}",
+                target,
+                reply_text.chars().count(),
+                message_id
+            ),
+        );
+        Ok(message_id.to_string())
+    }
+
+    fn turn_document_notice(&self, chars: usize) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("回复较长（{chars} 字符），已作为附件发送。"),
+            ImLocale::EnUs => format!("Long reply ({chars} chars) attached as a file."),
+        }
+    }
+
+    /// 极简卡片头：`✅ 已完成 · 3分12秒`；耗时不足 1 秒或未知时只显示状态。
+    fn turn_completed_card_header(&self, elapsed_ms: Option<u128>) -> String {
+        let base = match self.locale {
+            ImLocale::ZhCn => "✅ 已完成",
+            ImLocale::EnUs => "✅ Completed",
+        };
+        match elapsed_ms.filter(|ms| *ms >= 1_000) {
+            Some(ms) => format!("{base} · {}", format_turn_elapsed(self.locale, ms)),
+            None => base.to_string(),
+        }
+    }
+
     pub async fn send_user_message_quote(
         &self,
         target: &str,
         message_text: &str,
         credit_text: &str,
     ) -> Result<String> {
-        let chunks = telegram_user_message_chunks(message_text, credit_text);
+        let (continues_marker, continued_marker) = self.chunk_markers();
+        let chunks = telegram_user_message_chunks(
+            message_text,
+            credit_text,
+            continues_marker,
+            continued_marker,
+        );
         let mut last_message_id = String::new();
         for (index, chunk) in chunks.iter().enumerate() {
             let (rich_html, fallback_markdown) = telegram_user_message_messages(chunk, credit_text);
@@ -551,7 +717,8 @@ impl TelegramAdapter {
         let Some(keyboard) = approval_keyboard(approval, im_text) else {
             return self.send_text(target, &text).await;
         };
-        let chunks = telegram_text_chunks(&text);
+        let (continues_marker, continued_marker) = self.chunk_markers();
+        let chunks = telegram_text_chunks(&text, continues_marker, continued_marker);
         let mut last_message_id = 0;
         log_adapter(
             "send_approval_begin",
@@ -2107,10 +2274,18 @@ fn telegram_markdown_to_html(text: &str) -> String {
         if line.trim_start().starts_with("```") {
             if in_code_block {
                 html.push_str("</code></pre>\n");
+                in_code_block = false;
             } else {
-                html.push_str("<pre><code>");
+                match fence_language(line) {
+                    Some(language) => {
+                        html.push_str("<pre><code class=\"language-");
+                        html.push_str(&language);
+                        html.push_str("\">");
+                    }
+                    None => html.push_str("<pre><code>"),
+                }
+                in_code_block = true;
             }
-            in_code_block = !in_code_block;
             continue;
         }
         if in_code_block {
@@ -2243,23 +2418,45 @@ fn is_markdown_fence_line(line: &str) -> bool {
     line.starts_with("```") || line.starts_with("~~~")
 }
 
-fn telegram_turn_completed_messages(reply_text: &str, footer_text: &str) -> (String, String) {
+/// 极简卡片：`**✅ 已完成 · 耗时**` + 分隔线 + 正文；署名不再随正文发送。
+fn telegram_turn_completed_messages(reply_text: &str, header: &str) -> (String, String) {
     let reply_text = telegram_cleanup_text(reply_text).trim().to_string();
-    let footer_text = footer_text.trim();
-    if footer_text.is_empty() {
-        return (reply_text.clone(), reply_text);
-    }
-    let rich_footer = telegram_html_escape(footer_text);
+    let header = header.trim();
+    let separator = super::rich_blocks::TELEGRAM_CARD_SEPARATOR;
     if reply_text.is_empty() {
-        return (
-            format!("<footer>{rich_footer}</footer>"),
-            footer_text.to_string(),
-        );
+        return (format!("**{header}**"), header.to_string());
     }
     (
-        format!("{reply_text}\n\n<footer>{rich_footer}</footer>"),
-        format!("{reply_text}\n\n{footer_text}"),
+        format!("**{header}**\n{separator}\n\n{reply_text}"),
+        format!("{header}\n{separator}\n\n{reply_text}"),
     )
+}
+
+fn format_turn_elapsed(locale: ImLocale, elapsed_ms: u128) -> String {
+    let total_seconds = (elapsed_ms / 1000) as u64;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    match locale {
+        ImLocale::ZhCn => {
+            if hours > 0 {
+                format!("{hours}小时{minutes}分")
+            } else if minutes > 0 {
+                format!("{minutes}分{seconds}秒")
+            } else {
+                format!("{seconds}秒")
+            }
+        }
+        ImLocale::EnUs => {
+            if hours > 0 {
+                format!("{hours}h{minutes:02}m")
+            } else if minutes > 0 {
+                format!("{minutes}m{seconds:02}s")
+            } else {
+                format!("{seconds}s")
+            }
+        }
+    }
 }
 
 fn telegram_user_message_messages(message_text: &str, credit_text: &str) -> (String, String) {
@@ -2319,32 +2516,50 @@ fn truncate_button_text(text: &str) -> String {
     output
 }
 
-fn telegram_text_chunks(text: &str) -> Vec<String> {
-    telegram_text_chunks_with_limit(text, TELEGRAM_MAX_MESSAGE_CHARS)
+fn telegram_text_chunks(text: &str, continues_marker: &str, continued_marker: &str) -> Vec<String> {
+    telegram_text_chunks_with_limit(
+        text,
+        TELEGRAM_MAX_MESSAGE_CHARS,
+        continues_marker,
+        continued_marker,
+    )
 }
 
-fn telegram_turn_completed_chunks(text: &str, footer_text: &str) -> Vec<String> {
-    let footer_chars = footer_text.trim().chars().count();
-    let reserved_chars = if footer_chars == 0 {
-        0
-    } else {
-        footer_chars.saturating_add(2)
-    };
+fn telegram_turn_completed_chunks(
+    text: &str,
+    header: &str,
+    continues_marker: &str,
+    continued_marker: &str,
+) -> Vec<String> {
+    // 头部 + 分隔线 + 分段空行的字符预算。
+    let reserved_chars = header.trim().chars().count()
+        + super::rich_blocks::TELEGRAM_CARD_SEPARATOR.chars().count()
+        + 4;
     let max_chars = TELEGRAM_MAX_MESSAGE_CHARS
         .saturating_sub(reserved_chars)
         .max(TELEGRAM_CONTINUATION_OVERHEAD + 1);
-    telegram_text_chunks_with_limit(text, max_chars)
+    telegram_text_chunks_with_limit(text, max_chars, continues_marker, continued_marker)
 }
 
-fn telegram_user_message_chunks(text: &str, credit_text: &str) -> Vec<String> {
+fn telegram_user_message_chunks(
+    text: &str,
+    credit_text: &str,
+    continues_marker: &str,
+    continued_marker: &str,
+) -> Vec<String> {
     let reserved_chars = credit_text.trim().chars().count().saturating_add(2);
     let max_chars = TELEGRAM_MAX_MESSAGE_CHARS
         .saturating_sub(reserved_chars)
         .max(TELEGRAM_CONTINUATION_OVERHEAD + 1);
-    telegram_text_chunks_with_limit(text, max_chars)
+    telegram_text_chunks_with_limit(text, max_chars, continues_marker, continued_marker)
 }
 
-fn telegram_text_chunks_with_limit(text: &str, max_chars: usize) -> Vec<String> {
+fn telegram_text_chunks_with_limit(
+    text: &str,
+    max_chars: usize,
+    continues_marker: &str,
+    continued_marker: &str,
+) -> Vec<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return vec![" ".to_string()];
@@ -2353,21 +2568,75 @@ fn telegram_text_chunks_with_limit(text: &str, max_chars: usize) -> Vec<String> 
         return vec![trimmed.to_string()];
     }
 
-    let chunks = split_message_for_telegram(trimmed, max_chars);
+    // 含代码围栏时预留跨段补围栏的开销，避免补齐后超出单条上限。
+    let effective_max = if trimmed.contains("```") {
+        max_chars.saturating_sub(TELEGRAM_FENCE_RESERVE)
+    } else {
+        max_chars
+    };
+    let chunks = rebalance_code_fences(split_message_for_telegram(trimmed, effective_max));
     let chunk_count = chunks.len();
     chunks
         .into_iter()
         .enumerate()
         .map(|(index, chunk)| {
             if index == 0 {
-                format!("{chunk}\n\n(continues...)")
+                format!("{chunk}\n\n{continues_marker}")
             } else if index + 1 == chunk_count {
-                format!("(continued)\n\n{chunk}")
+                format!("{continued_marker}\n\n{chunk}")
             } else {
-                format!("(continued)\n\n{chunk}\n\n(continues...)")
+                format!("{continued_marker}\n\n{chunk}\n\n{continues_marker}")
             }
         })
         .collect()
+}
+
+/// 提取 ``` 围栏行上的语言标注；仅保留安全字符，用于 `<code class="language-…">`。
+fn fence_language(line: &str) -> Option<String> {
+    let info = line.trim_start().strip_prefix("```")?.trim();
+    let language: String = info
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_' || *ch == '+')
+        .take(24)
+        .collect();
+    if language.is_empty() {
+        None
+    } else {
+        Some(language)
+    }
+}
+
+/// 切块可能落在代码围栏中间：跨段时补齐闭合/起始围栏，
+/// 否则后续分段会被当普通文本渲染，样式全部丢失。
+fn rebalance_code_fences(chunks: Vec<String>) -> Vec<String> {
+    let mut rebalanced = Vec::with_capacity(chunks.len());
+    let mut open_language: Option<String> = None;
+    for chunk in chunks {
+        let mut body = String::with_capacity(chunk.len() + 16);
+        if let Some(language) = &open_language {
+            body.push_str("```");
+            body.push_str(language);
+            body.push('\n');
+        }
+        for line in chunk.lines() {
+            body.push_str(line);
+            body.push('\n');
+            if line.trim_start().starts_with("```") {
+                open_language = match open_language {
+                    Some(_) => None,
+                    None => fence_language(line),
+                };
+            }
+        }
+        if open_language.is_some() {
+            body.push_str("```");
+        }
+        rebalanced.push(body.trim_end().to_string());
+    }
+    rebalanced
 }
 
 fn split_message_for_telegram(message: &str, max_chars: usize) -> Vec<String> {
@@ -2411,6 +2680,7 @@ fn best_split_point(search_area: &str, hard_split: usize, content_limit: usize) 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::{
         im::core::i18n::ImText,
@@ -2464,9 +2734,14 @@ mod tests {
         );
     }
 
+    /// 英文标记的快捷入口，便于断言；默认 locale（中文）的标记由适配层选择。
+    fn chunks_en(text: &str) -> Vec<String> {
+        telegram_text_chunks(text, "(continues...)", "(continued)")
+    }
+
     #[test]
     fn chunks_long_text_on_char_boundaries() {
-        let chunks = telegram_text_chunks(&"你好世界".repeat(1100));
+        let chunks = chunks_en(&"你好世界".repeat(1100));
 
         assert!(chunks.len() > 1);
         assert!(
@@ -2481,14 +2756,14 @@ mod tests {
     #[test]
     fn keeps_single_message_when_within_limit() {
         let text = "hello";
-        let chunks = telegram_text_chunks(text);
+        let chunks = chunks_en(text);
 
         assert_eq!(chunks, vec!["hello"]);
     }
 
     #[test]
     fn empty_message_uses_space_placeholder() {
-        let chunks = telegram_text_chunks("  \n ");
+        let chunks = chunks_en("  \n ");
 
         assert_eq!(chunks, vec![" "]);
     }
@@ -2530,7 +2805,7 @@ mod tests {
     fn prefers_newline_split_for_long_text() {
         let first = "a".repeat(3000);
         let second = "b".repeat(3000);
-        let chunks = telegram_text_chunks(&format!("{first}\n{second}"));
+        let chunks = chunks_en(&format!("{first}\n{second}"));
 
         assert!(chunks[0].contains("(continues...)"));
         assert!(chunks[0].contains('\n'));
@@ -2539,29 +2814,37 @@ mod tests {
     }
 
     #[test]
-    fn turn_completed_message_uses_a_native_footer_with_plain_fallback() {
+    fn turn_completed_message_uses_a_card_header_with_plain_fallback() {
         let (rich, fallback) =
-            telegram_turn_completed_messages("🤖 Codex\n\n**Build:** `323`", "已完成");
+            telegram_turn_completed_messages("🤖 Codex\n\n**Build:** `323`", "✅ 已完成 · 3分12秒");
 
         assert_eq!(
             rich,
-            "🤖 Codex\n\n**Build:** `323`\n\n<footer>已完成</footer>"
+            "**✅ 已完成 · 3分12秒**\n──────────────\n\n🤖 Codex\n\n**Build:** `323`"
         );
-        assert_eq!(fallback, "🤖 Codex\n\n**Build:** `323`\n\n已完成");
+        assert_eq!(
+            fallback,
+            "✅ 已完成 · 3分12秒\n──────────────\n\n🤖 Codex\n\n**Build:** `323`"
+        );
     }
 
     #[test]
-    fn turn_completed_footer_escapes_html_and_handles_an_empty_reply() {
+    fn turn_completed_header_handles_an_empty_reply() {
         let (rich, fallback) = telegram_turn_completed_messages("  ", "Done & closed");
 
-        assert_eq!(rich, "<footer>Done &amp; closed</footer>");
+        assert_eq!(rich, "**Done & closed**");
         assert_eq!(fallback, "Done & closed");
     }
 
     #[test]
-    fn turn_completed_chunks_reserve_space_for_the_fallback_footer() {
+    fn turn_completed_chunks_reserve_space_for_the_card_header() {
         for text in ["a".repeat(TELEGRAM_MAX_MESSAGE_CHARS), "界".repeat(4_500)] {
-            let chunks = telegram_turn_completed_chunks(&text, "已完成");
+            let chunks = telegram_turn_completed_chunks(
+                &text,
+                "✅ 已完成 · 3分12秒",
+                "(continues...)",
+                "(continued)",
+            );
             assert!(chunks.len() > 1);
             assert!(
                 chunks[..chunks.len() - 1]
@@ -2571,14 +2854,15 @@ mod tests {
             assert!(
                 chunks[..chunks.len() - 1]
                     .iter()
-                    .all(|chunk| !chunk.contains("已完成"))
+                    .all(|chunk| !chunk.contains("✅ 已完成"))
             );
-            let (rich, fallback) =
-                telegram_turn_completed_messages(chunks.last().expect("final chunk"), "已完成");
+            let (rich, fallback) = telegram_turn_completed_messages(
+                chunks.last().expect("final chunk"),
+                "✅ 已完成 · 3分12秒",
+            );
             assert!(fallback.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS);
-            assert_eq!(rich.matches("<footer>").count(), 1);
-            assert_eq!(rich.matches("已完成").count(), 1);
-            assert!(!rich.contains("<hr"));
+            assert!(rich.matches("✅ 已完成").count() == 1);
+            assert!(!rich.contains("<footer>"));
         }
     }
 
@@ -2617,7 +2901,7 @@ mod tests {
     fn long_user_message_chunks_preserve_text_and_credit_each_quote() {
         let source = "界".repeat(4_500);
         let credit = "你 · Codex 电脑端";
-        let chunks = telegram_user_message_chunks(&source, credit);
+        let chunks = telegram_user_message_chunks(&source, credit, "(continues...)", "(continued)");
 
         assert!(chunks.len() > 1);
         let restored = chunks
@@ -2844,7 +3128,10 @@ mod tests {
 
         let pending = approval_text(&approval, ImText::zh_cn());
         assert!(pending.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS);
-        assert_eq!(telegram_text_chunks(&pending).len(), 1);
+        assert_eq!(
+            telegram_text_chunks(&pending, "(continues...)", "(continued)").len(),
+            1
+        );
         assert!(pending.contains("`/1`"));
         assert!(!pending.contains("`/600`"));
     }
@@ -2874,5 +3161,109 @@ mod tests {
     #[test]
     fn empty_keyboard_removes_all_inline_buttons() {
         assert_eq!(empty_inline_keyboard(), json!({ "inline_keyboard": [] }));
+    }
+
+    #[test]
+    fn code_fence_language_annotates_html() {
+        let html = telegram_markdown_to_html("```rust\nfn main() {}\n```");
+        assert!(html.contains("<pre><code class=\"language-rust\">"));
+        assert!(html.contains("</code></pre>"));
+
+        let plain = telegram_markdown_to_html("```\nplain\n```");
+        assert!(plain.contains("<pre><code>plain"));
+
+        // 语言标注只保留安全字符，防止围栏行注入属性。
+        let hostile = telegram_markdown_to_html("```rust onclick=alert(1)\nfn main() {}\n```");
+        assert!(hostile.contains("language-rust"));
+        assert!(!hostile.contains("onclick"));
+    }
+
+    #[test]
+    fn chunks_rebalance_code_fences_across_segments() {
+        let mut text = String::from("介绍\n```rust\n");
+        for i in 0..400 {
+            text.push_str(&format!("let value_{i} = {i}; // 注释内容\n"));
+        }
+        text.push_str("```\n结尾");
+
+        let chunks = chunks_en(&text);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            let fence_lines = chunk
+                .lines()
+                .filter(|line| line.trim_start().starts_with("```"))
+                .count();
+            assert_eq!(fence_lines % 2, 0, "chunk fences unbalanced:\n{chunk}");
+            let html = telegram_markdown_to_html(chunk);
+            assert_eq!(
+                html.matches("<pre><code").count(),
+                html.matches("</code></pre>").count()
+            );
+        }
+        // 续段自动补回围栏和语言标注。
+        assert!(chunks[1].contains("```rust"));
+        assert!(telegram_markdown_to_html(&chunks[1]).contains("language-rust"));
+    }
+
+    #[test]
+    fn chunk_markers_follow_adapter_locale() {
+        let zh = TelegramAdapter::new(TelegramApi::new(TelegramSettings::default()));
+        assert_eq!(zh.chunk_markers(), ("（未完待续）", "（接上文）"));
+        let en = TelegramAdapter::with_locale(
+            TelegramApi::new(TelegramSettings::default()),
+            crate::im::core::i18n::ImLocale::EnUs,
+        );
+        assert_eq!(en.chunk_markers(), ("(continues...)", "(continued)"));
+    }
+
+    #[tokio::test]
+    async fn turn_completed_long_output_sends_document() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Telegram server");
+        let address = listener.local_addr().expect("mock Telegram address");
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let captured_task = captured.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let mut buf = vec![0_u8; 65_536];
+                    let count = stream.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..count]);
+                    let line = request.lines().next().unwrap_or("").to_string();
+                    if let Ok(mut slot) = captured_task.lock() {
+                        slot.get_or_insert(line);
+                    }
+                    let body = r#"{"ok":true,"result":{"message_id":77,"chat":{"id":42,"type":"private"}}}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                }
+            }
+        });
+        let api = TelegramApi::new(TelegramSettings {
+            account_id: "tg_1".to_string(),
+            bot_token: "test-token".to_string(),
+            ..Default::default()
+        })
+        .with_test_api_base(format!("http://{address}"));
+        let adapter = TelegramAdapter::new(api);
+        let reply = "任务".repeat(4300);
+
+        let result = adapter
+            .send_turn_completed("42", &reply, "你 · Codex 电脑端", None)
+            .await
+            .expect("send long turn output");
+
+        assert_eq!(result, "77");
+        let line = captured
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .unwrap_or_default();
+        assert!(line.contains("sendDocument"), "request line: {line}");
     }
 }

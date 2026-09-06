@@ -11,7 +11,7 @@ use crate::{
     im::{
         core::{
             accounts::ImApiRegistry,
-            i18n::im_text_for_state,
+            i18n::{im_locale_for_state, im_text_for_state},
             outbound::{
                 ImOutboundImage, ImOutboundKind, ImOutboundMessage, ImOutboundPayload,
                 ImOutboundSender,
@@ -508,7 +508,7 @@ async fn telegram_command_progress_driver(
     route: RouteTarget,
     mut snapshot: TelegramCommandProgressSnapshot,
 ) {
-    let adapter = TelegramAdapter::new(api);
+    let adapter = TelegramAdapter::with_locale(api, im_locale_for_state(&state).await);
     let mut consecutive_failures = 0_u32;
     loop {
         let is_current = state
@@ -916,7 +916,7 @@ pub(crate) async fn send_turn_reply(
                     log_missing_api(state, route, "turn_reply").await;
                     return;
                 };
-                let adapter = TelegramAdapter::new(api);
+                let adapter = TelegramAdapter::with_locale(api, im_locale_for_state(&state).await);
                 let (sent_event, failed_event) = if is_final_answer {
                     (
                         "telegram_turn_completed_sent",
@@ -931,6 +931,7 @@ pub(crate) async fn send_turn_reply(
                             &route.chat_id,
                             &rendered,
                             im_text_for_state(state).telegram_turn_completed_footer(),
+                            state.runtime.lock().await.turn_elapsed_ms(&thread_id),
                         )
                         .await
                 } else {
@@ -1686,7 +1687,8 @@ pub(crate) async fn handle_codex_notification_for_generation(
                 TelegramThreadSettingsObservation::None => {}
                 TelegramThreadSettingsObservation::Confirmed(request) => {
                     if let Some(api) = api_registry.telegram_for_route(&route) {
-                        let adapter = TelegramAdapter::new(api);
+                        let adapter =
+                            TelegramAdapter::with_locale(api, im_locale_for_state(&state).await);
                         let body = im_text_for_state(&state).telegram_thread_settings_applied();
                         let _ = adapter
                             .send_or_update_text(
@@ -1702,7 +1704,8 @@ pub(crate) async fn handle_codex_notification_for_generation(
                 }
                 TelegramThreadSettingsObservation::Stale(request) => {
                     if let Some(api) = api_registry.telegram_for_route(&route) {
-                        let adapter = TelegramAdapter::new(api);
+                        let adapter =
+                            TelegramAdapter::with_locale(api, im_locale_for_state(&state).await);
                         let body = im_text_for_state(&state).telegram_thread_settings_stale();
                         let _ = adapter
                             .send_or_update_text(

@@ -884,7 +884,14 @@ fn render_command_progress_with_limits(
         .dropped_entries
         .saturating_add(snapshot.entries.len());
     let omitted = total.saturating_sub(selected.len());
-    let mut sections = vec![command_progress_title(snapshot, text)];
+    // 极简卡片头：状态 emoji + 原标题 + 分隔线。
+    let status_emoji = if snapshot.failed { "❌" } else { "🔄" };
+    let title = format!(
+        "{status_emoji} {}\n{}",
+        command_progress_title(snapshot, text),
+        rich_blocks::TELEGRAM_CARD_SEPARATOR
+    );
+    let mut sections = vec![title];
     if total > 0 && snapshot.retry_count > 0 {
         sections.push(text.telegram_retry_progress_summary(snapshot.retry_count));
     }
@@ -2304,7 +2311,11 @@ mod tests {
         }
         assert!(rendered.fallback_markdown.chars().count() <= 3_800);
         assert!(rendered.fallback_markdown.contains("api_review"));
-        assert!(rendered.fallback_markdown.starts_with("任务进行中"));
+        assert!(
+            rendered
+                .fallback_markdown
+                .starts_with("🔄 任务进行中\n──────────────")
+        );
         let fallback_plan = rendered
             .fallback_markdown
             .find("计划 · 1/2")
@@ -2324,7 +2335,8 @@ mod tests {
         assert!(fallback_plan < fallback_execution);
         assert!(fallback_execution < fallback_reasoning);
         assert!(fallback_reasoning < fallback_diff);
-        for marker in ["✅", "❌", "⚠️", "⏳", "🛠", "🔄"] {
+        // 卡片头（🔄/❌）现在是 fallback 的合法组成部分，不再视为泄漏。
+        for marker in ["✅", "⚠️", "⏳", "🛠"] {
             assert!(
                 !rendered.fallback_markdown.contains(marker),
                 "fallback progress leaked {marker}"
@@ -2598,7 +2610,7 @@ mod tests {
         assert!(
             rendered
                 .fallback_markdown
-                .starts_with("执行中 · 1 步 · 1 个进行中")
+                .starts_with("🔄 执行中 · 1 步 · 1 个进行中\n──────────────")
         );
     }
 

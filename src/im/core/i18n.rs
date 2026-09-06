@@ -42,6 +42,15 @@ pub(crate) fn im_text_for_state(state: &SharedState) -> ImText {
     ImText { locale }
 }
 
+/// 从内存配置读取界面语言（避免每次事件都读盘），供适配层选文案。
+pub(crate) async fn im_locale_for_state(state: &SharedState) -> ImLocale {
+    let language = state.config.lock().await.language.clone();
+    language
+        .as_deref()
+        .and_then(ImLocale::from_code)
+        .unwrap_or_default()
+}
+
 impl ImText {
     #[cfg(test)]
     pub(crate) fn zh_cn() -> Self {
@@ -232,6 +241,14 @@ impl ImText {
             (ImLocale::EnUs, true, false) => "Task complete",
             (ImLocale::ZhCn, false, _) => "任务进行中",
             (ImLocale::EnUs, false, _) => "Task in progress",
+        }
+    }
+
+    /// 极简卡片风：最终回复头部的完成状态行。
+    pub(crate) fn telegram_turn_completed_card_title(self) -> &'static str {
+        match self.locale {
+            ImLocale::ZhCn => "✅ 已完成",
+            ImLocale::EnUs => "✅ Completed",
         }
     }
 

@@ -7,7 +7,7 @@ use crate::{
     app_state::SharedState,
     chain_log,
     im::{
-        core::i18n::im_text_for_state,
+        core::i18n::{im_locale_for_state, im_text_for_state},
         core::{accounts::ImApiRegistry, text_utils::log_text_preview},
         feishu::{FeishuAdapter, FeishuApi},
         telegram::{adapter::TelegramAdapter, api::TelegramApi, typing as telegram_typing},
@@ -406,7 +406,8 @@ async fn send_telegram_outbound(
         )
         .await;
     }
-    let adapter = TelegramAdapter::new(telegram_api.clone());
+    let adapter =
+        TelegramAdapter::with_locale(telegram_api.clone(), im_locale_for_state(state).await);
     let sent_context_compaction = match &message.payload {
         ImOutboundPayload::Text(text) => {
             send_telegram_text(state, &adapter, &message, text).await
@@ -1064,11 +1065,17 @@ async fn send_telegram_text(
     let im_text = im_text_for_state(state);
     let result = match telegram_text_presentation(message) {
         TelegramTextPresentation::TurnCompleted => {
+            let elapsed_ms = state
+                .runtime
+                .lock()
+                .await
+                .turn_elapsed_ms(&message.thread_id);
             adapter
                 .send_turn_completed(
                     &message.route.chat_id,
                     text,
                     im_text.telegram_turn_completed_footer(),
+                    elapsed_ms,
                 )
                 .await
         }
@@ -1090,7 +1097,17 @@ async fn send_telegram_text(
                 )
                 .await
         }
-        TelegramTextPresentation::Plain => adapter.send_text(&message.route.chat_id, text).await,
+        TelegramTextPresentation::Plain => {
+            // “完整”颗粒度的过程文本静默发送：消息照发但不响铃；
+            // 最终回复、审批等其它展示路径保持响铃。
+            let silent = matches!(
+                message.kind,
+                ImOutboundKind::Item | ImOutboundKind::ImageItem
+            );
+            adapter
+                .send_text_with_silence(&message.route.chat_id, text, silent)
+                .await
+        }
     };
     match result {
         Ok(message_id) => {

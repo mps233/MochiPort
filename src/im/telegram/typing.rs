@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use crate::{
     app_state::SharedState,
+    im::core::i18n::im_locale_for_state,
     im::telegram::{
         adapter::TelegramAdapter,
         api::{TelegramApi, TelegramApiError},
@@ -216,7 +217,7 @@ async fn typing_driver(
     route: RouteTarget,
     generation: i64,
 ) {
-    let adapter = TelegramAdapter::new(api);
+    let adapter = TelegramAdapter::with_locale(api, im_locale_for_state(&state).await);
     let mut consecutive_failures = 0_u32;
     let mut thinking_mode = TelegramThinkingMode::RichDraft;
     loop {

@@ -718,6 +718,17 @@ impl RuntimeState {
                     .is_some_and(|started_at_ms| received_at_ms < *started_at_ms))
     }
 
+    /// 本次 turn 的耗时（毫秒）；结束时取记录的完成时间，进行中则取当前时间。
+    pub fn turn_elapsed_ms(&self, thread_id: &str) -> Option<u128> {
+        let started_at_ms = *self.turn_started_at_by_thread.get(thread_id)?;
+        let finished_at_ms = self
+            .turn_finished_at_by_thread
+            .get(thread_id)
+            .copied()
+            .unwrap_or_else(crate::types::now_ms);
+        Some(finished_at_ms.saturating_sub(started_at_ms))
+    }
+
     pub fn remember_turn_origin(&mut self, turn_id: &str, origin: TurnOrigin) {
         self.turn_origin_by_id.insert(turn_id.to_string(), origin);
     }

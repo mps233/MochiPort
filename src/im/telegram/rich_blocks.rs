@@ -1,5 +1,8 @@
 use serde_json::{Value, json};
 
+/// 极简卡片风的卡片头分隔线。
+pub(crate) const TELEGRAM_CARD_SEPARATOR: &str = "──────────────";
+
 pub(crate) fn text(value: impl Into<String>) -> Value {
     Value::String(value.into())
 }
