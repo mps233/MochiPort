@@ -315,6 +315,7 @@ struct HeatmapView: View {
     }
 
     /// 悬浮在格子上方的即时标签：日期与 Token 分两行，Token 加粗为主信息。
+    /// 使用不透明背景——半透明材质会让热力图格子透过气泡，影响可读性。
     private func hoverBubble(for gridDay: GridDay) -> some View {
         VStack(spacing: 1) {
             Text(Self.captionDateFormatter.string(from: gridDay.day))
@@ -326,7 +327,10 @@ struct HeatmapView: View {
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .background(
+            Color(nsColor: .windowBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
