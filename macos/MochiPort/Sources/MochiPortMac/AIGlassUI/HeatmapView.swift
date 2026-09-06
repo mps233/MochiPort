@@ -4,7 +4,7 @@ import SwiftUI
 ///
 /// 최근 15주 × 7일(월~일) 그리드. 열 = 주(왼쪽=과거, 오른쪽=최신),
 /// 행 = 요일(위=월, 아래=일). 셀 농도 = 일 토큰 / 기간 최대 토큰을 5단계로 양자화.
-/// hover 시 고정 캡션(날짜 + 토큰)을 표시한다(팝오버 금지).
+/// hover 시 셀 위 네이티브 툴팁(날짜 + 토큰)과 하단 고정 캡션을 함께 표시한다.
 /// 오늘 셀은 테두리로 강조하고, 등장 시 주 단위 stagger로 농도가 0→값으로 차오른다(1회성).
 struct HeatmapView: View {
     enum LegendPlacement {
@@ -276,6 +276,7 @@ struct HeatmapView: View {
                 .opacity(appeared ? 1 : 0)
                 .scaleEffect(appeared ? 1 : 0.4)
                 .animation(.spring(duration: 0.5).delay(Double(staggerIndex) * 0.02), value: appeared)
+                .help("\(Self.captionDateFormatter.string(from: gridDay.day)) · \(formatTokens(gridDay.tokens)) 请求 Token")
                 .onHover { inside in
                     hovered = inside ? gridDay : (hovered == gridDay ? nil : hovered)
                 }
