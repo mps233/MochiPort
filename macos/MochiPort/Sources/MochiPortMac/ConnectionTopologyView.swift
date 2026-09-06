@@ -403,7 +403,8 @@ private struct TopologyNodeView: View {
     }
 
     private var fullNode: some View {
-        HStack(spacing: 9) {
+        let isIdle = node.tint == .secondary
+        return HStack(spacing: 9) {
             // Both endpoint rails use the same reading order.  The channel
             // avatar belongs beside its name, while the status dot stays at
             // the trailing edge as a compact state cue.
@@ -416,6 +417,7 @@ private struct TopologyNodeView: View {
                     Text(node.compactTitle)
                 }
                 .font(.subheadline.weight(.semibold))
+                .foregroundStyle(isIdle ? Color.secondary : Color.primary)
                 .minimumScaleFactor(0.84)
                 .lineLimit(1)
                 Text(node.detail)
@@ -469,6 +471,8 @@ private struct TopologyNodeIcon: View {
                     Circle()
                         .strokeBorder(Color.white.opacity(0.52), lineWidth: 0.6)
                 }
+                // 无活跃会话的客户端整体淡显，与头像堆叠的离线处理一致。
+                .opacity(node.tint == .secondary ? 0.45 : 1)
             } else {
                 Image(systemName: node.symbol)
                     .font(.system(size: 14, weight: .semibold))
