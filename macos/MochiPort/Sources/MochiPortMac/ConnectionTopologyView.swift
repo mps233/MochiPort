@@ -471,8 +471,6 @@ private struct TopologyNodeIcon: View {
                     Circle()
                         .strokeBorder(Color.white.opacity(0.52), lineWidth: 0.6)
                 }
-                // 无活跃会话的客户端整体淡显，与头像堆叠的离线处理一致。
-                .opacity(node.tint == .secondary ? 0.45 : 1)
             } else {
                 Image(systemName: node.symbol)
                     .font(.system(size: 14, weight: .semibold))
