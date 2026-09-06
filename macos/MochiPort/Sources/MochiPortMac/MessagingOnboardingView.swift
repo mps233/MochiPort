@@ -85,6 +85,7 @@ struct MessagingOnboardingView: View {
     @State private var verifyingReturnStep: Step = .telegramCredentials
     @State private var errorMessage: String?
     @State private var completedAccountName = ""
+    @State private var completedPairingCode: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: MochiPortSpacing.section) {
@@ -176,9 +177,32 @@ struct MessagingOnboardingView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         case .done:
-            Text("账号已出现在消息渠道列表中，可随时启停或删除。")
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: MochiPortSpacing.standard) {
+                Text("账号已出现在消息渠道列表中，可随时启停或删除。")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let pairingCode = completedPairingCode, !pairingCode.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Telegram 配对码", systemImage: "key.horizontal")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(pairingCode)
+                            .font(.system(.title3, design: .monospaced).weight(.semibold))
+                            .textSelection(.enabled)
+                        Text("在 Telegram 中向机器人发送 /start \(pairingCode)（或直接发送配对码）完成私聊绑定；配对码之后可在账号详情中重新生成。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.primary.opacity(0.04))
+                    )
+                    .accessibilityIdentifier("onboarding.telegram.pairing-code")
+                }
+            }
         }
     }
 
@@ -471,6 +495,7 @@ struct MessagingOnboardingView: View {
             do {
                 let response = try await actions.configureTelegram(trimmedBotToken, mentionOnly)
                 completedAccountName = displayName(from: response)
+                completedPairingCode = response.pairingCode
                 step = .done
             } catch {
                 handleVerificationFailure(error)
@@ -756,7 +781,8 @@ extension MessagingOnboardingActions {
                 ok: true,
                 platform: "telegram",
                 accountId: "tg_1000001",
-                displayName: "预览机器人 (@preview_bot)"
+                displayName: "预览机器人 (@preview_bot)",
+                pairingCode: "012345"
             )
         },
         configureFeishu: { appId, _ in
@@ -765,7 +791,8 @@ extension MessagingOnboardingActions {
                 ok: true,
                 platform: "feishu",
                 accountId: appId,
-                displayName: "预览飞书应用"
+                displayName: "预览飞书应用",
+                pairingCode: nil
             )
         },
         startFeishuScan: {

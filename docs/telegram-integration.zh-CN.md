@@ -182,6 +182,16 @@ MVP 之后已补齐：
 - 飞书 CardKit 等价的复杂富卡片。
 - Telegram webhook 部署。
 
+### 私聊配对码绑定
+
+在 `allowedChatIds` 自动首绑（空白名单时第一个私聊者自动成为唯一用户）之外，账号可以配置 6 位数字 `pairingCode` 进入配对码模式：
+
+- 配对码非空时，未绑定私聊必须发送 `/start <配对码>`（兼容 `t.me` 深链 payload 与裸配对码文本）才会写入 `allowedChatIds` 并持久化；配对消息本身被吞掉，不进入会话流。
+- 未提供或提供错误配对码会收到配对指引回复，并记录 `telegram_pairing_failed` 事件；同一 chat 连续失败 5 次后冷却 10 分钟，冷却期内静默忽略（防爆破）。
+- 配对码为空时保持旧行为：空白名单自动首绑，非空白名单拒绝其他私聊。
+- 新配置的 Telegram 账号由后台自动生成配对码并随配置响应返回；已有账号不受影响，可在 GUI 的账号详情中生成或重新生成（`POST /api/v1/manage/im/account/telegram/pairing-code`），旧码立即失效。
+- 配对码只通过专用端点暴露，不进入 dashboard / im_accounts 快照；门控在 polling 内热读 config，轮换无需重启桥接。
+
 ## 第四阶段：Telegram 协议层加固
 
 状态：基础加固已完成。

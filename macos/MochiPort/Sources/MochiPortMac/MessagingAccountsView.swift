@@ -262,6 +262,8 @@ struct MessagingAccountsView: View {
     var onSaveTelegramProjectGroups: ((String, [ManageTelegramProjectGroup]) async -> Bool)?
     var onSyncTelegramTopics: ((String, String) async -> Bool)?
     var onReplyGranularity: ((MessagingAccountSummary, String) async -> Void)?
+    var telegramPairingCodes: [String: String] = [:]
+    var onRotateTelegramPairingCode: ((String) async -> Bool)?
 
     @State private var searchText = ""
     @State private var filter: MessagingAccountFilter = .all
@@ -283,7 +285,9 @@ struct MessagingAccountsView: View {
         onDelete: ((MessagingAccountSummary) -> Void)? = nil,
         onSaveTelegramProjectGroups: ((String, [ManageTelegramProjectGroup]) async -> Bool)? = nil,
         onSyncTelegramTopics: ((String, String) async -> Bool)? = nil,
-        onReplyGranularity: ((MessagingAccountSummary, String) async -> Void)? = nil
+        onReplyGranularity: ((MessagingAccountSummary, String) async -> Void)? = nil,
+        telegramPairingCodes: [String: String] = [:],
+        onRotateTelegramPairingCode: ((String) async -> Bool)? = nil
     ) {
         self.accounts = accounts
         self.telegramProjectGroupAccounts = telegramProjectGroupAccounts
@@ -294,6 +298,8 @@ struct MessagingAccountsView: View {
         self.onSaveTelegramProjectGroups = onSaveTelegramProjectGroups
         self.onSyncTelegramTopics = onSyncTelegramTopics
         self.onReplyGranularity = onReplyGranularity
+        self.telegramPairingCodes = telegramPairingCodes
+        self.onRotateTelegramPairingCode = onRotateTelegramPairingCode
     }
 
     var body: some View {
@@ -632,6 +638,14 @@ struct MessagingAccountsView: View {
                 .padding(.top, 13)
                 .padding(.bottom, 12)
 
+            if showsPairingCodeRow(account) {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.08))
+                    .frame(height: 0.5)
+                pairingCodeSection(for: account)
+                    .padding(.vertical, 10)
+            }
+
             if showsProjectGroupRow(account) {
                 Rectangle()
                     .fill(Color.primary.opacity(0.08))
@@ -944,6 +958,56 @@ struct MessagingAccountsView: View {
 
     private func showsProjectGroupRow(_ account: MessagingAccountSummary) -> Bool {
         account.platform == .telegram && onSaveTelegramProjectGroups != nil
+    }
+
+    private func showsPairingCodeRow(_ account: MessagingAccountSummary) -> Bool {
+        account.platform == .telegram && onRotateTelegramPairingCode != nil
+    }
+
+    private func pairingCodeSection(for account: MessagingAccountSummary) -> some View {
+        let code = telegramPairingCodes[account.accountID] ?? ""
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Label("配对码", systemImage: "key.horizontal")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                if !code.isEmpty {
+                    Text(code)
+                        .font(.system(.body, design: .monospaced).weight(.semibold))
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("telegram.pairing-code.value")
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(code, forType: .string)
+                    } label: {
+                        Label("复制", systemImage: "doc.on.doc")
+                            .font(.caption)
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(.link)
+                    .help("复制配对码")
+                }
+                Button {
+                    Task { await onRotateTelegramPairingCode?(account.accountID) }
+                } label: {
+                    Text(code.isEmpty ? "生成配对码" : "重新生成")
+                        .font(.caption)
+                }
+                .buttonStyle(.link)
+                .disabled(availability != .available)
+                .accessibilityIdentifier("telegram.pairing-code.rotate")
+            }
+            Text(
+                code.isEmpty
+                    ? "生成配对码后，新的 Telegram 私聊需发送 /start <配对码> 或直接发送配对码才会绑定；留空时第一个私聊本机器人的账号自动绑定。"
+                    : "新的 Telegram 私聊发送 /start \(code)（或直接发送配对码）即可绑定；重新生成后旧配对码立即失效。"
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 16)
     }
 
     private func projectGroupRow(for account: MessagingAccountSummary) -> some View {

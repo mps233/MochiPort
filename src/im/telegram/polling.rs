@@ -1822,6 +1822,7 @@ pub async fn listen_polling(
 ) -> Result<()> {
     let account_id = api.settings().account_id();
     let mut chat_access = TelegramChatAccess::new(api.settings().allowed_chat_ids.clone());
+    let mut pairing_attempts = PairingAttempts::default();
     let mut offset = None;
     set_polling_state(&state, &account_id, true, false, None).await;
     claim_polling_slot(&state, &api, &mut offset).await;
@@ -1847,6 +1848,7 @@ pub async fn listen_polling(
                     &state,
                     &api,
                     &mut chat_access,
+                    &mut pairing_attempts,
                     callback.message.as_ref().map(|message| &message.chat),
                 )
                 .await;
@@ -1866,7 +1868,8 @@ pub async fn listen_polling(
                     update_last_inbound(&state, &account_id).await;
                 } else {
                     let message = match access {
-                        TelegramChatAccessDecision::Denied => "当前聊天未授权",
+                        TelegramChatAccessDecision::Denied
+                        | TelegramChatAccessDecision::DeniedWith(_) => "当前聊天未授权",
                         _ => "这个操作不可用",
                     };
                     let _ = api.answer_callback_query(&callback_id, Some(message)).await;
@@ -1880,7 +1883,15 @@ pub async fn listen_polling(
                 if message.from.as_ref().is_some_and(|user| user.is_bot) {
                     continue;
                 }
-                match ensure_message_chat_allowed(&state, &api, &mut chat_access, &message).await {
+                let decision = ensure_message_chat_allowed(
+                    &state,
+                    &api,
+                    &mut chat_access,
+                    &mut pairing_attempts,
+                    &message,
+                )
+                .await;
+                match decision {
                     TelegramChatAccessDecision::Allowed => {
                         let inbound = inbound_from_message(
                             api.settings(),
@@ -1935,16 +1946,25 @@ pub async fn listen_polling(
                             update_last_inbound(&state, &account_id).await;
                         }
                     }
-                    TelegramChatAccessDecision::Denied => {
+                    TelegramChatAccessDecision::Denied
+                    | TelegramChatAccessDecision::DeniedWith(_) => {
                         let chat_id = message.chat.id.to_string();
-                        let _ = api
-                            .send_text(
-                                &chat_id,
-                                "当前 Telegram 私聊未授权。请在本机 MochiPort 配置 allowedChatIds。",
-                            )
-                            .await;
+                        let pairing_mode = {
+                            let config = state.config.lock().await;
+                            config
+                                .telegram_pairing_code(&account_id)
+                                .is_some_and(|code| !code.is_empty())
+                        };
+                        let text = match decision {
+                            TelegramChatAccessDecision::DeniedWith(text) => text,
+                            _ if pairing_mode => PAIRING_HINT_TEXT,
+                            _ => {
+                                "当前 Telegram 私聊未授权。请在本机 MochiPort 配置 allowedChatIds。"
+                            }
+                        };
+                        let _ = api.send_text(&chat_id, text).await;
                     }
-                    TelegramChatAccessDecision::Ignored => {}
+                    TelegramChatAccessDecision::Ignored | TelegramChatAccessDecision::Consumed => {}
                 }
             }
         }
@@ -3818,28 +3838,102 @@ impl TelegramChatAccess {
 enum TelegramChatAccessDecision {
     Allowed,
     Denied,
+    /// 拒绝并回复定制文案（覆盖 Denied 分支的默认文案）。
+    DeniedWith(&'static str),
     Ignored,
+    /// 配对消息已被消费（完成绑定），不再进入会话流。
+    Consumed,
+}
+
+const PAIRING_HINT_TEXT: &str = "该私聊尚未绑定。请在 MochiPort「聊天工具接入」页查看配对码，发送 /start <配对码> 或直接发送配对码完成绑定。";
+const PAIRING_LOCKOUT_TEXT: &str = "配对码尝试次数过多，请约 10 分钟后再试。";
+const PAIRING_SUCCESS_TEXT: &str = "绑定成功！发送 /help 查看可用命令，或直接描述你的任务。";
+const PAIRING_MAX_FAILURES: u32 = 5;
+const PAIRING_COOLDOWN_MS: i64 = 10 * 60 * 1000;
+
+/// 未绑定私聊的配对码失败记录，只在单次 polling 生命周期内生效。
+#[derive(Debug, Default)]
+struct PairingAttempts {
+    failures: HashMap<String, u32>,
+    locked_until_ms: HashMap<String, i64>,
+}
+
+impl PairingAttempts {
+    fn is_locked(&self, chat_id: &str, now_ms: i64) -> bool {
+        self.locked_until_ms
+            .get(chat_id)
+            .is_some_and(|until| *until > now_ms)
+    }
+
+    /// 记一次失败；达到上限时进入冷却并清零计数，返回是否刚刚触发冷却。
+    fn record_failure(&mut self, chat_id: &str, now_ms: i64) -> bool {
+        let failures = self
+            .failures
+            .entry(chat_id.to_string())
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+        if *failures < PAIRING_MAX_FAILURES {
+            return false;
+        }
+        self.failures.remove(chat_id);
+        self.locked_until_ms
+            .insert(chat_id.to_string(), now_ms + PAIRING_COOLDOWN_MS);
+        true
+    }
+
+    fn record_success(&mut self, chat_id: &str) {
+        self.failures.remove(chat_id);
+        self.locked_until_ms.remove(chat_id);
+    }
+}
+
+/// 文本等于配对码，或为 `/start <配对码>`（兼容 /start@botname 深链 payload）。
+fn pairing_text_matches(message_text: Option<&str>, pairing_code: &str) -> bool {
+    let Some(text) = message_text else {
+        return false;
+    };
+    let text = text.trim();
+    if text == pairing_code {
+        return true;
+    }
+    let Some(rest) = text.strip_prefix('/') else {
+        return false;
+    };
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let command = parts.next().unwrap_or("").split('@').next().unwrap_or("");
+    let payload = parts.next().unwrap_or("").trim();
+    command.eq_ignore_ascii_case("start") && payload == pairing_code
 }
 
 async fn ensure_message_chat_allowed(
     state: &SharedState,
     api: &TelegramApi,
     access: &mut TelegramChatAccess,
+    attempts: &mut PairingAttempts,
     message: &TelegramMessage,
 ) -> TelegramChatAccessDecision {
-    ensure_chat_allowed(state, api, access, &message.chat).await
+    ensure_chat_allowed(
+        state,
+        api,
+        access,
+        &message.chat,
+        message.text.as_deref(),
+        attempts,
+    )
+    .await
 }
 
 async fn ensure_callback_chat_allowed(
     state: &SharedState,
     api: &TelegramApi,
     access: &mut TelegramChatAccess,
+    attempts: &mut PairingAttempts,
     chat: Option<&super::api::TelegramChat>,
 ) -> TelegramChatAccessDecision {
     let Some(chat) = chat else {
         return TelegramChatAccessDecision::Ignored;
     };
-    ensure_chat_allowed(state, api, access, chat).await
+    ensure_chat_allowed(state, api, access, chat, None, attempts).await
 }
 
 async fn ensure_chat_allowed(
@@ -3847,6 +3941,8 @@ async fn ensure_chat_allowed(
     api: &TelegramApi,
     access: &mut TelegramChatAccess,
     chat: &super::api::TelegramChat,
+    message_text: Option<&str>,
+    attempts: &mut PairingAttempts,
 ) -> TelegramChatAccessDecision {
     let account_id = api.settings().account_id();
     let chat_id = chat.id.to_string();
@@ -3859,6 +3955,25 @@ async fn ensure_chat_allowed(
     }
     if access.is_allowed(&chat_id) {
         return TelegramChatAccessDecision::Allowed;
+    }
+    let pairing_code = {
+        let config = state.config.lock().await;
+        config
+            .telegram_pairing_code(&account_id)
+            .unwrap_or_default()
+    };
+    if !pairing_code.is_empty() {
+        return ensure_pairing(
+            state,
+            api,
+            access,
+            attempts,
+            &account_id,
+            &chat_id,
+            &pairing_code,
+            message_text,
+        )
+        .await;
     }
     if !access.allowed_chat_ids.is_empty() {
         log_denied_chat(state, &account_id, &chat_id).await;
@@ -3916,6 +4031,104 @@ async fn ensure_chat_allowed(
                     format!("account={account_id} chat={chat_id}"),
                 )
                 .await;
+            TelegramChatAccessDecision::Denied
+        }
+    }
+}
+
+/// 配对码模式的绑定闸门：校验通过才写入白名单，配对消息本身被吞掉不进会话流。
+async fn ensure_pairing(
+    state: &SharedState,
+    api: &TelegramApi,
+    access: &mut TelegramChatAccess,
+    attempts: &mut PairingAttempts,
+    account_id: &str,
+    chat_id: &str,
+    pairing_code: &str,
+    message_text: Option<&str>,
+) -> TelegramChatAccessDecision {
+    let Some(message_text) = message_text else {
+        return TelegramChatAccessDecision::DeniedWith(PAIRING_HINT_TEXT);
+    };
+    let now = now_ms() as i64;
+    if attempts.is_locked(chat_id, now) {
+        return TelegramChatAccessDecision::Ignored;
+    }
+    if !pairing_text_matches(Some(message_text), pairing_code) {
+        let just_locked = attempts.record_failure(chat_id, now);
+        if just_locked {
+            state
+                .push_event(
+                    "warn",
+                    "telegram_pairing_failed",
+                    format!("account={account_id} chat={chat_id} locked"),
+                )
+                .await;
+            return TelegramChatAccessDecision::DeniedWith(PAIRING_LOCKOUT_TEXT);
+        }
+        state
+            .push_event(
+                "warn",
+                "telegram_pairing_failed",
+                format!("account={account_id} chat={chat_id}"),
+            )
+            .await;
+        return TelegramChatAccessDecision::DeniedWith(PAIRING_HINT_TEXT);
+    }
+
+    let (bind_result, save_error) = {
+        let mut config = state.config.lock().await;
+        let result = config.add_telegram_allowed_chat_id(account_id, chat_id);
+        let save_error = if result.should_save() {
+            config
+                .save(&state.config_path)
+                .err()
+                .map(|err| err.to_string())
+        } else {
+            None
+        };
+        (result, save_error)
+    };
+    if let Some(err) = save_error {
+        state
+            .push_event(
+                "error",
+                "telegram_chat_bind_failed",
+                format!("account={account_id} chat={chat_id} err={err}"),
+            )
+            .await;
+        return TelegramChatAccessDecision::Denied;
+    }
+
+    match bind_result {
+        crate::config::TelegramChatAllowResult::Allowed
+        | crate::config::TelegramChatAllowResult::Bound => {
+            access.remember(chat_id);
+            attempts.record_success(chat_id);
+            if bind_result == crate::config::TelegramChatAllowResult::Bound {
+                state
+                    .push_event(
+                        "info",
+                        "telegram_chat_bound",
+                        format!("account={account_id} chat={chat_id}"),
+                    )
+                    .await;
+            }
+            let _ = api.send_text(chat_id, PAIRING_SUCCESS_TEXT).await;
+            TelegramChatAccessDecision::Consumed
+        }
+        crate::config::TelegramChatAllowResult::AccountNotFound => {
+            state
+                .push_event(
+                    "warn",
+                    "telegram_chat_bind_account_missing",
+                    format!("account={account_id} chat={chat_id}"),
+                )
+                .await;
+            TelegramChatAccessDecision::Denied
+        }
+        crate::config::TelegramChatAllowResult::Denied => {
+            log_denied_chat(state, account_id, chat_id).await;
             TelegramChatAccessDecision::Denied
         }
     }
@@ -6731,5 +6944,248 @@ mod tests {
         assert!(action_from_callback_data("tmp:thread-model-7:12:sideways").is_none());
         assert!(action_from_callback_data("tms:thread-model-7:not-a-revision:3:2").is_none());
         assert!(action_from_callback_data("tmo:thread-model-7:12:other").is_none());
+    }
+
+    #[test]
+    fn pairing_text_matches_code_or_start_payload() {
+        assert!(pairing_text_matches(Some("012345"), "012345"));
+        assert!(pairing_text_matches(Some(" 012345 "), "012345"));
+        assert!(pairing_text_matches(Some("/start 012345"), "012345"));
+        assert!(pairing_text_matches(Some("/start@MyBot 012345"), "012345"));
+        assert!(!pairing_text_matches(Some("/start"), "012345"));
+        assert!(!pairing_text_matches(Some("0123456"), "012345"));
+        assert!(!pairing_text_matches(Some("543210"), "012345"));
+        assert!(!pairing_text_matches(None, "012345"));
+    }
+
+    async fn pairing_test_state(
+        temp_dir: &tempfile::TempDir,
+        pairing_code: &str,
+        allowed_chat_ids: &[&str],
+    ) -> SharedState {
+        let mut config = crate::config::AppConfig::default();
+        config
+            .telegram_accounts
+            .push(crate::config::TelegramConfig {
+                account_id: "tg_1".to_string(),
+                allowed_chat_ids: allowed_chat_ids
+                    .iter()
+                    .map(|chat_id| (*chat_id).to_string())
+                    .collect(),
+                pairing_code: pairing_code.to_string(),
+                ..Default::default()
+            });
+        crate::app_state::AppState::new(temp_dir.path().join("config.toml"), config, None, None)
+    }
+
+    async fn mock_telegram_api(account_id: &str) -> TelegramApi {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Telegram server");
+        let address = listener.local_addr().expect("mock Telegram address");
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = vec![0_u8; 4_096];
+                let _ = stream.read(&mut request).await;
+                let body = r#"{"ok":true,"result":true}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        TelegramApi::new(TelegramSettings {
+            account_id: account_id.to_string(),
+            bot_token: "test-token".to_string(),
+            ..Default::default()
+        })
+        .with_test_api_base(format!("http://{address}"))
+    }
+
+    fn private_chat(chat_id: i64) -> TelegramChat {
+        TelegramChat {
+            id: chat_id,
+            kind: "private".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn pairing_gate_binds_chat_with_correct_code_and_consumes_message() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = pairing_test_state(&temp_dir, "012345", &[]).await;
+        let api = mock_telegram_api("tg_1").await;
+        let mut access = TelegramChatAccess::new(Vec::new());
+        let mut attempts = PairingAttempts::default();
+        let chat = private_chat(42);
+
+        let decision = ensure_chat_allowed(
+            &state,
+            &api,
+            &mut access,
+            &chat,
+            Some("012345"),
+            &mut attempts,
+        )
+        .await;
+
+        assert_eq!(decision, TelegramChatAccessDecision::Consumed);
+        assert!(access.is_allowed("42"));
+        let config = state.config.lock().await;
+        assert_eq!(
+            config.telegram_accounts[0].allowed_chat_ids,
+            vec!["42".to_string()]
+        );
+        assert_eq!(config.telegram_accounts[0].pairing_code, "012345");
+        drop(config);
+        let events = state.events.lock().await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == "telegram_chat_bound")
+        );
+    }
+
+    #[tokio::test]
+    async fn pairing_gate_accepts_start_command_payload() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = pairing_test_state(&temp_dir, "012345", &[]).await;
+        let api = mock_telegram_api("tg_1").await;
+        let mut access = TelegramChatAccess::new(Vec::new());
+        let mut attempts = PairingAttempts::default();
+        let chat = private_chat(77);
+
+        let decision = ensure_chat_allowed(
+            &state,
+            &api,
+            &mut access,
+            &chat,
+            Some("/start@SomeBot 012345"),
+            &mut attempts,
+        )
+        .await;
+
+        assert_eq!(decision, TelegramChatAccessDecision::Consumed);
+        assert!(access.is_allowed("77"));
+        // 已绑定后再来任意消息直接放行，不再走配对分支。
+        let decision = ensure_chat_allowed(
+            &state,
+            &api,
+            &mut access,
+            &chat,
+            Some("随便聊聊"),
+            &mut attempts,
+        )
+        .await;
+        assert_eq!(decision, TelegramChatAccessDecision::Allowed);
+    }
+
+    #[tokio::test]
+    async fn pairing_gate_rejects_wrong_code_and_locks_after_repeated_failures() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = pairing_test_state(&temp_dir, "012345", &[]).await;
+        let api = mock_telegram_api("tg_1").await;
+        let mut access = TelegramChatAccess::new(Vec::new());
+        let mut attempts = PairingAttempts::default();
+        let chat = private_chat(99);
+
+        for _ in 0..PAIRING_MAX_FAILURES - 1 {
+            let decision = ensure_chat_allowed(
+                &state,
+                &api,
+                &mut access,
+                &chat,
+                Some("999999"),
+                &mut attempts,
+            )
+            .await;
+            assert_eq!(
+                decision,
+                TelegramChatAccessDecision::DeniedWith(PAIRING_HINT_TEXT)
+            );
+        }
+        let decision = ensure_chat_allowed(
+            &state,
+            &api,
+            &mut access,
+            &chat,
+            Some("999999"),
+            &mut attempts,
+        )
+        .await;
+        assert_eq!(
+            decision,
+            TelegramChatAccessDecision::DeniedWith(PAIRING_LOCKOUT_TEXT)
+        );
+        // 冷却期内即使提交正确配对码也静默忽略，且不写入白名单。
+        let decision = ensure_chat_allowed(
+            &state,
+            &api,
+            &mut access,
+            &chat,
+            Some("012345"),
+            &mut attempts,
+        )
+        .await;
+        assert_eq!(decision, TelegramChatAccessDecision::Ignored);
+        assert!(!access.is_allowed("99"));
+        assert!(
+            state.config.lock().await.telegram_accounts[0]
+                .allowed_chat_ids
+                .is_empty()
+        );
+        let events = state.events.lock().await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == "telegram_pairing_failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn pairing_mode_off_keeps_legacy_auto_bind_and_denial() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        // 无配对码 + 空白名单：保持旧的“首聊自动绑定”。
+        let state = pairing_test_state(&temp_dir, "", &[]).await;
+        let api = mock_telegram_api("tg_1").await;
+        let mut access = TelegramChatAccess::new(Vec::new());
+        let mut attempts = PairingAttempts::default();
+        let chat = private_chat(42);
+
+        let decision = ensure_chat_allowed(
+            &state,
+            &api,
+            &mut access,
+            &chat,
+            Some("任务描述"),
+            &mut attempts,
+        )
+        .await;
+        assert_eq!(decision, TelegramChatAccessDecision::Allowed);
+        assert!(access.is_allowed("42"));
+        assert_eq!(
+            state.config.lock().await.telegram_accounts[0].allowed_chat_ids,
+            vec!["42".to_string()]
+        );
+
+        // 无配对码 + 非空白名单：其他私聊仍然拒绝。
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = pairing_test_state(&temp_dir, "", &["100"]).await;
+        let mut access = TelegramChatAccess::new(vec!["100".to_string()]);
+        let chat = private_chat(200);
+
+        let decision = ensure_chat_allowed(
+            &state,
+            &api,
+            &mut access,
+            &chat,
+            Some("012345"),
+            &mut attempts,
+        )
+        .await;
+        assert_eq!(decision, TelegramChatAccessDecision::Denied);
+        assert!(!access.is_allowed("200"));
     }
 }

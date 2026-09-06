@@ -16,6 +16,9 @@ botToken = ""
 displayName = ""
 # Empty means the first private Telegram chat will be bound automatically.
 allowedChatIds = []
+# Non-empty enables pairing-code binding: a new private chat must send
+# `/start <pairingCode>` (or the bare code) to be added to allowedChatIds.
+# pairingCode = "012345"
 
 [wechat]
 enabled = true

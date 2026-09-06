@@ -2369,6 +2369,61 @@ final class APIContractTests: XCTestCase {
         }
     }
 
+    func testTelegramPairingCodeGetSendsAccountIdAndDecodesCode() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/manage/im/account/telegram/pairing-code")
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.query, "accountId=tg_1000001")
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"ok":true,"accountId":"tg_1000001","pairingCode":"012345"}"#
+            )
+        }
+
+        let response = try await client.telegramPairingCode(accountId: "tg_1000001")
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.accountId, "tg_1000001")
+        XCTAssertEqual(response.pairingCode, "012345")
+    }
+
+    func testRotateTelegramPairingCodeSendsPOSTBodyAndDecodesNewCode() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/manage/im/account/telegram/pairing-code")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer fixture-token"
+            )
+            let body = Self.jsonBody(from: request)
+            XCTAssertEqual(body?["accountId"] as? String, "tg_1000001")
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"ok":true,"accountId":"tg_1000001","pairingCode":"543210"}"#
+            )
+        }
+
+        let response = try await client.rotateTelegramPairingCode(accountId: "tg_1000001")
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.pairingCode, "543210")
+    }
+
+    func testTelegramPairingCodeMapsMissingRouteOnOlderDaemonToFeatureUnavailable() async {
+        let client = makeClient { _ in
+            MockResponse(statusCode: 404, json: "Not Found")
+        }
+
+        do {
+            _ = try await client.telegramPairingCode(accountId: "tg_1000001")
+            XCTFail("Expected feature-unavailable error")
+        } catch let error as APIClientError {
+            XCTAssertEqual(error, .featureUnavailable)
+        } catch {
+            XCTFail("Expected APIClientError, received \(error)")
+        }
+    }
+
     func testConfigureFeishuAccountSendsCredentialsAndDecodesIdentity() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/api/v1/manage/im/account/feishu")

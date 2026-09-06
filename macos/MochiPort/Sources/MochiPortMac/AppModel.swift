@@ -61,6 +61,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var imAccounts: [ManageIMAccount] = []
     @Published private(set) var imAccountsAvailability: MessagingAccountsAvailability = .loading
     @Published private(set) var telegramProjectGroupAccounts: [ManageTelegramProjectGroupAccount] = []
+    /// Telegram 账号当前配对码（accountId → 6 位数字；空串表示传统绑定模式）。
+    @Published private(set) var telegramPairingCodes: [String: String] = [:]
     @Published private(set) var codexStatus: ManageCodexStatus?
     @Published private(set) var codexPreflight: ManageCodexPreflightResponse?
     @Published private(set) var codexEnhancedOperation: ManageEnhancedLaunchOperation?
@@ -705,6 +707,7 @@ final class AppModel: ObservableObject {
                       !daemonTransitionInProgress
                 else { return }
                 await loadTelegramProjectGroups()
+                await loadTelegramPairingCodes()
                 guard transitionGeneration == daemonTransitionGeneration,
                       lifecycleObservationIsCurrent(observationGeneration),
                       !daemonTransitionInProgress
@@ -1057,6 +1060,44 @@ final class AppModel: ObservableObject {
         } catch {
             // Project-group support is optional on older daemons. Keep the
             // account page usable even when this secondary request fails.
+        }
+    }
+
+    private func loadTelegramPairingCodes() async {
+        guard fixtureStatus == nil else { return }
+        for account in imAccounts where account.platform == "telegram" {
+            do {
+                let response = try await apiClient.telegramPairingCode(accountId: account.accountId)
+                telegramPairingCodes[response.accountId] = response.pairingCode
+            } catch let error as APIClientError where error == .featureUnavailable {
+                // 旧后台没有配对码端点：保持传统模式展示即可。
+            } catch {
+                // 配对码是次要信息，加载失败不影响账号页。
+            }
+        }
+    }
+
+    /// 生成或重置 Telegram 账号的配对码，返回新码；失败返回 nil。
+    @discardableResult
+    func rotateTelegramPairingCode(accountId: String) async -> String? {
+        if fixtureStatus != nil {
+            let code = String(format: "%06d", Int.random(in: 0..<1_000_000))
+            telegramPairingCodes[accountId] = code
+            actionFeedback = ActionFeedback(message: "预览模式：已生成新配对码")
+            return code
+        }
+        do {
+            let response = try await apiClient.rotateTelegramPairingCode(accountId: accountId)
+            telegramPairingCodes[response.accountId] = response.pairingCode
+            accountOperationError = nil
+            actionFeedback = ActionFeedback(message: "配对码已更新，旧配对码立即失效。")
+            return response.pairingCode
+        } catch APIClientError.featureUnavailable {
+            accountOperationError = "当前后台服务版本不支持配对码，请更新后台服务。"
+            return nil
+        } catch {
+            accountOperationError = userFacingMessage(for: error)
+            return nil
         }
     }
 
@@ -2945,7 +2986,8 @@ final class AppModel: ObservableObject {
                 ok: true,
                 platform: account.platform,
                 accountId: account.accountId,
-                displayName: account.displayName
+                displayName: account.displayName,
+                pairingCode: "012345"
             )
         }
         do {
@@ -2979,7 +3021,8 @@ final class AppModel: ObservableObject {
                 ok: true,
                 platform: account.platform,
                 accountId: account.accountId,
-                displayName: account.displayName
+                displayName: account.displayName,
+                pairingCode: nil
             )
         }
         do {

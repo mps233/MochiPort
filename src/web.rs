@@ -211,6 +211,10 @@ pub fn router(state: SharedState) -> Router {
             post(im_api::set_telegram_reply_granularity),
         )
         .route(
+            "/im/account/telegram/pairing-code",
+            get(im_api::telegram_pairing_code).post(im_api::rotate_telegram_pairing_code),
+        )
+        .route(
             "/im/account/telegram/sync-topics",
             post(im_api::sync_telegram_topics),
         )

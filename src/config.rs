@@ -145,6 +145,16 @@ pub struct TelegramConfig {
     pub allowed_chat_ids: Vec<String>,
     pub project_groups: Vec<TelegramProjectGroupConfig>,
     pub reply_granularity: TelegramReplyGranularity,
+    /// 非空时启用配对码模式：未绑定私聊必须提供该码才会写入 allowedChatIds。
+    #[serde(alias = "pairing_code")]
+    pub pairing_code: String,
+}
+
+/// 6 位数字配对码，随机空间 10^6，配合失败冷却使用。
+pub fn generate_pairing_code() -> String {
+    let bytes = uuid::Uuid::new_v4().into_bytes();
+    let n = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) % 1_000_000;
+    format!("{:06}", n)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -248,6 +258,7 @@ impl Default for TelegramConfig {
             allowed_chat_ids: Vec::new(),
             project_groups: Vec::new(),
             reply_granularity: TelegramReplyGranularity::default(),
+            pairing_code: String::new(),
         }
     }
 }
@@ -679,6 +690,65 @@ impl AppConfig {
         };
         ensure_telegram_chat_id_on_account(account, chat_id)
     }
+
+    /// 配对码门控的热读入口：返回账号当前配对码，空串表示传统模式。匹配语义与
+    /// `ensure_telegram_allowed_chat_id` 一致（含旧数据空 account_id 的别名）。
+    pub fn telegram_pairing_code(&self, account_id: &str) -> Option<String> {
+        let account_id = account_id.trim();
+        if account_id.is_empty() {
+            return None;
+        }
+        self.telegram_accounts
+            .iter()
+            .find(|account| {
+                account.account_id.trim() == account_id
+                    || (account.account_id.trim().is_empty() && account_id == "telegram")
+            })
+            .map(|account| account.pairing_code.trim().to_string())
+    }
+
+    /// 生成（或重置）账号配对码并返回新码；账号不存在返回 None。调用方负责持久化。
+    pub fn rotate_telegram_pairing_code(&mut self, account_id: &str) -> Option<String> {
+        let account_id = account_id.trim();
+        if account_id.is_empty() {
+            return None;
+        }
+        let account = self.telegram_accounts.iter_mut().find(|account| {
+            account.account_id.trim() == account_id
+                || (account.account_id.trim().is_empty() && account_id == "telegram")
+        })?;
+        let code = generate_pairing_code();
+        account.pairing_code = code.clone();
+        Some(code)
+    }
+
+    /// 配对码验证通过后的强制写入：无论白名单是否已有其他 chat 都追加。
+    pub fn add_telegram_allowed_chat_id(
+        &mut self,
+        account_id: &str,
+        chat_id: &str,
+    ) -> TelegramChatAllowResult {
+        let account_id = account_id.trim();
+        let chat_id = chat_id.trim();
+        if account_id.is_empty() || chat_id.is_empty() {
+            return TelegramChatAllowResult::AccountNotFound;
+        }
+        let Some(account) = self.telegram_accounts.iter_mut().find(|account| {
+            account.account_id.trim() == account_id
+                || (account.account_id.trim().is_empty() && account_id == "telegram")
+        }) else {
+            return TelegramChatAllowResult::AccountNotFound;
+        };
+        if account
+            .allowed_chat_ids
+            .iter()
+            .any(|allowed| allowed.trim() == chat_id)
+        {
+            return TelegramChatAllowResult::Allowed;
+        }
+        account.allowed_chat_ids.push(chat_id.to_string());
+        TelegramChatAllowResult::Bound
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -893,7 +963,7 @@ fn unique_account_id(candidate: String, used: &HashSet<String>) -> String {
 mod tests {
     use super::{
         AppConfig, FeishuConfig, OutboundProxyMode, TelegramChatAllowResult, TelegramConfig,
-        TelegramReplyGranularity,
+        TelegramReplyGranularity, generate_pairing_code,
     };
 
     #[test]
@@ -1090,6 +1160,94 @@ models = ["gpt-test"]
             config.telegram_accounts[0].allowed_chat_ids,
             vec!["123".to_string()]
         );
+    }
+
+    #[test]
+    fn telegram_pairing_code_missing_in_config_defaults_to_empty() {
+        let mut config: AppConfig = toml::from_str(
+            r#"
+                [telegram]
+                botToken = "token"
+                allowedChatIds = ["123"]
+            "#,
+        )
+        .expect("legacy telegram config");
+        assert!(config.migrate_legacy_im_accounts());
+        let account = config.telegram_account("telegram").expect("account");
+        assert_eq!(account.pairing_code, "");
+    }
+
+    #[test]
+    fn telegram_pairing_code_round_trips_through_toml() {
+        let mut config: AppConfig = toml::from_str(
+            r#"
+                [telegram]
+                botToken = "token"
+                pairingCode = "012345"
+            "#,
+        )
+        .expect("pairing config");
+        assert!(config.migrate_legacy_im_accounts());
+        assert_eq!(
+            config.telegram_pairing_code("telegram").as_deref(),
+            Some("012345")
+        );
+    }
+
+    #[test]
+    fn telegram_pairing_code_rotate_generates_six_digits_and_replaces() {
+        let mut config = AppConfig::default();
+        config.telegram_accounts.push(TelegramConfig {
+            account_id: "tg_1".to_string(),
+            pairing_code: "111111".to_string(),
+            ..TelegramConfig::default()
+        });
+
+        let first = config
+            .rotate_telegram_pairing_code("tg_1")
+            .expect("rotated code");
+        assert_eq!(first.len(), 6);
+        assert!(first.chars().all(|ch| ch.is_ascii_digit()));
+        assert_ne!(first, "111111");
+        assert_eq!(config.telegram_pairing_code("tg_1"), Some(first));
+
+        assert_eq!(config.rotate_telegram_pairing_code("tg_missing"), None);
+    }
+
+    #[test]
+    fn telegram_pairing_bind_appends_chat_even_when_allowlist_has_others() {
+        let mut config = AppConfig::default();
+        config.telegram_accounts.push(TelegramConfig {
+            account_id: "tg_1".to_string(),
+            allowed_chat_ids: vec!["100".to_string()],
+            ..TelegramConfig::default()
+        });
+
+        assert_eq!(
+            config.add_telegram_allowed_chat_id("tg_1", "200"),
+            TelegramChatAllowResult::Bound
+        );
+        assert_eq!(
+            config.add_telegram_allowed_chat_id("tg_1", "200"),
+            TelegramChatAllowResult::Allowed
+        );
+        assert_eq!(
+            config.telegram_accounts[0].allowed_chat_ids,
+            vec!["100".to_string(), "200".to_string()]
+        );
+        assert_eq!(
+            config.add_telegram_allowed_chat_id("tg_missing", "300"),
+            TelegramChatAllowResult::AccountNotFound
+        );
+    }
+
+    #[test]
+    fn telegram_generated_pairing_code_is_six_digits() {
+        for _ in 0..32 {
+            let code = generate_pairing_code();
+            assert_eq!(code.len(), 6);
+            assert!(code.chars().all(|ch| ch.is_ascii_digit()));
+        }
     }
 
     #[test]

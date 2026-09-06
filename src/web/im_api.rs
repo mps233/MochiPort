@@ -1,4 +1,9 @@
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::{Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -413,6 +418,83 @@ pub(super) async fn set_telegram_reply_granularity(
             "ok": true,
             "accountId": account_id,
             "replyGranularity": granularity.as_str(),
+        })),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TelegramPairingCodeQuery {
+    account_id: String,
+}
+
+/// 读取账号当前配对码（空串表示传统模式）。配对码只通过专用端点暴露，
+/// 不进入 dashboard / im_accounts 快照。
+pub(super) async fn telegram_pairing_code(
+    State(state): State<SharedState>,
+    Query(query): Query<TelegramPairingCodeQuery>,
+) -> impl IntoResponse {
+    let account_id = query.account_id.trim().to_string();
+    if account_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "missing accountId" })),
+        );
+    }
+    let config = state.config.lock().await;
+    match config.telegram_pairing_code(&account_id) {
+        Some(pairing_code) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "accountId": account_id,
+                "pairingCode": pairing_code,
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": IM_ACCOUNT_NOT_FOUND_ERROR })),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RotateTelegramPairingCodeRequest {
+    account_id: String,
+}
+
+/// 生成或重置配对码并持久化。配对门控在 polling 内热读 config，无需重启桥接。
+pub(super) async fn rotate_telegram_pairing_code(
+    State(state): State<SharedState>,
+    Json(request): Json<RotateTelegramPairingCodeRequest>,
+) -> impl IntoResponse {
+    let account_id = request.account_id.trim().to_string();
+    if account_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "missing accountId" })),
+        );
+    }
+    let mut config = state.config.lock().await;
+    let Some(pairing_code) = config.rotate_telegram_pairing_code(&account_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": IM_ACCOUNT_NOT_FOUND_ERROR })),
+        );
+    };
+    if let Err(err) = config.save(&state.config_path) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": err.to_string() })),
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "accountId": account_id,
+            "pairingCode": pairing_code,
         })),
     )
 }
@@ -2263,6 +2345,7 @@ async fn apply_telegram_token(
         allowed_chat_ids: Vec::new(),
         project_groups: Vec::new(),
         reply_granularity: crate::config::TelegramReplyGranularity::default(),
+        pairing_code: String::new(),
     };
     let api = TelegramApi::new(TelegramSettings::from_app_config(&telegram_config));
     let user = match tokio::time::timeout(std::time::Duration::from_secs(5), api.get_me()).await {
@@ -2304,13 +2387,19 @@ async fn persist_telegram_account(
     {
         let mut config = state.config.lock().await;
         let previous_config = config.clone();
-        if let Some(existing) = config
+        let existing_account = config
             .telegram_accounts
             .iter()
             .find(|account| account.account_id.trim() == telegram_config.account_id.trim())
-        {
-            telegram_config.allowed_chat_ids = existing.allowed_chat_ids.clone();
-            telegram_config.project_groups = existing.project_groups.clone();
+            .cloned();
+        match existing_account {
+            Some(existing) => {
+                telegram_config.allowed_chat_ids = existing.allowed_chat_ids.clone();
+                telegram_config.project_groups = existing.project_groups.clone();
+                telegram_config.pairing_code = existing.pairing_code.clone();
+            }
+            // 新账号默认进入配对码模式：没有第一个私聊者自动占位的窗口期。
+            None => telegram_config.pairing_code = crate::config::generate_pairing_code(),
         }
         let token = telegram_config.bot_token.trim().to_string();
         config.telegram_accounts.retain(|account| {
@@ -2370,6 +2459,7 @@ pub(super) async fn manage_configure_telegram_account(
                 "platform": "telegram",
                 "accountId": account.account_id,
                 "displayName": account.display_name,
+                "pairingCode": account.pairing_code,
             })),
         ),
         Err(response) => response,
@@ -2517,6 +2607,7 @@ mod tests {
                 .collect(),
             project_groups: Vec::new(),
             reply_granularity: crate::config::TelegramReplyGranularity::default(),
+            pairing_code: String::new(),
         }
     }
 
@@ -2642,6 +2733,98 @@ mod tests {
             persisted.telegram_accounts[0].allowed_chat_ids,
             ["100", "200"]
         );
+    }
+
+    #[tokio::test]
+    async fn persisting_new_telegram_account_generates_pairing_code() {
+        let temp_dir = tempdir().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        config.bridge.enabled = true;
+        let state = state_with_config_path(config_path.clone(), config);
+        let mut account = telegram_account("tg_7", "token", true, &[]);
+
+        persist_telegram_account(&state, &mut account)
+            .await
+            .expect("persist Telegram account");
+
+        assert_eq!(account.pairing_code.len(), 6);
+        assert!(account.pairing_code.chars().all(|ch| ch.is_ascii_digit()));
+        let persisted = AppConfig::load_or_default(&config_path).expect("load persisted config");
+        assert_eq!(
+            persisted.telegram_accounts[0].pairing_code,
+            account.pairing_code
+        );
+    }
+
+    #[tokio::test]
+    async fn reconfiguring_telegram_account_preserves_pairing_code() {
+        let temp_dir = tempdir().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+        let mut existing = telegram_account("tg_42", "old-token", true, &["100"]);
+        existing.pairing_code = "123456".to_string();
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        config.telegram_accounts = vec![existing];
+        config.bridge.enabled = true;
+        let state = state_with_config_path(config_path.clone(), config);
+        let mut replacement = telegram_account("tg_42", "new-token", true, &[]);
+
+        persist_telegram_account(&state, &mut replacement)
+            .await
+            .expect("persist Telegram account");
+
+        assert_eq!(replacement.pairing_code, "123456");
+        let persisted = AppConfig::load_or_default(&config_path).expect("load persisted config");
+        assert_eq!(persisted.telegram_accounts[0].pairing_code, "123456");
+    }
+
+    #[tokio::test]
+    async fn rotating_telegram_pairing_code_persists_and_stays_out_of_accounts_snapshot() {
+        let temp_dir = tempdir().expect("temp dir");
+        let mut existing = telegram_account("tg_42", "token", true, &[]);
+        existing.pairing_code = "111111".to_string();
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        config.telegram_accounts = vec![existing];
+        let config_path = temp_dir.path().join("config.toml");
+        let state = state_with_config_path(config_path.clone(), config);
+
+        let response = rotate_telegram_pairing_code(
+            State(state.clone()),
+            Json(RotateTelegramPairingCodeRequest {
+                account_id: "tg_42".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read rotate response");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("rotate payload");
+        assert_eq!(payload["ok"], serde_json::Value::Bool(true));
+        let rotated = payload["pairingCode"].as_str().expect("pairing code");
+        assert_ne!(rotated, "111111");
+        assert_eq!(rotated.len(), 6);
+
+        let reloaded = AppConfig::load_or_default(&config_path).expect("load persisted config");
+        assert_eq!(reloaded.telegram_accounts[0].pairing_code, rotated);
+
+        let accounts = im_accounts_snapshot(&state).await;
+        let snapshot = serde_json::to_string(&accounts).expect("serialize accounts snapshot");
+        assert!(!snapshot.contains("pairingCode"));
+
+        let missing = rotate_telegram_pairing_code(
+            State(state.clone()),
+            Json(RotateTelegramPairingCodeRequest {
+                account_id: "tg_missing".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

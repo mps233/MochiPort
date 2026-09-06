@@ -150,6 +150,14 @@ struct ManageIMAccountConfigureResponse: Decodable, Equatable, ManageMutationRes
     let platform: String
     let accountId: String
     let displayName: String?
+    /// 新配置的 Telegram 账号由后台生成的配对码；旧后台不返回该字段。
+    let pairingCode: String?
+}
+
+struct ManageTelegramPairingCodeResponse: Codable, Equatable, ManageMutationResponse {
+    let ok: Bool
+    let accountId: String
+    let pairingCode: String
 }
 
 struct ManageFeishuOnboardingStart: Decodable, Equatable {
@@ -1938,6 +1946,38 @@ struct APIClient: Sendable {
             throw APIClientError.operationFailed("后台服务未完成回复颗粒度设置。")
         }
         return response
+    }
+
+    /// 读取 Telegram 账号的当前配对码；空串表示账号仍处于传统绑定模式。
+    func telegramPairingCode(
+        accountId: String
+    ) async throws -> ManageTelegramPairingCodeResponse {
+        let response: ManageTelegramPairingCodeResponse = try await performManageGET(
+            path: "api/v1/manage/im/account/telegram/pairing-code",
+            queryItems: [URLQueryItem(name: "accountId", value: accountId)]
+        )
+        guard response.ok else {
+            throw APIClientError.operationFailed("后台服务未返回配对码。")
+        }
+        return response
+    }
+
+    /// 生成或重置配对码并持久化。配对门控热读配置，改动立即生效。
+    func rotateTelegramPairingCode(
+        accountId: String
+    ) async throws -> ManageTelegramPairingCodeResponse {
+        let response: ManageTelegramPairingCodeResponse = try await performManagePOST(
+            path: "api/v1/manage/im/account/telegram/pairing-code",
+            body: TelegramPairingCodeRequest(accountId: accountId)
+        )
+        guard response.ok else {
+            throw APIClientError.operationFailed("后台服务未完成配对码更新。")
+        }
+        return response
+    }
+
+    private struct TelegramPairingCodeRequest: Encodable {
+        let accountId: String
     }
 
     private struct TelegramTopicSyncRequest: Encodable {

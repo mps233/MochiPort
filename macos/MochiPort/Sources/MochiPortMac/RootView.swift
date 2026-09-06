@@ -80,6 +80,10 @@ struct RootView: View {
                                 accountId: account.accountID,
                                 granularity: granularity
                             )
+                        },
+                        telegramPairingCodes: model.telegramPairingCodes,
+                        onRotateTelegramPairingCode: { accountId in
+                            await model.rotateTelegramPairingCode(accountId: accountId) != nil
                         }
                     )
                     .overlay(alignment: .bottom) {
