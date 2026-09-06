@@ -127,7 +127,8 @@ private struct OverviewTab: View {
             store: store,
             services: enabled,
             providerUsage: providerUsage,
-            now: now
+            now: now,
+            statsStore: statsStore
         )
         VStack(spacing: 10) {
             ForEach(rows, id: \.service) { row in
@@ -207,13 +208,14 @@ private struct UsageMetricSnapshot {
         store: UsageStore,
         services: [ServiceID],
         providerUsage: ManageProviderUsageResponse?,
-        now: Date
+        now: Date,
+        statsStore: DailyStatsStore? = nil
     ) {
         let start = Calendar.current.startOfDay(for: now)
         let events = store.events.filter {
             services.contains($0.service) && $0.timestamp >= start
         }
-        todayTokens = Double(events.reduce(0) { $0 + $1.requestTokens })
+        var todayTokensValue = Double(events.reduce(0) { $0 + $1.requestTokens })
         tokensPerMinute = services.reduce(0) {
             $0 + store.tokensPerMinute(service: $1, windowMinutes: 3, now: now)
         }
@@ -222,7 +224,20 @@ private struct UsageMetricSnapshot {
         // Codex estimate derived from local per-turn usage. Provider actual
         // spend and Sub2API rate multipliers are separate billing concepts.
         _ = providerUsage
-        todayCost = CostEstimator.cost(of: events)
+        var cost = CostEstimator.cost(of: events)
+
+        // 启动时收集器渐进扫描，live store 的今日值是部分的；
+        // 与持久化统计取最大值合并，避免"今日 Token"从 0 一点点蹦出来。
+        if let statsStore {
+            let persistedTokens = statsStore
+                .dailyTotalsByService(days: 1, now: now, calendar: .current)
+                .reduce(0) { $0 + $1.tokens }
+            let persistedCost = statsStore.totalCost(days: 1, now: now)
+            todayTokensValue = max(todayTokensValue, Double(persistedTokens))
+            cost = max(cost, persistedCost)
+        }
+        todayTokens = todayTokensValue
+        todayCost = cost
     }
 
     func formatCost(_ usd: Double) -> String {
@@ -593,7 +608,8 @@ struct OverviewUsageInsightsView: View {
             store: store,
             services: [.codex],
             providerUsage: providerUsage,
-            now: Date()
+            now: Date(),
+            statsStore: statsStore
         )
 
         VStack(alignment: .leading, spacing: 12) {
@@ -804,7 +820,18 @@ private struct UsageTrendContent: View {
         let now = Date()
         let days = range == .week ? 7 : 30
         if range == .week {
-            return store.dailyTotalsByService(days: days, now: now, calendar: .current)
+            // 启动时收集器在后台渐进扫描日志，live store 是部分数据；
+            // 与持久化统计按 (day, service) 取最大值合并，数值不会一截截蹦出来。
+            var merged = store.dailyTotalsByService(days: days, now: now, calendar: .current)
+            let persisted = statsStore?.dailyTotalsByService(days: days, now: now, calendar: .current) ?? []
+            for row in persisted {
+                if let index = merged.firstIndex(where: { $0.day == row.day && $0.service == row.service }) {
+                    merged[index].tokens = max(merged[index].tokens, row.tokens)
+                } else {
+                    merged.append((day: row.day, service: row.service, tokens: row.tokens))
+                }
+            }
+            return merged
         }
 
         // The durable archive follows the same local natural-day buckets as
