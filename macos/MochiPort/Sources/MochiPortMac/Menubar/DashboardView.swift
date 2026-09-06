@@ -508,13 +508,33 @@ private struct AnimatedMetricValue: View {
     let format: (Double) -> String
     let font: Font
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var displayed: Double = 0
 
     var body: some View {
-        // 启动即显示最终值（不再从 0 计数）；运行中数据变化时数字滚动过渡。
-        Text(format(value))
+        Text(format(displayed))
             .font(font.monospacedDigit())
             .contentTransition(.numericText())
-            .animation(reduceMotion ? nil : .spring(duration: 0.4), value: value)
+            .task {
+                guard !reduceMotion else {
+                    displayed = value
+                    return
+                }
+                displayed = 0
+                for step in 1...6 {
+                    try? await Task.sleep(for: .milliseconds(75))
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.easeOut(duration: 0.09)) {
+                        displayed = value * Double(step) / 6.0
+                    }
+                }
+            }
+            .onChange(of: value) { _, newValue in
+                if reduceMotion {
+                    displayed = newValue
+                } else {
+                    withAnimation(.spring(duration: 0.4)) { displayed = newValue }
+                }
+            }
     }
 }
 
@@ -810,6 +830,7 @@ private struct UsageTrendContent: View {
     @Environment(\.colorScheme) private var colorScheme
     /// 从 0.0 增长到 1.0，只乘在 BarMark 的 y 值上。
     /// 轴/刻度/布局固定为最终数据，不随动画移动。
+    @State private var growFactor: Double = 0
 
     private let enabled: [ServiceID] = [.codex]
 
@@ -872,6 +893,17 @@ private struct UsageTrendContent: View {
         }
     }
 
+    /// Commit the zero frame first, then spring the bars to their final values.
+    private func startGrow() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { growFactor = reduceMotion ? 1 : 0 }
+        guard !reduceMotion else { return }
+        Task { @MainActor in
+            withAnimation(.spring(duration: 0.8)) { growFactor = 1 }
+        }
+    }
+
     private var chart: some View {
         // rawData（事件全量扫描/SQLite 查询）每次 body 求值只执行一次——y 轴最大值也在这里得出。
         let rows = rawData
@@ -880,9 +912,10 @@ private struct UsageTrendContent: View {
         let byDay = Dictionary(grouping: rows, by: { $0.day })
         let maxStack = byDay.values.map { $0.reduce(0) { $0 + $1.tokens } }.max() ?? 0
         let maxY = Double(max(1, maxStack)) * 1.05
+        let factor = growFactor
         return Chart(data) { item in
             BarMark(x: .value("日期", item.day, unit: .day),
-                    y: .value("请求 Token", Double(item.tokens)))
+                    y: .value("请求 Token", Double(item.tokens) * factor))
                 .foregroundStyle(by: .value("服务", item.service.displayName))
                 .cornerRadius(3)
         }
@@ -916,6 +949,7 @@ private struct UsageTrendContent: View {
         .chartLegend(position: .bottom)
         .font(.system(size: 9))
         .frame(height: chartHeight)
+        .onAppear { startGrow() }
     }
 
     private var chartBarColor: Color {
