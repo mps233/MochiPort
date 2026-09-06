@@ -328,7 +328,8 @@ struct HeatmapView: View {
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
         .background(
-            Color(nsColor: .windowBackgroundColor),
+            // 字面不透明深色：任何系统材质/动态色语义都可能引入透明度。
+            Color(red: 0.12, green: 0.12, blue: 0.13),
             in: RoundedRectangle(cornerRadius: 7, style: .continuous)
         )
         .overlay(
