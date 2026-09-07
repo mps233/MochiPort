@@ -12,6 +12,7 @@
 		A10000000000000000000019 /* AccountPoolView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000019 /* AccountPoolView.swift */; };
 		A1000000000000000000001A /* MessagingErrorCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001A /* MessagingErrorCopy.swift */; };
 		A1000000000000000000001B /* MessagingErrorCopyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001B /* MessagingErrorCopyTests.swift */; };
+		A1000000000000000000001C /* WindowFrameRestorationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001C /* WindowFrameRestorationTests.swift */; };
 		A10000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* RootView.swift */; };
 		A10000000000000000000005 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* SettingsView.swift */; };
 		A10000000000000000000007 /* DesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* DesignSystem.swift */; };
@@ -68,6 +69,7 @@
 		A20000000000000000000019 /* AccountPoolView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountPoolView.swift; sourceTree = "<group>"; };
 		A2000000000000000000001A /* MessagingErrorCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagingErrorCopy.swift; sourceTree = "<group>"; };
 		A2000000000000000000001B /* MessagingErrorCopyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagingErrorCopyTests.swift; sourceTree = "<group>"; };
+		A2000000000000000000001C /* WindowFrameRestorationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFrameRestorationTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000004 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		A20000000000000000000005 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A20000000000000000000006 /* Version.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Version.xcconfig; sourceTree = "<group>"; };
@@ -197,6 +199,7 @@
 				A20000000000000000000009 /* APIContractTests.swift */,
 				A20000000000000000000017 /* UpdateCheckerTests.swift */,
 				A2000000000000000000001B /* MessagingErrorCopyTests.swift */,
+				A2000000000000000000001C /* WindowFrameRestorationTests.swift */,
 			);
 			path = Tests/MochiPortMacTests;
 			sourceTree = SOURCE_ROOT;
@@ -348,6 +351,7 @@
 					A10000000000000000000009 /* APIContractTests.swift in Sources */,
 					A10000000000000000000017 /* UpdateCheckerTests.swift in Sources */,
 				A1000000000000000000001B /* MessagingErrorCopyTests.swift in Sources */,
+				A1000000000000000000001C /* WindowFrameRestorationTests.swift in Sources */,
 				);
 				runOnlyForDeploymentPostprocessing = 0;
 			};

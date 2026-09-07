@@ -175,6 +175,7 @@ struct MochiPortApp: App {
                 .background(WindowVisibilityObserver { visible in
                     model.setWindowVisible(visible)
                 })
+                .background(WindowFrameRestorationGuard())
         }
         .defaultSize(width: 1040, height: 700)
         .commands {
@@ -233,6 +234,111 @@ struct MochiPortApp: App {
             .credits: NSAttributedString(string: "通过聊天远程控制编程智能体的本地优先桥接工具。"),
         ])
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+}
+
+/// 窗口恢复位置的纯几何判断。macOS 会把上次关闭时的窗口位置原样恢复；
+/// 当用户接过外接屏或模拟器虚拟屏（如 MuMu）后，保存的位置可能落在
+/// 看不见的屏幕区域，App 看起来就像没有打开。
+enum WindowFrameRestoration {
+    /// 窗口至少要有这一比例的面积落在真实屏幕的可视区域内，否则视为
+    /// 「恢复到了不可见的屏幕」，需要拉回主屏。
+    static let minimumVisibleFraction: CGFloat = 0.2
+
+    /// 返回 nil 表示窗口位置可以保留；否则返回应移动到的原点。
+    /// screens 为各屏幕的可视区域，第一项按 AppKit 约定是主屏幕。
+    static func relocatedOrigin(frame: CGRect, screens: [CGRect]) -> CGPoint? {
+        guard !screens.isEmpty else { return nil }
+        let frameArea = frame.width * frame.height
+        guard frameArea > 0 else { return nil }
+
+        var visibleArea: CGFloat = 0
+        var bestScreen = screens[0]
+        var bestOverlap: CGFloat = 0
+        for screen in screens {
+            let intersection = screen.intersection(frame)
+            let area = intersection.isNull ? 0 : intersection.width * intersection.height
+            visibleArea += area
+            if area > bestOverlap {
+                bestOverlap = area
+                bestScreen = screen
+            }
+        }
+        guard visibleArea / frameArea < minimumVisibleFraction else { return nil }
+
+        // 拉回重叠最多的屏幕并居中；窗口比屏幕大时按可视区左上角对齐。
+        return CGPoint(
+            x: max(bestScreen.minX, min(bestScreen.midX - frame.width / 2, bestScreen.maxX - frame.width)),
+            y: max(bestScreen.minY, min(bestScreen.midY - frame.height / 2, bestScreen.maxY - frame.height))
+        )
+    }
+}
+
+/// 窗口首次可见时校验恢复出来的位置；落不到真实屏幕上就拉回主屏。
+private struct WindowFrameRestorationGuard: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        NSView()
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.attach(to: view)
+    }
+
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
+        coordinator.dismantle()
+    }
+
+    @MainActor
+    final class Coordinator: @unchecked Sendable {
+        private var observations: [NSObjectProtocol] = []
+        private weak var window: NSWindow?
+        private var validated = false
+
+        func attach(to view: NSView) {
+            Task { @MainActor [weak self, weak view] in
+                guard let self, let window = view?.window, self.window !== window else { return }
+                clear()
+                self.window = window
+                observations.append(
+                    NotificationCenter.default.addObserver(
+                        forName: NSWindow.didChangeOcclusionStateNotification,
+                        object: window,
+                        queue: .main
+                    ) { [weak self] _ in
+                        Task { @MainActor in
+                            self?.validateIfNeeded()
+                        }
+                    }
+                )
+                validateIfNeeded()
+            }
+        }
+
+        func dismantle() {
+            clear()
+            window = nil
+        }
+
+        private func clear() {
+            observations.forEach(NotificationCenter.default.removeObserver)
+            observations.removeAll()
+        }
+
+        private func validateIfNeeded() {
+            guard !validated, let window, window.isVisible else { return }
+            validated = true
+            clear()
+            guard !window.styleMask.contains(.fullScreen) else { return }
+            guard let origin = WindowFrameRestoration.relocatedOrigin(
+                frame: window.frame,
+                screens: NSScreen.screens.map(\.visibleFrame)
+            ) else { return }
+            window.setFrameOrigin(origin)
+        }
     }
 }
 
