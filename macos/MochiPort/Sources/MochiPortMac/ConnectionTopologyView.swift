@@ -47,11 +47,6 @@ struct ConnectionTopologyView: View {
 
             GeometryReader { proxy in
                 topologyLayout(in: proxy.size)
-                    .onPreferenceChange(TopologyAnchorKey.self) { anchors in
-                        var points: [String: CGPoint] = [:]
-                        for (id, anchor) in anchors { points[id] = proxy[anchor] }
-                        if points != nodePoints { nodePoints = points }
-                    }
             }
             .frame(minHeight: topologyHeight, idealHeight: topologyHeight, maxHeight: topologyHeight)
         }
@@ -64,48 +59,57 @@ struct ConnectionTopologyView: View {
         let metrics = TopologyLayoutMetrics(size: size)
         topologyStack(
             size: CGSize(width: metrics.layoutWidth, height: size.height),
-            metrics: metrics,
-            points: nodePoints
+            metrics: metrics
         )
         .frame(width: metrics.layoutWidth, height: size.height)
         .frame(maxWidth: .infinity)
     }
 
+    /// 锚点必须在与画布重合的坐标系里解析：版面被 min(width, 720) 截宽并居中后，
+    /// 画布原点相对外层 GeometryReader 横向偏移；若在外层解析锚点，连线会整体
+    /// 偏移 (容器宽 - 720)/2。这里在 ZStack 内用同名尺寸的 GeometryReader 解析，
+    /// 保证 nodePoints 与画布局部坐标严格一致。
     private func topologyStack(
         size: CGSize,
-        metrics: TopologyLayoutMetrics,
-        points: [String: CGPoint]
+        metrics: TopologyLayoutMetrics
     ) -> some View {
-        ZStack {
-            TopologyConnectorCanvas(
-                size: size,
-                points: points,
-                leftNodes: leftNodes,
-                rightNodes: rightNodes,
-                sideWidth: metrics.sideWidth,
-                serviceWidth: metrics.serviceWidth
-            )
-
-            HStack(alignment: .center, spacing: metrics.gap) {
-                nodeColumn(leftNodes, width: metrics.sideWidth, side: .left)
-                TopologyServiceNode(
-                    status: model.serviceStatus,
-                    remoteTint: remoteTint,
-                    bridgeTint: bridgeTint
+        GeometryReader { proxy in
+            ZStack {
+                TopologyConnectorCanvas(
+                    size: size,
+                    points: nodePoints,
+                    leftNodes: leftNodes,
+                    rightNodes: rightNodes,
+                    sideWidth: metrics.sideWidth,
+                    serviceWidth: metrics.serviceWidth
                 )
-                .frame(width: metrics.serviceWidth)
-                .anchorPreference(key: TopologyAnchorKey.self, value: .center) {
-                    ["service": $0]
+
+                HStack(alignment: .center, spacing: metrics.gap) {
+                    nodeColumn(leftNodes, width: metrics.sideWidth, side: .left)
+                    TopologyServiceNode(
+                        status: model.serviceStatus,
+                        remoteTint: remoteTint,
+                        bridgeTint: bridgeTint
+                    )
+                    .frame(width: metrics.serviceWidth)
+                    .anchorPreference(key: TopologyAnchorKey.self, value: .center) {
+                        ["service": $0]
+                    }
+                    .accessibilityIdentifier("topology.node.local-service")
+                    nodeColumn(rightNodes, width: metrics.sideWidth, side: .right)
                 }
-                .accessibilityIdentifier("topology.node.local-service")
-                nodeColumn(rightNodes, width: metrics.sideWidth, side: .right)
+                .padding(.horizontal, metrics.layoutPadding)
+                .frame(
+                    width: size.width,
+                    height: size.height,
+                    alignment: .leading
+                )
             }
-            .padding(.horizontal, metrics.layoutPadding)
-            .frame(
-                width: size.width,
-                height: size.height,
-                alignment: .leading
-            )
+            .onPreferenceChange(TopologyAnchorKey.self) { anchors in
+                var points: [String: CGPoint] = [:]
+                for (id, anchor) in anchors { points[id] = proxy[anchor] }
+                if points != nodePoints { nodePoints = points }
+            }
         }
         .frame(width: size.width, height: size.height)
     }
