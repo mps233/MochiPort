@@ -597,7 +597,7 @@ pub(crate) async fn handle_inbound(
             }
             return Ok(());
         }
-        Some("/granularity") | Some("/回复") => {
+        Some("/granularity") | Some("/reply") | Some("/回复") => {
             handle_telegram_reply_granularity_command(
                 &state,
                 &adapter,
@@ -3127,6 +3127,8 @@ mod tests {
         );
         assert_eq!(super::command("/s"), Some("/s".to_string()));
         assert_eq!(super::command("/q"), Some("/q".to_string()));
+        assert_eq!(super::command("/reply"), Some("/reply".to_string()));
+        assert_eq!(super::command("/REPLY@MochiPort"), Some("/reply".to_string()));
         assert_eq!(super::command("/1"), Some("/1".to_string()));
         assert_eq!(super::command("status"), None);
         assert_eq!(super::command("/queue hello"), Some("/queue".to_string()));

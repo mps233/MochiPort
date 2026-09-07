@@ -74,7 +74,7 @@ impl ImText {
     }
 
     pub(crate) fn no_running_turn(self) -> &'static str {
-        self.choose("当前没有运行中的 turn。", "There is no running turn.")
+        self.choose("当前没有运行中的任务。", "There is no running task.")
     }
 
     pub(crate) fn interrupted(self) -> &'static str {
@@ -1001,8 +1001,8 @@ impl ImText {
 
     pub(crate) fn custom_cwd_prompt_telegram(self) -> &'static str {
         self.choose(
-            "请发送项目目录的绝对路径。目录不存在时，创建 thread 时会自动创建。\n\n发送 /cancel 取消。",
-            "Send the absolute project directory path. If it does not exist, it will be created when the thread starts.\n\nSend /cancel to cancel.",
+            "请发送项目目录的绝对路径。目录不存在时，创建会话时会自动创建。\n\n发送 /cancel 取消。",
+            "Send the absolute project directory path. If it does not exist, it will be created when the session starts.\n\nSend /cancel to cancel.",
         )
     }
 
