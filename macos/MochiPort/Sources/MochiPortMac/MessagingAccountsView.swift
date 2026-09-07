@@ -920,15 +920,24 @@ struct MessagingAccountsView: View {
     private func trailingMetricCell(for account: MessagingAccountSummary) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             if let lastError = account.lastError?.trimmedNonEmpty {
+                let notice = MessagingErrorCopy.notice(for: lastError, platform: account.platform)
                 Text("异常")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
-                Label(lastError, systemImage: "exclamationmark.triangle.fill")
+                Label(notice.title, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.red)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                     .help(lastError)
+                if let hint = notice.hint {
+                    Text(hint)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .help(lastError)
+                }
             } else if let lastInboundAt = account.lastInboundAt {
                 Text("最近收到消息")
                     .font(.caption2)

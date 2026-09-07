@@ -10,6 +10,8 @@
 		A10000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* AppModel.swift */; };
 		A10000000000000000000003 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* APIClient.swift */; };
 		A10000000000000000000019 /* AccountPoolView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000019 /* AccountPoolView.swift */; };
+		A1000000000000000000001A /* MessagingErrorCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001A /* MessagingErrorCopy.swift */; };
+		A1000000000000000000001B /* MessagingErrorCopyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001B /* MessagingErrorCopyTests.swift */; };
 		A10000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* RootView.swift */; };
 		A10000000000000000000005 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* SettingsView.swift */; };
 		A10000000000000000000007 /* DesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* DesignSystem.swift */; };
@@ -64,6 +66,8 @@
 		A20000000000000000000002 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
 		A20000000000000000000019 /* AccountPoolView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountPoolView.swift; sourceTree = "<group>"; };
+		A2000000000000000000001A /* MessagingErrorCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagingErrorCopy.swift; sourceTree = "<group>"; };
+		A2000000000000000000001B /* MessagingErrorCopyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagingErrorCopyTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000004 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		A20000000000000000000005 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A20000000000000000000006 /* Version.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Version.xcconfig; sourceTree = "<group>"; };
@@ -156,6 +160,7 @@
 				A2000000000000000000000A /* DaemonLauncher.swift */,
 				A2000000000000000000000B /* ConnectionTopologyView.swift */,
 				A2000000000000000000000D /* MessagingAccountsView.swift */,
+				A2000000000000000000001A /* MessagingErrorCopy.swift */,
 				A2000000000000000000000E /* MessagingOnboardingView.swift */,
 				A2000000000000000000000F /* ManagementViews.swift */,
 				A20000000000000000000011 /* UpdateChecker.swift */,
@@ -191,6 +196,7 @@
 			children = (
 				A20000000000000000000009 /* APIContractTests.swift */,
 				A20000000000000000000017 /* UpdateCheckerTests.swift */,
+				A2000000000000000000001B /* MessagingErrorCopyTests.swift */,
 			);
 			path = Tests/MochiPortMacTests;
 			sourceTree = SOURCE_ROOT;
@@ -297,6 +303,7 @@
 				A1000000000000000000000A /* DaemonLauncher.swift in Sources */,
 				A1000000000000000000000B /* ConnectionTopologyView.swift in Sources */,
 				A1000000000000000000000D /* MessagingAccountsView.swift in Sources */,
+				A1000000000000000000001A /* MessagingErrorCopy.swift in Sources */,
 				A1000000000000000000000E /* MessagingOnboardingView.swift in Sources */,
 				A1000000000000000000000F /* ManagementViews.swift in Sources */,
 				A10000000000000000000011 /* UpdateChecker.swift in Sources */,
@@ -340,6 +347,7 @@
 				files = (
 					A10000000000000000000009 /* APIContractTests.swift in Sources */,
 					A10000000000000000000017 /* UpdateCheckerTests.swift in Sources */,
+				A1000000000000000000001B /* MessagingErrorCopyTests.swift in Sources */,
 				);
 				runOnlyForDeploymentPostprocessing = 0;
 			};
