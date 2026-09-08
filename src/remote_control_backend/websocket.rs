@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 use axum::{
@@ -6,15 +7,18 @@ use axum::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::HeaderMap,
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use tracing::info;
 
 use crate::{
-    app_state::{RemoteControlServerConnection, RemoteControlSourceKind, SharedState},
+    app_state::{
+        LifecycleAdmissionState, RemoteControlServerConnection, RemoteControlSourceKind,
+        SharedState,
+    },
     chain_log,
     types::now_ms,
 };
@@ -42,11 +46,44 @@ use super::{
     log_remote_control_entry_headers, next_remote_subscribe_cursor, stable_id,
 };
 
+/// Latches after the first drain refusal so a retry storm cannot flood the
+/// chain log through the refusal path itself. Reset once admission reopens.
+static DRAINING_REJECTION_LOGGED: AtomicBool = AtomicBool::new(false);
+
 pub(super) async fn websocket(
     State(state): State<SharedState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
-) -> impl IntoResponse {
+) -> Response {
+    // Refuse before the upgrade when the daemon is not admitting work.
+    // Upgrading first and failing inside `run_websocket` made every attempt a
+    // 101 followed by an immediate close; the client retried with no backoff
+    // and produced a 300k-connection storm in one hour (2026-09-03).
+    if state.lifecycle_admission.state() != LifecycleAdmissionState::Active {
+        // A draining daemon can be retried thousands of times per minute. Log
+        // the first rejection and then stay quiet, otherwise the refusal
+        // itself becomes the log flood it is meant to prevent.
+        if DRAINING_REJECTION_LOGGED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            state
+                .push_event(
+                    "warn",
+                    "remote_control_rejected_draining",
+                    "remote-control websocket rejected before upgrade: daemon is draining (further rejections suppressed until it recovers)",
+                )
+                .await;
+        }
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(axum::http::header::RETRY_AFTER, "5")],
+            "daemon lifecycle is draining; retry after restart",
+        )
+            .into_response();
+    }
+    // Admission is open again; allow the next drain to log its first refusal.
+    DRAINING_REJECTION_LOGGED.store(false, Ordering::Release);
     let protocol_version = header_str(&headers, "x-codex-protocol-version").unwrap_or_default();
     if protocol_version != PROTOCOL_VERSION {
         state
@@ -61,11 +98,21 @@ pub(super) async fn websocket(
         .on_upgrade(move |socket| async move {
             if let Err(err) = run_websocket(state.clone(), headers, socket).await {
                 let message = err.to_string();
-                state
-                    .push_event("error", "remote_control_ws_failed", message)
-                    .await;
+                // A drain that starts between the admission check and the
+                // upgrade still closes the socket; that is expected, not a
+                // failure worth an error-level event on every retry.
+                if state.lifecycle_admission.state() == LifecycleAdmissionState::Active {
+                    state
+                        .push_event("error", "remote_control_ws_failed", message)
+                        .await;
+                } else {
+                    chain_log::write_line(format!(
+                        "[remote_control] event=ws_closed_draining reason={message}"
+                    ));
+                }
             }
         })
+        .into_response()
 }
 
 async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket) -> Result<()> {
@@ -497,12 +544,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_initialization_failure_does_not_leave_connection_registered() {
+    async fn draining_daemon_rejects_the_upgrade_instead_of_accepting_then_closing() {
         let temp = tempfile::tempdir().expect("tempdir");
         let mut config = AppConfig::default();
         config.state_path = temp.path().join("state.json");
         let state = AppState::new(temp.path().join("config.toml"), config, None, None);
         assert!(state.lifecycle_admission.begin_draining());
+
+        let app = crate::remote_control_backend::router().with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test websocket server");
+        let address = listener
+            .local_addr()
+            .expect("test websocket server address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test websocket server");
+        });
+
+        // The handshake must fail outright: a 101 followed by an immediate
+        // close is what let the client retry in a tight loop.
+        let error = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/api/wham/remote/control/server"
+        ))
+        .await
+        .expect_err("draining daemon must refuse the websocket upgrade");
+        match error {
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(axum::http::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok()),
+                    Some("5")
+                );
+            }
+            other => panic!("expected an HTTP rejection, got {other:?}"),
+        }
+        assert!(
+            state
+                .remote_control
+                .inner
+                .lock()
+                .await
+                .connections
+                .is_empty(),
+            "a refused upgrade must not register a connection"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_initialization_failure_does_not_leave_connection_registered() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = AppConfig::default();
+        config.state_path = temp.path().join("state.json");
+        let state = AppState::new(temp.path().join("config.toml"), config, None, None);
 
         let app = crate::remote_control_backend::router().with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

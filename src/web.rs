@@ -756,6 +756,18 @@ async fn perform_shutdown(
                 "protectedWorkItems": protected_work_items,
             })),
         ),
+        manage_api::LifecycleShutdownResult::DrainTimedOut { outstanding } => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "accepted": false,
+                "state": "active",
+                "error": format!(
+                    "后台服务排空超时，仍有 {outstanding} 项任务未结束，已取消关闭。"
+                ),
+                "outstandingProtectedWork": outstanding,
+            })),
+        ),
         manage_api::LifecycleShutdownResult::LeaseRejected(_) => (
             StatusCode::CONFLICT,
             Json(json!({
@@ -4205,6 +4217,72 @@ mod tests {
             state.lifecycle_admission.state(),
             crate::app_state::LifecycleAdmissionState::ShutdownCommitted
         );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_restart_does_not_commit_shutdown_while_a_permit_is_outstanding() {
+        let (state, _temp, token) = management_test_state();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        *state.shutdown_tx.lock().await = Some(shutdown_tx);
+        let body = lifecycle_lease_request(&state, "swiftui-test-installation")
+            .await
+            .to_string();
+        let app = router(state.clone());
+
+        let claim = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/claim",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(claim.status(), StatusCode::OK);
+
+        // Hold an admission permit so the drain cannot complete. The restart
+        // must stay pending instead of signalling a shutdown it cannot finish;
+        // the bounded drain in `manage_api` is what turns this into a
+        // fail-closed cancellation rather than an indefinite hang.
+        let permit = state
+            .lifecycle_admission
+            .try_admit()
+            .expect("permit while active");
+        let restart = tokio::spawn({
+            let app = app.clone();
+            let token = token.clone();
+            let body = body.clone();
+            async move {
+                request_response(
+                    app,
+                    Method::POST,
+                    "/api/v1/manage/lifecycle/restart",
+                    Some(&token),
+                    Some(&body),
+                )
+                .await
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            !restart.is_finished(),
+            "restart must wait for the outstanding permit"
+        );
+        assert!(
+            shutdown_rx.try_recv().is_err(),
+            "shutdown must not be signalled while protected work is outstanding"
+        );
+
+        drop(permit);
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), restart)
+            .await
+            .expect("restart finishes once the permit is released")
+            .expect("restart task");
+        assert_eq!(response.status(), StatusCode::OK);
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut shutdown_rx)
+            .await
+            .expect("shutdown signal timeout")
+            .expect("shutdown signal sender");
     }
 
     #[tokio::test]

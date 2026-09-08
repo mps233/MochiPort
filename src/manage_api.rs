@@ -45,6 +45,10 @@ const CONTROL_FILE_NAME: &str = "mochiport-control.json";
 const CONTROL_LOCK_FILE_NAME: &str = "mochiport-control.lock";
 const ACTIVE_DAEMON_FILE_NAME: &str = "mochiport-active-daemon.json";
 const MANAGEMENT_LEASE_DURATION_MS: u64 = 30_000;
+/// Upper bound on the protected-work drain. Long enough for a normal Codex
+/// turn to finish, short enough that a leaked permit cannot pin the daemon in
+/// `Draining` indefinitely.
+const LIFECYCLE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 const CREDENTIAL_ROTATION_REASON_TAKEOVER: &str = "trustedTakeover";
 const CREDENTIAL_ROTATION_REASON_LEAK: &str = "leakRecovery";
 
@@ -257,6 +261,11 @@ pub(crate) enum LifecycleShutdownResult {
     Accepted,
     AlreadyInProgress,
     ProtectedWork(LifecycleProtectedWorkItems),
+    /// In-flight permits never returned to zero; admission was reopened so the
+    /// daemon keeps serving instead of staying draining forever.
+    DrainTimedOut {
+        outstanding: usize,
+    },
     LeaseRejected(LeaseError),
     NotRunning,
 }
@@ -328,7 +337,29 @@ async fn request_shutdown_with_drain_inner(
     // Stop polling/streaming before the final snapshot. Any handler that had
     // already passed the admission gate keeps its permit until it returns.
     crate::web::stop_bridge_for_lifecycle_shutdown(state).await;
-    state.lifecycle_admission.wait_for_drain().await;
+    if !state
+        .lifecycle_admission
+        .wait_for_drain_with_timeout(LIFECYCLE_DRAIN_TIMEOUT)
+        .await
+    {
+        // Fail closed: cancelling admission restores service instead of
+        // leaving the daemon draining forever behind a stuck permit.
+        state
+            .push_event(
+                "error",
+                "lifecycle_drain_timeout",
+                format!(
+                    "lifecycle drain exceeded {}s with {} protected work permit(s) outstanding; aborting the restart",
+                    LIFECYCLE_DRAIN_TIMEOUT.as_secs(),
+                    state.lifecycle_admission.active_permit_count()
+                ),
+            )
+            .await;
+        cancel_draining_and_restore_bridge(state).await;
+        return LifecycleShutdownResult::DrainTimedOut {
+            outstanding: state.lifecycle_admission.active_permit_count(),
+        };
+    }
 
     let final_snapshot = lifecycle_snapshot(state).await;
     if final_snapshot.protected_work_items.total > 0 && !force {
@@ -692,6 +723,18 @@ pub async fn restart_lifecycle(
                     protected_work_items.total
                 ),
                 "protectedWorkItems": protected_work_items,
+            })),
+        )
+            .into_response(),
+        LifecycleShutdownResult::DrainTimedOut { outstanding } => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "state": "active",
+                "error": format!(
+                    "后台服务排空超时，仍有 {outstanding} 项任务未结束，已取消重启。"
+                ),
+                "outstandingProtectedWork": outstanding,
             })),
         )
             .into_response(),

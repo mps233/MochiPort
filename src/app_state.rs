@@ -146,6 +146,25 @@ impl LifecycleAdmission {
         }
     }
 
+    /// Wait for in-flight permits with an upper bound.
+    ///
+    /// A permit that is never released (a leaked guard, or a handler awaiting
+    /// an upstream that never answers) would otherwise pin the daemon in
+    /// `Draining` forever: on 2026-09-02 the daemon rejected every
+    /// remote-control connection for 40 minutes until the process was
+    /// replaced. Callers treat `false` as "drain did not finish in time" and
+    /// must fail closed instead of signalling a shutdown that never completes.
+    pub async fn wait_for_drain_with_timeout(&self, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, self.wait_for_drain())
+            .await
+            .is_ok()
+    }
+
+    /// Number of protected-work permits still outstanding, for diagnostics.
+    pub fn active_permit_count(&self) -> usize {
+        self.active_permits.load(Ordering::Acquire)
+    }
+
     pub fn commit_shutdown(&self) -> bool {
         self.state
             .compare_exchange(
@@ -1051,6 +1070,35 @@ mod tests {
         );
         assert!(!admission.commit_shutdown());
         assert!(!admission.begin_draining());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_admission_drain_timeout_reports_outstanding_permits() {
+        let admission = Arc::new(LifecycleAdmission::new());
+        let permit = admission.try_admit().expect("active work admitted");
+        assert!(admission.begin_draining());
+
+        // A permit that never returns must not pin the drain forever: the
+        // bounded wait reports failure so the caller can reopen admission.
+        assert!(
+            !admission
+                .wait_for_drain_with_timeout(Duration::from_millis(20))
+                .await
+        );
+        assert_eq!(admission.active_permit_count(), 1);
+        assert!(admission.cancel_draining());
+        assert_eq!(admission.state(), LifecycleAdmissionState::Active);
+        assert!(admission.try_admit().is_some());
+
+        // Once the permit is released the bounded wait succeeds.
+        drop(permit);
+        assert!(admission.begin_draining());
+        assert!(
+            admission
+                .wait_for_drain_with_timeout(Duration::from_secs(1))
+                .await
+        );
+        assert_eq!(admission.active_permit_count(), 0);
     }
 
     #[tokio::test]

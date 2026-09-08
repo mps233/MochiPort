@@ -314,6 +314,13 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         desktop_integration_enabled,
     ));
 
+    // launchd owns the stdout capture file, so its budget has to be enforced
+    // for as long as the daemon runs, not only at startup.
+    tokio::spawn(run_launchd_capture_guard(
+        config_logging_budget_bytes(&state).await,
+        server_shutdown_rx.clone(),
+    ));
+
     let companion = compatible_loopback_addr(addr);
     let mut companion_tasks = Vec::new();
     if let Some(companion_addr) = companion {
@@ -366,6 +373,45 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
     primary_result?;
     Ok(())
 }
+
+/// Read the operator's `logging.maxMb` budget as bytes.
+async fn config_logging_budget_bytes(state: &crate::app_state::SharedState) -> u64 {
+    state
+        .config
+        .lock()
+        .await
+        .logging
+        .max_mb
+        .saturating_mul(1024 * 1024)
+}
+
+/// Keep the launchd stdout capture inside the configured budget while running.
+///
+/// The startup truncation only handles the file inherited at boot; a daemon
+/// that stays up for weeks would otherwise grow the capture again, which is
+/// how it reached 1.5 GB before. The check is cheap (one `stat` per interval)
+/// and only trims when the file is actually over budget.
+async fn run_launchd_capture_guard(max_bytes: u64, mut shutdown_rx: watch::Receiver<bool>) {
+    if max_bytes == 0 {
+        return;
+    }
+    let mut ticker = tokio::time::interval(LAUNCHD_CAPTURE_CHECK_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The first tick fires immediately; the startup truncation already ran.
+    ticker.tick().await;
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => crate::chain_log::enforce_launchd_capture_budget(max_bytes),
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+const LAUNCHD_CAPTURE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 
 fn compatible_loopback_addr(addr: SocketAddr) -> Option<SocketAddr> {
     let port = addr.port();
@@ -420,16 +466,21 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
 
 fn init_logging(config: &AppConfig) -> anyhow::Result<PathBuf> {
     let path = chain_log_path(config);
+    let max_bytes = config.logging.max_mb.saturating_mul(1024 * 1024);
     crate::chain_log::init(
         &path,
         effective_chain_log_diagnostic(config),
-        config.logging.max_mb.saturating_mul(1024 * 1024),
+        max_bytes,
         config.logging.retention_days,
     )?;
+    // launchd owns the stdout capture file and no rotation policy could reach
+    // it; bound it here so the operator's maxMb budget applies to every log.
+    crate::chain_log::cap_launchd_capture(max_bytes);
 
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("mochiport=info".parse()?))
         .with_ansi(false)
+        .with_writer(crate::chain_log::ChainLogMakeWriter)
         .init();
     Ok(path)
 }
