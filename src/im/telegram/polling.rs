@@ -50,31 +50,6 @@ const AUTO_TOPIC_SESSION_MAX_PAGES: usize = 20;
 const AUTO_TOPIC_RESUME_MAX_ATTEMPTS: usize = 20;
 const AUTO_TOPIC_RESUME_RETRY_DELAY: Duration = Duration::from_millis(500);
 
-/// Handle a `thread/started` notification from the official Codex client.
-///
-/// The notification is intentionally handled in a detached task: Telegram
-/// network calls and the optional session-history lookup must not stall the
-/// shared Codex notification router. `telegram_topic_sync_ops` serializes this
-/// path with the manual import endpoint, making duplicate notifications
-/// idempotent.
-pub(crate) async fn auto_create_topic_for_codex_thread(
-    state: &SharedState,
-    api_registry: &ImApiRegistry,
-    remote_client_key: &str,
-    params: Value,
-) {
-    let generation = state.runtime.lock().await.bridge_generation;
-    auto_create_topic_for_codex_thread_for_generation(
-        state,
-        api_registry,
-        remote_client_key,
-        params,
-        generation,
-        None,
-    )
-    .await;
-}
-
 /// Create and bind a Topic only while the bridge generation that received the
 /// notification is still active. The event router intentionally lets this
 /// workflow run outside its notification loop, so every await that can cross a

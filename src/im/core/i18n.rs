@@ -52,6 +52,14 @@ pub(crate) async fn im_locale_for_state(state: &SharedState) -> ImLocale {
 }
 
 impl ImText {
+    /// Build the text catalogue for an explicit locale.
+    ///
+    /// Adapters that carry their own `locale` (the Telegram adapter does) use
+    /// this instead of reaching for the shared state.
+    pub(crate) fn for_locale(locale: ImLocale) -> Self {
+        Self { locale }
+    }
+
     #[cfg(test)]
     pub(crate) fn zh_cn() -> Self {
         Self {
@@ -1846,13 +1854,6 @@ impl ImText {
         match self.locale {
             ImLocale::ZhCn => format!("当前默认：{value}"),
             ImLocale::EnUs => format!("Current default: {value}"),
-        }
-    }
-
-    pub(crate) fn selected_prefix(self, label: &str) -> String {
-        match self.locale {
-            ImLocale::ZhCn => format!("已选：{label}"),
-            ImLocale::EnUs => format!("Selected: {label}"),
         }
     }
 

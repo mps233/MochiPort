@@ -1,3 +1,8 @@
+// The settings model mirrors the Telegram config surface; `mention_only` and
+// `is_configured` stay available for the channels that read them even when the
+// Telegram path does not. Protocol/config completeness, not dead code.
+#![allow(dead_code)]
+
 #[derive(Debug, Clone, Default)]
 pub struct TelegramSettings {
     pub account_id: String,

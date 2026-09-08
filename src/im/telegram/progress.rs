@@ -92,6 +92,9 @@ pub(crate) fn plan_from_params(params: &Value) -> (Option<String>, Vec<TelegramP
     (explanation, steps)
 }
 
+/// Test-only alias kept so the plan-parsing fixtures can call the same entry
+/// point the router used before it moved to `plan_from_params` directly.
+#[cfg(test)]
 pub(crate) fn parse_plan_update(params: &Value) -> (Option<String>, Vec<TelegramPlanStep>) {
     plan_from_params(params)
 }

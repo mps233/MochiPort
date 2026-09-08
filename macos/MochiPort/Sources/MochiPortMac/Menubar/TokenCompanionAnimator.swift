@@ -326,11 +326,6 @@ public struct TokenCompanionAnimator: View {
             }
         }
     }
-
-    // Kept for source compatibility with the old generated view.
-    public mutating func setState(_ state: TokenCompanionState) {
-        internalState = state
-    }
 }
 
 private func fillColors(for state: TokenCompanionState, colorScheme: ColorScheme) -> [Color] {

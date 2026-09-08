@@ -8,7 +8,7 @@ use crate::{
     im::core::{
         i18n::{ImLocale, ImText},
         text_utils::log_text_preview,
-        thread::{ThreadCreateOption, ThreadModelChoice},
+        thread::ThreadCreateOption,
     },
     im_runtime::{
         ObservedSetting, PendingApproval, TelegramModelSwitchRequestState,
@@ -46,6 +46,9 @@ pub struct TelegramThreadListEntry {
 }
 
 impl TelegramAdapter {
+    /// Test-only constructor: production builds always supply a locale through
+    /// `with_locale`.
+    #[cfg(test)]
     pub fn new(api: TelegramApi) -> Self {
         Self {
             api,
@@ -306,10 +309,7 @@ impl TelegramAdapter {
 
     /// 极简卡片头：`✅ 已完成 · 3分12秒`；耗时不足 1 秒或未知时只显示状态。
     fn turn_completed_card_header(&self, elapsed_ms: Option<u128>) -> String {
-        let base = match self.locale {
-            ImLocale::ZhCn => "✅ 已完成",
-            ImLocale::EnUs => "✅ Completed",
-        };
+        let base = ImText::for_locale(self.locale).telegram_turn_completed_card_title();
         match elapsed_ms.filter(|ms| *ms >= 1_000) {
             Some(ms) => format!("{base} · {}", format_turn_elapsed(self.locale, ms)),
             None => base.to_string(),
@@ -802,25 +802,6 @@ impl TelegramAdapter {
         Ok(last_message_id.to_string())
     }
 
-    pub async fn answer_callback_query(&self, callback_query_id: &str, text: &str) -> Result<()> {
-        log_adapter(
-            "answer_callback_begin",
-            format!(
-                "callback_query={} text_len={}",
-                callback_query_id,
-                text.chars().count()
-            ),
-        );
-        self.api
-            .answer_callback_query(callback_query_id, Some(text))
-            .await?;
-        log_adapter(
-            "answer_callback_done",
-            format!("callback_query={}", callback_query_id),
-        );
-        Ok(())
-    }
-
     /// Update an existing Telegram message and remove its inline keyboard.
     /// Returns `false` when no usable message id was supplied or Telegram no
     /// longer allows editing that message.
@@ -969,18 +950,6 @@ impl TelegramAdapter {
         }
         let _ = self.clear_reply_markup(target, message_id).await;
         self.send_text(target, &text).await
-    }
-
-    pub async fn send_or_update_rich_markdown(
-        &self,
-        target: &str,
-        message_id: Option<&str>,
-        markdown: &str,
-    ) -> Result<String> {
-        let markdown = telegram_cleanup_text(markdown);
-        let rich_message = TelegramInputRichMessage::markdown(markdown.clone());
-        self.send_or_update_rich_message(target, message_id, &rich_message, &markdown)
-            .await
     }
 
     pub async fn send_or_update_rich_markdown_with_fallback(
@@ -1390,62 +1359,6 @@ impl TelegramAdapter {
         Ok(message_id.to_string())
     }
 
-    /// Render the model picker for an already-bound Codex thread.
-    ///
-    /// `models` is the current page (with indexes starting at zero). The
-    /// callback only carries the request id, page and index; the flow resolves
-    /// the selected model from its pending request state. Keeping model ids
-    /// out of callback data avoids Telegram's 64-byte callback limit and also
-    /// prevents stale buttons from selecting a value from a newer list.
-    pub async fn send_thread_model_list(
-        &self,
-        target: &str,
-        request_id: &str,
-        title: &str,
-        body: &str,
-        models: &[ThreadModelChoice],
-        page: usize,
-        has_prev: bool,
-        has_next: bool,
-        message_id: Option<&str>,
-        text: ImText,
-    ) -> Result<String> {
-        let keyboard = model_list_keyboard(request_id, page, models, has_prev, has_next, text);
-        let text_html = model_list_html_text(title, body, page, models, text);
-        log_adapter(
-            "send_thread_model_list_begin",
-            format!(
-                "chat={} request={} page={} models={} text_len={}",
-                target,
-                request_id,
-                page,
-                models.len(),
-                text_html.chars().count()
-            ),
-        );
-        let message_id = self
-            .send_or_update_text_with_reply_markup_parse_mode(
-                target,
-                message_id,
-                &text_html,
-                keyboard,
-                TelegramParseMode::Html,
-            )
-            .await?;
-        log_adapter(
-            "send_thread_model_list_done",
-            format!(
-                "chat={} request={} page={} models={} message={}",
-                target,
-                request_id,
-                page,
-                models.len(),
-                message_id
-            ),
-        );
-        Ok(message_id.to_string())
-    }
-
     /// Render one view of Telegram's staged settings editor for an existing
     /// Codex thread. The request owns all selected values; callbacks contain
     /// only short indexes or fixed tokens.
@@ -1741,95 +1654,6 @@ fn create_options_table_html(options: &[ThreadCreateOption]) -> String {
         lines.push(String::new());
     }
     lines.join("\n")
-}
-
-fn model_list_keyboard(
-    request_id: &str,
-    page: usize,
-    models: &[ThreadModelChoice],
-    has_prev: bool,
-    has_next: bool,
-    text: ImText,
-) -> serde_json::Value {
-    let page = page.max(1);
-    let mut rows = Vec::with_capacity(models.len() + 1);
-    let mut nav = Vec::new();
-    if has_prev {
-        nav.push(button(
-            text.previous_page_button(),
-            &format!("tmp:{request_id}:prev"),
-        ));
-    }
-    if has_next {
-        nav.push(button(
-            text.next_page_button(),
-            &format!("tmp:{request_id}:next"),
-        ));
-    }
-    if !nav.is_empty() {
-        rows.push(nav);
-    }
-    for (index, model) in models.iter().enumerate() {
-        let label = model
-            .label
-            .trim()
-            .strip_prefix('`')
-            .and_then(|value| value.strip_suffix('`'))
-            .unwrap_or_else(|| model.label.trim());
-        let label = if label.is_empty() {
-            model.value.trim()
-        } else {
-            label
-        };
-        rows.push(vec![button(
-            label,
-            &format!("tms:{request_id}:{page}:{index}"),
-        )]);
-    }
-    inline_keyboard(rows)
-}
-
-fn model_list_html_text(
-    title: &str,
-    body: &str,
-    page: usize,
-    models: &[ThreadModelChoice],
-    text: ImText,
-) -> String {
-    let options_html = models
-        .iter()
-        .enumerate()
-        .map(|(index, model)| model_entry_html(index, model))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let hint = if models.is_empty() {
-        text.no_options().to_string()
-    } else {
-        text.page_click_hint(page, models.len())
-    };
-    format!(
-        "<b>{}</b>\n{}\n\n{}\n<code>{}</code>",
-        telegram_html_escape(title),
-        telegram_markdown_to_html(&telegram_cleanup_text(body)),
-        options_html,
-        telegram_html_escape(&hint)
-    )
-}
-
-fn model_entry_html(index: usize, model: &ThreadModelChoice) -> String {
-    let label = model
-        .label
-        .trim()
-        .strip_prefix('`')
-        .and_then(|value| value.strip_suffix('`'))
-        .unwrap_or_else(|| model.label.trim());
-    let label = if label.is_empty() {
-        model.value.trim()
-    } else {
-        label
-    };
-    let label = truncate_display_text(label, 72);
-    format!("/{} <b>{}</b>", index + 1, telegram_html_escape(&label))
 }
 
 fn thread_settings_keyboard(

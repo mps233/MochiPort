@@ -1,3 +1,10 @@
+// Telegram Bot API surface: several DTO fields and request builders exist to
+// mirror the wire protocol and keep every documented method available, even
+// where MochiPort does not read or call them yet. Those are protocol
+// completeness, not dead product code. Annotating here rather than at the
+// module root keeps genuinely dead code in sibling files reportable.
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

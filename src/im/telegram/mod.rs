@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub mod adapter;
 pub mod api;
 pub mod collab_progress;
