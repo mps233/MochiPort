@@ -1361,7 +1361,7 @@ fn contains_status_code(text: &str, status_code: u16) -> bool {
         .any(|part| part == code)
 }
 
-fn sanitize_turn_error_summary(value: &str) -> String {
+pub(crate) fn sanitize_turn_error_summary(value: &str) -> String {
     let compact = value
         .replace("\r\n", " ")
         .replace(['\r', '\n'], " ")

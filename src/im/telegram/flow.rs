@@ -991,7 +991,7 @@ async fn create_telegram_thread_for_route(
         &route.conversation_key,
         &thread_id,
         text.created_new_session_title(),
-        &text.created_new_session_body(&thread_id, &summarize_thread_start_options(&options, text)),
+        &text.created_new_session_body(&summarize_thread_start_options(&options, text)),
         &progress_message_id,
         "telegram_thread_route_created",
     )
@@ -2789,7 +2789,7 @@ async fn handle_telegram_thread_route_resume_selected(
         .send_or_update_text(
             &message.chat_id,
             request.message_id.as_deref(),
-            &text.subscribing_thread(thread_id),
+            text.subscribing_thread(),
         )
         .await?;
     let route = route_for_message(&message);
@@ -2807,7 +2807,6 @@ async fn handle_telegram_thread_route_resume_selected(
         }
     };
     let body = text.subscribed_session_body(
-        thread_id,
         &summarize_thread_title(&thread, text),
         &summarize_thread_cwd(&thread, text),
         &summarize_thread_status(&thread, text),
@@ -3128,7 +3127,10 @@ mod tests {
         assert_eq!(super::command("/s"), Some("/s".to_string()));
         assert_eq!(super::command("/q"), Some("/q".to_string()));
         assert_eq!(super::command("/reply"), Some("/reply".to_string()));
-        assert_eq!(super::command("/REPLY@MochiPort"), Some("/reply".to_string()));
+        assert_eq!(
+            super::command("/REPLY@MochiPort"),
+            Some("/reply".to_string())
+        );
         assert_eq!(super::command("/1"), Some("/1".to_string()));
         assert_eq!(super::command("status"), None);
         assert_eq!(super::command("/queue hello"), Some("/queue".to_string()));

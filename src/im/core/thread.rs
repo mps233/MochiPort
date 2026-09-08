@@ -542,12 +542,9 @@ fn permission_create_options(
         &mut options,
         "__default__",
         text.use_current_permission(),
-        Some(
-            defaults
-                .permission
-                .as_deref()
-                .map(|permission| text.current_prefix(&text.permission_label(permission)))
-                .unwrap_or_else(|| text.do_not_override_permission().to_string()),
+        defaults.permission.as_deref().map_or_else(
+            || Some(text.do_not_override_permission().to_string()),
+            |_| None,
         ),
         is_default_selection(draft.permission.as_deref()),
         text,
@@ -597,13 +594,13 @@ fn push_create_option(
     if value.is_empty() || options.iter().any(|(existing, _)| existing == value) {
         return;
     }
-    let label = if selected {
-        text.selected_prefix(label.trim())
-    } else {
-        label.trim().to_string()
-    };
+    // 标签保持干净（按钮与文本行共用），选中态用摘要行表达；
+    // 把「已选：」拼进选项名会让用户误以为它是选项的一部分。
+    let label = label.trim().to_string();
     let summary = match (selected, summary) {
-        (true, Some(summary)) if !summary.trim().is_empty() => Some(summary.trim().to_string()),
+        (true, Some(summary)) if !summary.trim().is_empty() => {
+            Some(format!("{} · {}", text.selected(), summary.trim()))
+        }
         (true, _) => Some(text.selected().to_string()),
         (false, Some(summary)) if !summary.trim().is_empty() => Some(summary.trim().to_string()),
         _ => None,
@@ -1290,10 +1287,65 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_thread_entries, parse_model_catalog, thread_model_choices,
+        ThreadCreateDefaults, ThreadCreateDraftState, build_thread_entries, parse_model_catalog,
+        permission_create_options, push_create_option, thread_model_choices,
         visible_thread_model_settings_choices,
     };
     use crate::im::core::i18n::ImText;
+
+    #[test]
+    fn selected_create_option_keeps_label_clean_and_marks_via_summary() {
+        let text = ImText::zh_cn();
+        let mut options = Vec::new();
+        push_create_option(
+            &mut options,
+            "full_access",
+            "完全访问权限",
+            Some("不再请求确认，允许完整本机访问。".to_string()),
+            true,
+            text,
+        );
+        push_create_option(
+            &mut options,
+            "default",
+            "默认权限",
+            Some("适合常规项目，需要时由用户确认。".to_string()),
+            false,
+            text,
+        );
+
+        let selected = &options[0].1;
+        assert_eq!(selected.label, "完全访问权限");
+        assert_eq!(
+            selected.summary.as_deref(),
+            Some("已选 · 不再请求确认，允许完整本机访问。")
+        );
+        let plain = &options[1].1;
+        assert_eq!(plain.label, "默认权限");
+        assert_eq!(
+            plain.summary.as_deref(),
+            Some("适合常规项目，需要时由用户确认。")
+        );
+    }
+
+    #[test]
+    fn permission_options_do_not_echo_current_value_twice() {
+        let text = ImText::zh_cn();
+        let defaults = ThreadCreateDefaults {
+            permission: Some("full_access".to_string()),
+            ..Default::default()
+        };
+        let draft = ThreadCreateDraftState::default();
+        let (_, body, options) = permission_create_options(&defaults, &draft, text);
+
+        assert!(body.contains("完全访问权限"));
+        let current_option = options
+            .iter()
+            .find(|(value, _)| value == "__default__")
+            .expect("current permission option");
+        // 头部已展示当前值；选项摘要不再重复「当前：…」。
+        assert_eq!(current_option.1.summary, Some("已选".to_string()));
+    }
 
     #[test]
     fn thread_entries_preserve_history_order() {

@@ -378,13 +378,15 @@ struct SettingsView: View {
     @ViewBuilder
     private var saveSection: some View {
         Section {
+            if let error = model.managementOperationError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .help(error)
+            }
             HStack {
-                if let error = model.managementOperationError {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .lineLimit(2)
-                }
                 Spacer()
                 Button("保存设置") {
                     save()

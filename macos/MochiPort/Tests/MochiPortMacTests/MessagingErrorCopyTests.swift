@@ -92,4 +92,40 @@ final class MessagingErrorCopyTests: XCTestCase {
         )
         XCTAssertEqual(notice.title, "请求过于频繁（Telegram 限流）")
     }
+
+    // MARK: - 管理接口错误（保存设置、添加账号、额度刷新）
+
+    func testManagementTransportErrorGainsProxyHint() {
+        // daemon 的令牌验证接口在代理不通时返回的原始串。
+        let message = MessagingErrorCopy.managementMessage(
+            for: "telegram api getMe request failed: error sending request for url (https://api.telegram.org/bot***/getMe)"
+        )
+        XCTAssertEqual(message, "无法连接Telegram服务器。通常是网络不通或代理未生效。检查「设置 → 出站代理」是否指向可用的本地代理。")
+    }
+
+    func testManagementConflictErrorExplainsSharedBot() {
+        let message = MessagingErrorCopy.managementMessage(
+            for: "telegram api getUpdates failed: status=409 Conflict error_code=Some(409) description=Conflict: terminated by other getUpdates request"
+        )
+        XCTAssertTrue(message.contains("机器人正在另一处使用"))
+        XCTAssertTrue(message.contains("自己的机器人"))
+    }
+
+    func testManagementTimeoutErrorMapsToFriendlyText() {
+        let message = MessagingErrorCopy.managementMessage(for: "telegram getMe timeout")
+        XCTAssertEqual(message, "连接Telegram超时。网络或代理不稳定，稍后会自动重试；频繁出现请检查「设置 → 出站代理」。")
+    }
+
+    func testManagementGenericTransportErrorKeepsProxyHint() {
+        let message = MessagingErrorCopy.managementMessage(
+            for: "refresh failed: error sending request for url (https://api.example.com/v1/usage)"
+        )
+        XCTAssertTrue(message.contains("出站代理"))
+    }
+
+    func testManagementUnknownErrorPassesThroughUntouched() {
+        let raw = "failed to persist config: invalid bot token"
+        XCTAssertEqual(MessagingErrorCopy.managementMessage(for: raw), raw)
+        XCTAssertEqual(MessagingErrorCopy.managementMessage(for: "  "), "  ")
+    }
 }

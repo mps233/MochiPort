@@ -829,14 +829,14 @@ impl TelegramAdapter {
         target: &str,
         message_id: Option<&str>,
         approval: &PendingApproval,
-        option_index: usize,
+        _option_index: usize,
         decision_label: &str,
         text: ImText,
     ) -> Result<bool> {
         let Some(message_id) = message_id else {
             return Ok(false);
         };
-        let resolved = resolved_approval_text(approval, option_index, decision_label, text);
+        let resolved = resolved_approval_text(approval, decision_label, text);
         let resolved_html = telegram_markdown_to_html(&resolved);
         match self
             .try_edit_message_text(
@@ -1278,33 +1278,8 @@ impl TelegramAdapter {
         message_id: Option<&str>,
         text: ImText,
     ) -> Result<String> {
-        let mut rows = Vec::new();
-        let mut nav = Vec::new();
-        if has_prev {
-            nav.push(button(
-                text.previous_page_button(),
-                &format!("tcp:{request_id}:{field}:prev"),
-            ));
-        }
-        if has_next {
-            nav.push(button(
-                text.next_page_button(),
-                &format!("tcp:{request_id}:{field}:next"),
-            ));
-        }
-        if !nav.is_empty() {
-            rows.push(nav);
-        }
-        if field == "cwd" {
-            rows.push(vec![button(
-                text.custom_cwd_label(),
-                &format!("tcv:{request_id}:cwd:__custom__"),
-            )]);
-        }
-        rows.push(vec![button(
-            text.back_to_create_settings_button(),
-            &format!("trc:{request_id}:new"),
-        )]);
+        let keyboard =
+            create_options_keyboard(request_id, field, page, options, has_prev, has_next, text);
 
         let options_html = create_options_table_html(options);
         let text_html =
@@ -1326,7 +1301,7 @@ impl TelegramAdapter {
                 target,
                 message_id,
                 &text_html,
-                inline_keyboard(rows),
+                keyboard,
                 TelegramParseMode::Html,
             )
             .await?;
@@ -1507,27 +1482,21 @@ impl TelegramAdapter {
 
 fn approval_text(approval: &PendingApproval, text: ImText) -> String {
     let kind = text.approval_kind_label(&approval.request_kind);
-    let mut summary = truncate_approval_summary(&approval.summary);
+    let mut summary = text.localize_approval_summary(&truncate_approval_summary(&approval.summary));
+    // 有 inline 按钮时按钮即选项，数字列表只保留给没有按钮的兜底形态。
     let mut action_lines = if approval.decisions.is_empty() {
         vec![
             format!("`/y` · {}", text.approval_accept_command_label()),
             format!("`/n` · {}", text.approval_decline_command_label()),
         ]
     } else {
-        approval
-            .decisions
-            .iter()
-            .enumerate()
-            .map(|(index, decision)| {
-                format!(
-                    "`/{}` · {}",
-                    index + 1,
-                    approval_decision_display_label(text, &decision.label)
-                )
-            })
-            .collect()
+        Vec::new()
     };
-    let mut footer = text.telegram_approval_reply_footer(&text.approval_reply_hint(approval));
+    let mut footer = if approval.decisions.is_empty() {
+        text.telegram_approval_fallback_footer(&text.approval_reply_hint(approval))
+    } else {
+        text.telegram_approval_reply_footer().to_string()
+    };
 
     // Approval cards need to remain a single message because only one message
     // id is retained for the later resolved-state edit. Keep the summary and
@@ -1573,10 +1542,12 @@ fn render_approval_text(
         format!("**{}**", text.approval_details_label()),
         summary.to_string(),
         String::new(),
-        format!("**{}**", text.approval_actions_label()),
     ];
-    lines.extend(action_lines.iter().cloned());
-    lines.push(String::new());
+    if !action_lines.is_empty() {
+        lines.push(format!("**{}**", text.approval_actions_label()));
+        lines.extend(action_lines.iter().cloned());
+        lines.push(String::new());
+    }
     lines.push(footer.to_string());
     lines.join("\n")
 }
@@ -1598,12 +1569,11 @@ fn truncate_text_with_ellipsis(text: &str, max_chars: usize) -> String {
 
 fn resolved_approval_text(
     approval: &PendingApproval,
-    option_index: usize,
     decision_label: &str,
     text: ImText,
 ) -> String {
     let kind = text.approval_kind_label(&approval.request_kind);
-    let summary = truncate_approval_summary(&approval.summary);
+    let summary = text.localize_approval_summary(&truncate_approval_summary(&approval.summary));
     [
         format!("✅ **{}**", text.approval_resolved_title()),
         text.field_line(text.approval_type_label(), &format!("`{kind}`")),
@@ -1613,10 +1583,7 @@ fn resolved_approval_text(
         String::new(),
         format!(
             "**{}**",
-            text.approval_selected_label(
-                option_index,
-                &approval_decision_display_label(text, decision_label)
-            )
+            text.approval_selected_label(&approval_decision_display_label(text, decision_label))
         ),
     ]
     .join("\n")
@@ -1717,6 +1684,56 @@ fn thread_entries_table_html(entries: &[TelegramThreadListEntry], text: ImText) 
     lines.join("\n")
 }
 
+/// 会话设置选项键盘：每个选项一个按钮（tcs 逐项选择），外加翻页与返回。
+/// 数字回复的后备路径不变，按钮与 `/N` 编号一一对应。
+fn create_options_keyboard(
+    request_id: &str,
+    field: &str,
+    page: usize,
+    options: &[ThreadCreateOption],
+    has_prev: bool,
+    has_next: bool,
+    text: ImText,
+) -> serde_json::Value {
+    let mut rows: Vec<Vec<serde_json::Value>> = options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            vec![button(
+                option.label.replace('`', "").trim(),
+                &format!("tcs:{request_id}:{field}:{page}:{index}"),
+            )]
+        })
+        .collect();
+    let mut nav = Vec::new();
+    if has_prev {
+        nav.push(button(
+            text.previous_page_button(),
+            &format!("tcp:{request_id}:{field}:prev"),
+        ));
+    }
+    if has_next {
+        nav.push(button(
+            text.next_page_button(),
+            &format!("tcp:{request_id}:{field}:next"),
+        ));
+    }
+    if !nav.is_empty() {
+        rows.push(nav);
+    }
+    if field == "cwd" {
+        rows.push(vec![button(
+            text.custom_cwd_label(),
+            &format!("tcv:{request_id}:cwd:__custom__"),
+        )]);
+    }
+    rows.push(vec![button(
+        text.back_to_create_settings_button(),
+        &format!("trc:{request_id}:new"),
+    )]);
+    inline_keyboard(rows)
+}
+
 fn create_options_table_html(options: &[ThreadCreateOption]) -> String {
     let mut lines = Vec::new();
     for (index, option) in options.iter().enumerate() {
@@ -1788,12 +1805,7 @@ fn model_list_html_text(
     let hint = if models.is_empty() {
         text.no_options().to_string()
     } else {
-        // Keep the slash-number reply path explicit for clients where inline
-        // keyboards are hidden. `page_click_hint` already localizes the full
-        // sentence; only its interaction verb needs to change here.
         text.page_click_hint(page, models.len())
-            .replace("点击", "回复")
-            .replace("Click", "Reply")
     };
     format!(
         "<b>{}</b>\n{}\n\n{}\n<code>{}</code>",
@@ -2683,7 +2695,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::{
-        im::core::i18n::ImText,
+        im::core::{i18n::ImText, thread::ThreadCreateOption},
         im::telegram::{
             api::{TELEGRAM_MAX_MEDIA_GROUP_ITEMS, TelegramApi},
             types::TelegramSettings,
@@ -2698,9 +2710,9 @@ mod tests {
 
     use super::{
         TELEGRAM_MAX_MESSAGE_CHARS, TelegramAdapter, approval_keyboard, approval_text,
-        empty_inline_keyboard, resolved_approval_text, telegram_cleanup_text,
-        telegram_context_compaction_messages, telegram_markdown_to_html, telegram_text_chunks,
-        telegram_turn_completed_chunks, telegram_turn_completed_messages,
+        create_options_keyboard, empty_inline_keyboard, resolved_approval_text,
+        telegram_cleanup_text, telegram_context_compaction_messages, telegram_markdown_to_html,
+        telegram_text_chunks, telegram_turn_completed_chunks, telegram_turn_completed_messages,
         telegram_user_message_chunks, telegram_user_message_messages, thread_settings_html,
         thread_settings_keyboard,
     };
@@ -2938,10 +2950,10 @@ mod tests {
             remote_client_key: Some("client".to_string()),
         };
 
-        let text = resolved_approval_text(&approval, 1, "Allow", ImText::zh_cn());
+        let text = resolved_approval_text(&approval, "Allow", ImText::zh_cn());
 
         assert!(text.contains("审批已处理"));
-        assert!(text.contains("已选择 /1：允许"));
+        assert!(text.contains("已选择：允许"));
         assert!(text.contains("Run `cargo test`"));
         assert!(!text.contains("回复 /1 处理"));
     }
@@ -2966,8 +2978,8 @@ mod tests {
 
         assert!(text.starts_with("**审批待处理**\n类型：`命令执行`"));
         assert!(text.contains("**请求内容**"));
-        assert!(text.contains("**可选操作**\n`/1` · 仅本次允许"));
-        assert!(text.contains("点击下方按钮，或回复 /1 处理。"));
+        assert!(!text.contains("可选操作"));
+        assert!(text.contains("点击下方按钮处理。"));
         assert!(!text.contains("request_kind"));
     }
 
@@ -3077,9 +3089,8 @@ mod tests {
         let plain = approval_text(&approval, ImText::zh_cn());
         let rich = telegram_markdown_to_html(&plain);
 
-        assert!(plain.contains("`/1`"));
-        assert!(plain.contains("点击下方按钮，或回复 /1 处理。"));
-        assert!(rich.contains("<code>/1</code>"));
+        assert!(!plain.contains("`/1`"));
+        assert!(plain.contains("点击下方按钮处理。"));
         assert!(rich.contains("<b>审批待处理</b>"));
     }
 
@@ -3100,7 +3111,7 @@ mod tests {
         };
 
         let pending = approval_text(&approval, ImText::zh_cn());
-        let resolved = resolved_approval_text(&approval, 0, "Yes, proceed", ImText::zh_cn());
+        let resolved = resolved_approval_text(&approval, "Yes, proceed", ImText::zh_cn());
 
         assert!(pending.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS);
         assert!(resolved.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS);
@@ -3132,12 +3143,14 @@ mod tests {
             telegram_text_chunks(&pending, "(continues...)", "(continued)").len(),
             1
         );
-        assert!(pending.contains("`/1`"));
+        assert!(pending.contains("点击下方按钮处理。"));
+        assert!(!pending.contains("`/1`"));
         assert!(!pending.contains("`/600`"));
+        assert!(!pending.contains("Option 599"));
     }
 
     #[test]
-    fn approval_text_trims_summary_before_dropping_decision_rows() {
+    fn approval_text_trims_oversized_summary_to_fit_one_message() {
         let approval = PendingApproval {
             request_id: json!("request-summary-and-options"),
             request_kind: "command".to_string(),
@@ -3155,7 +3168,58 @@ mod tests {
         let pending = approval_text(&approval, ImText::zh_cn());
         assert!(pending.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS);
         assert!(pending.contains("请求内容"));
-        assert!(pending.contains("`/1` · 允许执行"));
+        assert!(pending.contains('…'));
+        assert!(pending.contains("点击下方按钮处理。"));
+    }
+
+    #[test]
+    fn create_options_keyboard_gives_each_option_a_button() {
+        let options = vec![
+            ThreadCreateOption {
+                label: "使用 Codex App 当前权限".to_string(),
+                summary: Some("已选".to_string()),
+            },
+            ThreadCreateOption {
+                label: "默认权限".to_string(),
+                summary: Some("适合常规项目，需要时由用户确认。".to_string()),
+            },
+        ];
+        let keyboard = create_options_keyboard(
+            "thread-7",
+            "permission",
+            1,
+            &options,
+            false,
+            true,
+            ImText::zh_cn(),
+        );
+        let rows = keyboard["inline_keyboard"]
+            .as_array()
+            .expect("keyboard rows");
+
+        let first = rows[0][0].as_object().expect("option button");
+        assert_eq!(first["text"], "使用 Codex App 当前权限");
+        assert_eq!(first["callback_data"], "tcs:thread-7:permission:1:0");
+        let second = rows[1][0].as_object().expect("option button");
+        assert_eq!(second["callback_data"], "tcs:thread-7:permission:1:1");
+        let nav = rows[2][0].as_object().expect("nav button");
+        assert_eq!(nav["callback_data"], "tcp:thread-7:permission:next");
+        let back = rows[3][0].as_object().expect("back button");
+        assert_eq!(back["callback_data"], "trc:thread-7:new");
+
+        // cwd 字段额外提供自定义入口按钮。
+        let cwd_keyboard = create_options_keyboard(
+            "thread-7",
+            "cwd",
+            1,
+            &options,
+            false,
+            false,
+            ImText::zh_cn(),
+        );
+        let cwd_rows = cwd_keyboard["inline_keyboard"].as_array().expect("rows");
+        let custom = cwd_rows[2][0].as_object().expect("custom cwd button");
+        assert_eq!(custom["callback_data"], "tcv:thread-7:cwd:__custom__");
     }
 
     #[test]

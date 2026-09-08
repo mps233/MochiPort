@@ -353,9 +353,6 @@ fn command_approval_summary(params: &Value) -> String {
     if let Some(permissions) = additional_permissions_summary(params) {
         lines.push(permissions);
     }
-    if let Some(amendment) = execpolicy_amendment_summary(params) {
-        lines.push(amendment);
-    }
     if let Some(amendments) = network_policy_amendments_summary(params) {
         lines.push(amendments);
     }
@@ -484,10 +481,13 @@ fn command_actions_summary(params: &Value) -> Option<String> {
         .iter()
         .take(4)
         .filter_map(|action| {
-            let action_type = action
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+            let action_type = action.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            // "unknown" 是协议解析不出类型时的兜底值，展示出来只会让用户困惑。
+            let action_type = if action_type.is_empty() || action_type == "unknown" {
+                ""
+            } else {
+                action_type
+            };
             let command = action.get("command").and_then(|v| v.as_str()).unwrap_or("");
             let detail = action
                 .get("path")
@@ -497,6 +497,12 @@ fn command_actions_summary(params: &Value) -> Option<String> {
                 .unwrap_or("");
             if command.is_empty() && detail.is_empty() {
                 None
+            } else if action_type.is_empty() {
+                if detail.is_empty() {
+                    Some(format!("- `{command}`"))
+                } else {
+                    Some(format!("- `{command}` → `{detail}`"))
+                }
             } else if detail.is_empty() {
                 Some(format!("- `{action_type}` `{command}`"))
             } else {
@@ -554,12 +560,6 @@ fn permission_profile_summary(label: &str, permissions: &Value) -> Option<String
         }
     }
     (!parts.is_empty()).then(|| format!("{label}: {}", parts.join("; ")))
-}
-
-fn execpolicy_amendment_summary(params: &Value) -> Option<String> {
-    let amendment = params.get("proposedExecpolicyAmendment")?;
-    let prefix = decision_prefix_from_execpolicy_amendment(amendment)?;
-    Some(format!("proposedExecpolicyAmendment: `{prefix}`"))
 }
 
 fn network_policy_amendments_summary(params: &Value) -> Option<String> {
@@ -929,6 +929,40 @@ mod tests {
             remote_client_key: None,
             remote_connection_epoch: None,
         }
+    }
+
+    #[test]
+    fn command_approval_summary_hides_protocol_noise() {
+        let view = approval_request_view(&notification(
+            "item/commandExecution/requestApproval",
+            json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "itemId": "item",
+                "reason": "pull theme updates",
+                "command": ["/bin/zsh", "-lc", "git pull --ff-only"],
+                "cwd": "/repo",
+                "commandActions": [
+                    {"type": "unknown", "command": "git pull --ff-only"}
+                ],
+                "proposedExecpolicyAmendment": ["git", "pull"],
+            }),
+        ))
+        .expect("approval view");
+
+        // 子命令保留命令本身，unknown 类型标记不出现。
+        assert!(
+            view.summary
+                .contains("commandActions:\n- `git pull --ff-only`")
+        );
+        assert!(!view.summary.contains("unknown"));
+        // 决定按钮文案已说明将被记住的前缀，协议字段行不再重复展示。
+        assert!(!view.summary.contains("proposedExecpolicyAmendment"));
+        assert!(
+            view.summary
+                .contains("command: `/bin/zsh -lc git pull --ff-only`")
+        );
+        assert!(view.summary.contains("cwd: `/repo`"));
     }
 
     #[test]

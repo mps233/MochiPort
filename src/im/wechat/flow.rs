@@ -454,10 +454,7 @@ async fn create_wechat_thread_for_route(
             &format!(
                 "{}\n\n{}",
                 text.created_new_session_title(),
-                text.created_new_session_body(
-                    &thread_id,
-                    &summarize_thread_start_options(&options, text)
-                )
+                text.created_new_session_body(&summarize_thread_start_options(&options, text))
             ),
         )
         .await?;

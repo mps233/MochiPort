@@ -189,9 +189,13 @@ impl TextChatAdapter for WechatAdapter {
 pub(crate) fn approval_text(approval: &PendingApproval, text: ImText) -> String {
     let mut lines = vec![
         text.approval_request_heading().to_string(),
-        format!("request_kind: `{}`", approval.request_kind),
+        format!(
+            "{}: `{}`",
+            text.approval_type_label(),
+            text.approval_kind_label(&approval.request_kind)
+        ),
         String::new(),
-        approval.summary.trim().to_string(),
+        text.localize_approval_summary(approval.summary.trim()),
         String::new(),
         format!("{}:", text.available_decisions_label()),
     ];

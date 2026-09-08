@@ -60,7 +60,7 @@ impl FeishuAdapter {
     pub async fn update_resolved_approval(
         &self,
         pending: &PendingApproval,
-        option_index: usize,
+        _option_index: usize,
         decision_label: &str,
         text: ImText,
     ) -> Result<()> {
@@ -68,10 +68,9 @@ impl FeishuAdapter {
             return Ok(());
         };
         let card = renderer::build_resolved_approval_card(
-            &pending.request_kind,
-            &pending.summary,
+            &text.approval_kind_label(&pending.request_kind),
+            &text.localize_approval_summary(&pending.summary),
             decision_label,
-            option_index,
             text,
         );
         self.update_interactive(message_id, &card).await
@@ -85,8 +84,8 @@ impl FeishuAdapter {
     ) -> Result<String> {
         let request_key = approval.request_key();
         let card = renderer::build_approval_card(
-            &approval.request_kind,
-            &approval.summary,
+            &text.approval_kind_label(&approval.request_kind),
+            &text.localize_approval_summary(&approval.summary),
             &approval.decisions,
             &request_key,
             text,

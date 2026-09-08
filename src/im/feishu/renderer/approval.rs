@@ -54,7 +54,6 @@ pub fn build_resolved_approval_card(
     kind_label: &str,
     summary: &str,
     decision_label: &str,
-    option_index: usize,
     text: ImText,
 ) -> serde_json::Value {
     let content = normalize_card_markdown(summary);
@@ -79,7 +78,7 @@ pub fn build_resolved_approval_card(
             "tag": "markdown",
             "content": format!(
                 "**{}**",
-                normalize_card_markdown(&text.approval_selected_label(option_index, &selected))
+                normalize_card_markdown(&text.approval_selected_label(&selected))
             )
         }),
     ];

@@ -574,8 +574,7 @@ async fn create_new_thread_for_route(
     let route = route_for_message(message);
     let thread_id =
         create_and_bind_thread(state, &route, options.clone(), Some(request_id)).await?;
-    let body =
-        text.created_new_session_body(&thread_id, &summarize_thread_start_options(&options, text));
+    let body = text.created_new_session_body(&summarize_thread_start_options(&options, text));
     let _ = adapter
         .send_thread_routing_result(
             &route.chat_id,
@@ -672,7 +671,7 @@ async fn handle_thread_route_resume_selected(
             .send_thread_routing_result(
                 &message.chat_id,
                 text.subscribing_session_title(),
-                &text.subscribing_thread(thread_id),
+                text.subscribing_thread(),
                 Some(message_id),
             )
             .await;
@@ -681,7 +680,6 @@ async fn handle_thread_route_resume_selected(
     let route = route_for_message(&message);
     let thread = resume_and_bind_thread(&state, &route, thread_id, Some(request_id)).await?;
     let body = text.subscribed_session_body(
-        thread_id,
         &summarize_thread_title(&thread, text),
         &summarize_thread_cwd(&thread, text),
         &summarize_thread_status(&thread, text),

@@ -6943,6 +6943,12 @@ mod tests {
         ));
         assert!(action_from_callback_data("tmp:thread-model-7:12:sideways").is_none());
         assert!(action_from_callback_data("tms:thread-model-7:not-a-revision:3:2").is_none());
+        let set_index =
+            action_from_callback_data("tcs:thread-7:permission:1:2").expect("create option set");
+        assert!(matches!(
+            set_index,
+            InboundAction::ThreadRouteCreateSetIndex { .. }
+        ));
         assert!(action_from_callback_data("tmo:thread-model-7:12:other").is_none());
     }
 

@@ -61,6 +61,7 @@ impl WecomAdapter {
         &self,
         target: &str,
         approval: &PendingApproval,
+        text: crate::im::core::i18n::ImText,
     ) -> Result<String> {
         let fingerprint = approval_request_fingerprint(&approval.request_key());
         let task_id = format!("approval_{fingerprint}");
@@ -82,9 +83,9 @@ impl WecomAdapter {
             "source": { "desc": "MochiPort", "desc_color": 0 },
             "main_title": {
                 "title": "Codex 审批请求",
-                "desc": approval.request_kind
+                "desc": text.approval_kind_label(&approval.request_kind)
             },
-            "sub_title_text": approval.summary,
+            "sub_title_text": text.localize_approval_summary(&approval.summary),
             "button_list": buttons,
             "task_id": task_id
         });

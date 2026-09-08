@@ -157,10 +157,113 @@ impl ImText {
             .map(str::trim)
             .filter(|summary| !summary.is_empty())
             .unwrap_or_else(|| self.choose("系统错误", "System error"));
-        match self.locale {
-            ImLocale::ZhCn => format!("❌ 任务失败\n\n错误：{summary}"),
-            ImLocale::EnUs => format!("❌ Task failed\n\nError: {summary}"),
+        match self.turn_error_hint(&summary) {
+            Some(hint) => match self.locale {
+                ImLocale::ZhCn => format!("❌ 任务失败\n\n{hint}\n\n原因：{summary}"),
+                ImLocale::EnUs => format!("❌ Task failed\n\n{hint}\n\nCause: {summary}"),
+            },
+            None => match self.locale {
+                ImLocale::ZhCn => format!("❌ 任务失败\n\n错误：{summary}"),
+                ImLocale::EnUs => format!("❌ Task failed\n\nError: {summary}"),
+            },
         }
+    }
+
+    /// 把清洗后的错误摘要映射成一句用户能懂的话；识别不了的错误返回
+    /// None，调用方继续展示原始摘要（URL、request id 已被去掉）。
+    fn turn_error_hint(self, summary: &str) -> Option<&'static str> {
+        let lower = summary.to_ascii_lowercase();
+        let has_status = |code: &str| {
+            lower
+                .split(|ch: char| !ch.is_ascii_digit())
+                .any(|part| part == code)
+        };
+        let pick = |zh: &'static str, en: &'static str| match self.locale {
+            ImLocale::ZhCn => zh,
+            ImLocale::EnUs => en,
+        };
+
+        if lower.contains("another turn")
+            || lower.contains("already in progress")
+            || has_status("409")
+        {
+            return Some(pick(
+                "电脑端 Codex 正忙：可能还有另一个任务或窗口在用这个会话，稍后再试。",
+                "The Codex app on your computer is busy: another task or window may be using this session. Try again shortly.",
+            ));
+        }
+        if lower.contains("quota")
+            || lower.contains("insufficient")
+            || lower.contains("billing")
+            || lower.contains("balance")
+        {
+            return Some(pick(
+                "模型服务的额度不足或已用完，请检查 MochiPort 里模型服务的余额。",
+                "The model service is out of quota or credit. Check the model service balance in MochiPort.",
+            ));
+        }
+        if has_status("429") || lower.contains("rate limit") || lower.contains("too many requests")
+        {
+            return Some(pick(
+                "请求太频繁，被模型服务限流了，稍等一会儿再试。",
+                "The model service is rate limiting requests. Wait a moment and try again.",
+            ));
+        }
+        if has_status("401")
+            || has_status("403")
+            || lower.contains("unauthorized")
+            || lower.contains("forbidden")
+            || lower.contains("invalid api key")
+            || lower.contains("authentication")
+        {
+            return Some(pick(
+                "模型服务鉴权失败：API Key 可能无效或未登录。请在 MochiPort 的模型服务设置里检查。",
+                "The model service rejected the credentials: the API key may be invalid, or you are not logged in. Check the model service settings in MochiPort.",
+            ));
+        }
+        if has_status("500")
+            || has_status("502")
+            || has_status("503")
+            || has_status("504")
+            || has_status("529")
+            || lower.contains("service unavailable")
+            || lower.contains("bad gateway")
+            || lower.contains("internal server error")
+            || lower.contains("overloaded")
+        {
+            return Some(pick(
+                "模型服务暂时不可用（官方接口异常），稍后再试。",
+                "The model service is temporarily unavailable. Try again shortly.",
+            ));
+        }
+        if lower.contains("timed out") || lower.contains("timeout") {
+            return Some(pick(
+                "电脑端连接模型服务超时，通常是网络或代理问题。",
+                "The connection to the model service timed out. This is usually a network or proxy issue.",
+            ));
+        }
+        if lower.contains("connection refused")
+            || lower.contains("error sending request")
+            || lower.contains("connection reset")
+            || lower.contains("connection closed")
+            || lower.contains("failed to connect")
+            || lower.contains("stream disconnected")
+            || lower.contains("dns error")
+            || lower.contains("network")
+        {
+            return Some(pick(
+                "电脑端无法连接模型服务，请检查电脑的网络和「设置 → 出站代理」。",
+                "The computer cannot reach the model service. Check the computer's network and the outbound proxy in MochiPort settings.",
+            ));
+        }
+        None
+    }
+
+    /// 把嵌进句子里的错误串换成人话；识别不了时原样返回。
+    pub(crate) fn humanized_error_text(self, raw: &str) -> String {
+        self.turn_error_hint(raw)
+            .map(str::to_string)
+            .unwrap_or_else(|| raw.to_string())
     }
 
     pub(crate) fn telegram_command_progress_title(
@@ -538,10 +641,16 @@ impl ImText {
         }
     }
 
-    pub(crate) fn telegram_approval_reply_footer(self, hint: &str) -> String {
+    /// 有 inline 按钮时的提示：按钮即主交互，不再宣传数字指令。
+    pub(crate) fn telegram_approval_reply_footer(self) -> &'static str {
+        self.choose("点击下方按钮处理。", "Tap a button below to choose.")
+    }
+
+    /// 没有按钮的兜底形态（决定列表为空）才需要数字指令提示。
+    pub(crate) fn telegram_approval_fallback_footer(self, hint: &str) -> String {
         match self.locale {
-            ImLocale::ZhCn => format!("点击下方按钮，或回复 {hint} 处理。"),
-            ImLocale::EnUs => format!("Tap a button below, or reply {hint} to choose."),
+            ImLocale::ZhCn => format!("回复 {hint} 处理。"),
+            ImLocale::EnUs => format!("Reply {hint} to choose."),
         }
     }
 
@@ -696,10 +805,19 @@ impl ImText {
     }
 
     pub(crate) fn telegram_queue_start_failed(self, error: &str) -> String {
+        // 聊天里只需要错误要点：去掉 URL、request id 等技术细节。
+        let summary = crate::im::events::sanitize_turn_error_summary(error);
+        let detail = match self.turn_error_hint(&summary) {
+            Some(hint) => match self.locale {
+                ImLocale::ZhCn => format!("{hint}\n原因：{summary}"),
+                ImLocale::EnUs => format!("{hint}\nCause: {summary}"),
+            },
+            None => summary,
+        };
         match self.locale {
-            ImLocale::ZhCn => format!("排队消息连续启动失败，已跳过。\n{error}"),
+            ImLocale::ZhCn => format!("排队消息连续启动失败，已跳过。\n{detail}"),
             ImLocale::EnUs => {
-                format!("The queued message could not start and was skipped.\n{error}")
+                format!("The queued message could not start and was skipped.\n{detail}")
             }
         }
     }
@@ -729,10 +847,10 @@ impl ImText {
             ImLocale::EnUs => ("Session", "Task"),
         };
         let session = match (self.locale, thread_id) {
-            (ImLocale::ZhCn, Some(thread_id)) => format!("已绑定 `{thread_id}`"),
-            (ImLocale::ZhCn, None) => "未绑定".to_string(),
-            (ImLocale::EnUs, Some(thread_id)) => format!("Bound `{thread_id}`"),
-            (ImLocale::EnUs, None) => "Not bound".to_string(),
+            (ImLocale::ZhCn, Some(_)) => "已接入",
+            (ImLocale::ZhCn, None) => "未接入",
+            (ImLocale::EnUs, Some(_)) => "active",
+            (ImLocale::EnUs, None) => "none",
         };
         match self.locale {
             ImLocale::ZhCn => format!(
@@ -774,7 +892,7 @@ impl ImText {
     }
 
     pub(crate) fn available_decisions_label(self) -> &'static str {
-        self.choose("可选决定", "availableDecisions")
+        self.choose("可选决定", "Available options")
     }
 
     pub(crate) fn approval_reply_hint(self, pending: &PendingApproval) -> String {
@@ -812,11 +930,42 @@ impl ImText {
         }
     }
 
-    pub(crate) fn approval_selected_label(self, option_index: usize, label: &str) -> String {
+    pub(crate) fn approval_selected_label(self, label: &str) -> String {
         match self.locale {
-            ImLocale::ZhCn => format!("已选择 /{option_index}：{label}"),
-            ImLocale::EnUs => format!("selected /{option_index}: {label}"),
+            ImLocale::ZhCn => format!("已选择：{label}"),
+            ImLocale::EnUs => format!("selected: {label}"),
         }
+    }
+
+    /// 审批详情由 codex.rs 按协议字段名拼装（日志保留原文）；展示时把
+    /// 已知标签映射为用户语言，未识别的行原样保留。
+    pub(crate) fn localize_approval_summary(self, summary: &str) -> String {
+        if !matches!(self.locale, ImLocale::ZhCn) {
+            return summary.to_string();
+        }
+        summary
+            .lines()
+            .map(|line| {
+                let labels = [
+                    ("reason: ", "原因："),
+                    ("command: ", "命令："),
+                    ("cwd: ", "工作目录："),
+                    ("networkApprovalContext: ", "访问地址："),
+                    ("additionalPermissions: ", "附加权限："),
+                    ("itemId: ", "文件编号："),
+                    ("commandActions:", "子命令："),
+                    ("proposedNetworkPolicyAmendments:", "记住的网络访问："),
+                    ("tool params:", "工具参数："),
+                ];
+                for (raw, localized) in labels {
+                    if let Some(rest) = line.strip_prefix(raw) {
+                        return format!("{localized}{rest}");
+                    }
+                }
+                line.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub(crate) fn no_pending_approval(self) -> &'static str {
@@ -850,8 +999,8 @@ impl ImText {
 
     pub(crate) fn remote_not_connected(self) -> &'static str {
         self.choose(
-            "Codex remote-control 还没有连接。请在项目目录运行 codex，确认它已经通过 remote-control 连接到 MochiPort。",
-            "Codex remote-control is not connected yet. Run codex in the project directory and make sure it is connected to MochiPort through remote-control.",
+            "电脑端的 Codex 还没有连上。请打开电脑上的 Codex 应用（MochiPort 需要它在运行），连上后再发消息即可。",
+            "The Codex app on your computer is not connected yet. Open Codex on the computer (MochiPort needs it running); once it connects, just message me again.",
         )
     }
 
@@ -863,15 +1012,17 @@ impl ImText {
     }
 
     pub(crate) fn app_message_failed(self, error: &dyn std::fmt::Display) -> String {
+        // 聊天里只需要错误要点：去掉 URL、request id 等技术细节。
+        let summary = crate::im::events::sanitize_turn_error_summary(&error.to_string());
         match self.locale {
             ImLocale::ZhCn => {
                 format!(
-                    "Codex 没有接收这条消息：{error}\n\n当前 IM 会话绑定的 Codex 端点可能已经退出或断开。请回复 /q 退出当前会话，然后重新新建会话或恢复历史会话。"
+                    "消息没有送达电脑端的 Codex：{summary}\n\n电脑端的 Codex 可能已经退出或断开。回复 /q 结束当前会话，再重新创建或恢复一个会话。"
                 )
             }
             ImLocale::EnUs => {
                 format!(
-                    "Codex did not accept this message: {error}\n\nThe Codex endpoint bound to this IM session may have exited or disconnected. Reply /q to exit the current session, then create a new session or resume a historical session."
+                    "The Codex app on your computer did not accept this message: {summary}\n\nThe app may have exited or disconnected. Reply /q to end this session, then start or resume a new one."
                 )
             }
         }
@@ -892,46 +1043,33 @@ impl ImText {
         self.choose("正在创建会话", "Creating Session")
     }
 
-    pub(crate) fn created_new_session_body(self, thread_id: &str, summary: &str) -> String {
+    pub(crate) fn created_new_session_body(self, summary: &str) -> String {
         match self.locale {
             ImLocale::ZhCn => {
-                format!("已接入新 thread `{thread_id}`。\n\n{summary}\n\n现在可以直接发送消息。")
+                format!("新会话已就绪。\n\n{summary}\n\n现在直接发送消息就能开始。")
             }
             ImLocale::EnUs => {
-                format!(
-                    "Attached to new thread `{thread_id}`.\n\n{summary}\n\nYou can now send messages directly."
-                )
+                format!("Your new session is ready.\n\n{summary}\n\nJust send a message to start.")
             }
         }
     }
 
-    pub(crate) fn subscribing_thread(self, thread_id: &str) -> String {
-        match self.locale {
-            ImLocale::ZhCn => format!("正在订阅 thread `{thread_id}` 的后续事件..."),
-            ImLocale::EnUs => format!("Subscribing to thread `{thread_id}` events..."),
-        }
+    pub(crate) fn subscribing_thread(self) -> &'static str {
+        self.choose("正在接入会话...", "Attaching the session...")
     }
 
     pub(crate) fn subscribed_session_title(self) -> &'static str {
-        self.choose("已订阅会话", "Session attached")
+        self.choose("已接入会话", "Session attached")
     }
 
     pub(crate) fn subscribing_session_title(self) -> &'static str {
         self.choose("正在接入会话", "Attaching Session")
     }
 
-    pub(crate) fn subscribed_session_body(
-        self,
-        thread_id: &str,
-        title: &str,
-        cwd: &str,
-        status: &str,
-    ) -> String {
+    pub(crate) fn subscribed_session_body(self, title: &str, cwd: &str, status: &str) -> String {
         match self.locale {
-            ImLocale::ZhCn => format!("已接入 thread `{thread_id}`。\n\n{title}\n{cwd}\n{status}"),
-            ImLocale::EnUs => {
-                format!("Attached to thread `{thread_id}`.\n\n{title}\n{cwd}\n{status}")
-            }
+            ImLocale::ZhCn => format!("已接入会话。\n\n{title}\n{cwd}\n{status}"),
+            ImLocale::EnUs => format!("Session attached.\n\n{title}\n{cwd}\n{status}"),
         }
     }
 
@@ -987,8 +1125,18 @@ impl ImText {
 
     pub(crate) fn invalid_create_form(self, error: &dyn std::fmt::Display) -> String {
         match self.locale {
-            ImLocale::ZhCn => format!("新建会话参数不正确：{error}"),
-            ImLocale::EnUs => format!("Invalid new session settings: {error}"),
+            ImLocale::ZhCn => {
+                format!(
+                    "新建会话参数不正确：{}",
+                    self.humanized_error_text(&error.to_string())
+                )
+            }
+            ImLocale::EnUs => {
+                format!(
+                    "Invalid new session settings: {}",
+                    self.humanized_error_text(&error.to_string())
+                )
+            }
         }
     }
 
@@ -1040,8 +1188,8 @@ impl ImText {
 
     pub(crate) fn create_choice_telegram(self) -> &'static str {
         self.choose(
-            "当前 Telegram 会话还没有接入 Codex thread。\n请选择创建新会话，或恢复历史会话或接入当前 Codex 活跃会话。",
-            "This Telegram chat is not attached to a Codex thread yet.\nCreate a new session, or restore a history session or attach to the current active Codex session.",
+            "当前还没有接入 Codex 会话。\n请选择：创建新会话、恢复历史会话，或接入 Codex 正在使用的活跃会话。",
+            "This Telegram chat is not attached to a Codex session yet.\nCreate a new session, resume a previous one, or attach to the current active Codex session.",
         )
     }
 
@@ -1094,50 +1242,50 @@ impl ImText {
 
     pub(crate) fn thread_operation_expired(self) -> &'static str {
         self.choose(
-            "这个 thread 操作已经失效，请重新发送一条消息触发会话选择。",
-            "This thread operation has expired. Send a new message to reopen session selection.",
+            "这个操作已经失效，请重新发送一条消息。",
+            "This action has expired. Send a new message.",
         )
     }
 
     pub(crate) fn thread_choice_card_expired(self) -> &'static str {
         self.choose(
-            "这张 thread 选择卡片已经失效，请重新发送消息。",
-            "This thread selection card has expired. Send a new message.",
+            "这个会话选择已经失效，请重新发送消息。",
+            "This session choice has expired. Send a new message.",
         )
     }
 
     pub(crate) fn thread_choice_not_current(self) -> &'static str {
         self.choose(
-            "这个 thread 选择不属于当前会话。",
-            "This thread selection does not belong to the current chat.",
+            "这个选择不属于当前聊天。",
+            "This choice does not belong to the current chat.",
         )
     }
 
     pub(crate) fn thread_list_not_current(self) -> &'static str {
         self.choose(
-            "这个 thread 列表不属于当前会话。",
-            "This thread list does not belong to the current chat.",
+            "这个会话列表不属于当前聊天。",
+            "This session list does not belong to the current chat.",
         )
     }
 
     pub(crate) fn thread_selection_expired(self) -> &'static str {
         self.choose(
-            "这个 thread 选择已经失效，请重新打开列表。",
-            "This thread selection has expired. Open the list again.",
+            "这个选择已经失效，请重新打开会话列表。",
+            "This choice has expired. Open the session list again.",
         )
     }
 
     pub(crate) fn stale_thread_unbound(self) -> &'static str {
         self.choose(
-            "当前绑定的 Codex thread 已失效，已解除绑定。",
-            "The attached Codex thread is no longer valid and has been detached.",
+            "原来的 Codex 会话已经失效，已自动解除绑定。",
+            "The previous Codex session is no longer valid and has been detached.",
         )
     }
 
     pub(crate) fn unsupported_thread_action(self, action: &str) -> String {
         match self.locale {
-            ImLocale::ZhCn => format!("不支持的 thread 操作：{action}"),
-            ImLocale::EnUs => format!("Unsupported thread action: {action}"),
+            ImLocale::ZhCn => format!("这个操作在当前渠道不可用：{action}"),
+            ImLocale::EnUs => format!("This action is not available here: {action}"),
         }
     }
 
@@ -1296,22 +1444,42 @@ impl ImText {
         error: &dyn std::fmt::Display,
     ) -> String {
         match self.locale {
-            ImLocale::ZhCn => format!("设置应用失败：{error}"),
-            ImLocale::EnUs => format!("Failed to apply settings: {error}"),
+            ImLocale::ZhCn => {
+                format!(
+                    "设置应用失败：{}",
+                    self.humanized_error_text(&error.to_string())
+                )
+            }
+            ImLocale::EnUs => {
+                format!(
+                    "Failed to apply settings: {}",
+                    self.humanized_error_text(&error.to_string())
+                )
+            }
         }
     }
 
     pub(crate) fn telegram_model_switch_requires_thread(self) -> &'static str {
         self.choose(
-            "当前话题还没有绑定 Codex 会话。请先使用 /new 或 /sessions 接入会话。",
-            "This topic is not attached to a Codex session. Use /new or /sessions first.",
+            "当前还没有接入 Codex 会话。先回复 /new 新建一个，或 /sessions 恢复一个。",
+            "No Codex session is attached yet. Use /new to create one or /sessions to resume.",
         )
     }
 
     pub(crate) fn telegram_model_list_failed(self, error: &dyn std::fmt::Display) -> String {
         match self.locale {
-            ImLocale::ZhCn => format!("模型列表加载失败：{error}"),
-            ImLocale::EnUs => format!("Failed to load the model list: {error}"),
+            ImLocale::ZhCn => {
+                format!(
+                    "模型列表加载失败：{}",
+                    self.humanized_error_text(&error.to_string())
+                )
+            }
+            ImLocale::EnUs => {
+                format!(
+                    "Failed to load the model list: {}",
+                    self.humanized_error_text(&error.to_string())
+                )
+            }
         }
     }
 
@@ -1361,8 +1529,8 @@ impl ImText {
     pub(crate) fn thread_list_body_feishu(self, provider: Option<&str>) -> String {
         let mut body = self
             .choose(
-                "当前飞书会话还没有订阅任何 Codex thread。请选择一个会话接入后续事件。",
-                "This Feishu chat is not subscribed to any Codex thread yet. Choose a session to attach future events.",
+                "当前飞书会话还没有接入 Codex。请选择一个会话接入。",
+                "This Feishu chat is not attached to a Codex session yet. Choose a session to attach.",
             )
             .to_string();
         if let Some(provider) = provider {
@@ -1408,8 +1576,8 @@ impl ImText {
 
     pub(crate) fn page_click_hint(self, page: usize, count: usize) -> String {
         match self.locale {
-            ImLocale::ZhCn => format!("第 {} 页 · 点击 /1 ~ /{} 选择", page.max(1), count),
-            ImLocale::EnUs => format!("Page {} · Click /1 ~ /{} to choose", page.max(1), count),
+            ImLocale::ZhCn => format!("第 {} 页 · 回复 /1 ~ /{} 选择", page.max(1), count),
+            ImLocale::EnUs => format!("Page {} · Reply /1 ~ /{} to choose", page.max(1), count),
         }
     }
 
@@ -1504,15 +1672,15 @@ impl ImText {
 
     pub(crate) fn create_choice_body_feishu(self) -> &'static str {
         self.choose(
-            "当前飞书会话还没有接入 Codex thread。请选择新建会话，或恢复历史会话或接入当前 Codex 活跃会话。",
-            "This Feishu chat is not attached to a Codex thread yet. Create a new session, or restore a history session or attach to the current active Codex session.",
+            "当前飞书会话还没有接入 Codex。请选择：新建会话、恢复历史会话，或接入 Codex 正在使用的活跃会话。",
+            "This Feishu chat is not attached to a Codex session yet. Create a new session, resume a previous one, or attach to the current active Codex session.",
         )
     }
 
     pub(crate) fn create_choice_body_wecom(self) -> &'static str {
         self.choose(
-            "当前企业微信会话还没有接入 Codex thread。请选择新建会话，或恢复历史会话。",
-            "This WeCom chat is not attached to a Codex thread yet. Create a new session or restore a history session.",
+            "当前企业微信会话还没有接入 Codex。请选择：新建会话或恢复历史会话。",
+            "This WeCom chat is not attached to a Codex session yet. Create a new session or resume a previous one.",
         )
     }
 
@@ -1525,15 +1693,15 @@ impl ImText {
 
     pub(crate) fn create_new_description_feishu(self) -> &'static str {
         self.choose(
-            "创建一个新的 Codex thread，并接入后续消息。",
-            "Create a new Codex thread and attach future messages.",
+            "创建一个新的 Codex 会话，并接入后续消息。",
+            "Create a new Codex session and attach future messages.",
         )
     }
 
     pub(crate) fn restore_history_description_feishu(self) -> &'static str {
         self.choose(
-            "查看 Codex App 当前可恢复的历史 thread 列表。",
-            "View restorable Codex App history threads.",
+            "查看 Codex App 当前可恢复的历史会话列表。",
+            "View restorable Codex App history sessions.",
         )
     }
 
@@ -1653,7 +1821,7 @@ impl ImText {
     }
 
     pub(crate) fn create_thread_heading(self) -> &'static str {
-        self.choose("创建新 Codex thread", "Create New Codex Thread")
+        self.choose("创建新 Codex 会话", "Create New Codex Session")
     }
 
     pub(crate) fn current_settings_heading(self) -> &'static str {
@@ -1926,6 +2094,76 @@ impl ImText {
 #[cfg(test)]
 mod tests {
     use super::{ImLocale, ImText};
+
+    #[test]
+    fn page_hints_use_reply_verb() {
+        let zh = ImText {
+            locale: ImLocale::ZhCn,
+        };
+        let en = ImText {
+            locale: ImLocale::EnUs,
+        };
+        assert_eq!(zh.page_click_hint(1, 4), "第 1 页 · 回复 /1 ~ /4 选择");
+        assert_eq!(en.page_click_hint(2, 9), "Page 2 · Reply /1 ~ /9 to choose");
+    }
+
+    #[test]
+    fn approval_summary_labels_localize_for_zh_and_pass_through_for_en() {
+        let zh = ImText {
+            locale: ImLocale::ZhCn,
+        };
+        let en = ImText {
+            locale: ImLocale::EnUs,
+        };
+        let raw = "reason: 允许执行?\ncommand: `git pull --ff-only`\ncwd: `/repo`\ncommandActions:\n- `git pull`\nitemId: `f1`";
+        let zh_summary = zh.localize_approval_summary(raw);
+        assert!(zh_summary.contains("原因：允许执行?"));
+        assert!(zh_summary.contains("命令：`git pull --ff-only`"));
+        assert!(zh_summary.contains("工作目录：`/repo`"));
+        assert!(zh_summary.contains("子命令：\n- `git pull`"));
+        assert!(zh_summary.contains("文件编号：`f1`"));
+        assert!(!zh_summary.contains("cwd:"));
+        assert!(!zh_summary.contains("command:"));
+        assert_eq!(en.localize_approval_summary(raw), raw);
+        assert_eq!(zh.approval_selected_label("允许"), "已选择：允许");
+        assert_eq!(zh.telegram_approval_reply_footer(), "点击下方按钮处理。");
+        assert_eq!(
+            zh.telegram_approval_fallback_footer("/y 或 /n"),
+            "回复 /y 或 /n 处理。"
+        );
+    }
+
+    #[test]
+    fn app_message_error_summary_is_sanitized() {
+        let zh = ImText {
+            locale: ImLocale::ZhCn,
+        };
+        let en = ImText {
+            locale: ImLocale::EnUs,
+        };
+        let raw = "turn creation failed: connection refused, url: http://127.0.0.1:3847/turns, request id: 4f2a";
+        let zh_message = zh.app_message_failed(&raw);
+        assert!(!zh_message.contains("url:"));
+        assert!(!zh_message.contains("request id"));
+        assert!(zh_message.contains("connection refused"));
+        assert!(zh_message.contains("再重新创建或恢复一个会话"));
+        let en_message = en.app_message_failed(&raw);
+        assert!(!en_message.contains("request id"));
+        assert!(en_message.contains("resume a new one"));
+    }
+
+    #[test]
+    fn telegram_queue_start_error_summary_is_sanitized() {
+        let zh = ImText {
+            locale: ImLocale::ZhCn,
+        };
+        let message = zh.telegram_queue_start_failed(
+            "start failed: connect timeout https://api.telegram.org/bot***/getUpdates request id: 17",
+        );
+        assert!(!message.contains("https://"));
+        assert!(!message.contains("request id"));
+        assert!(message.contains("排队消息连续启动失败"));
+    }
 
     #[test]
     fn telegram_context_compaction_copy_is_localized() {

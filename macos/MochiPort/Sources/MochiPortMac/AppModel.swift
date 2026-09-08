@@ -3367,6 +3367,9 @@ final class AppModel: ObservableObject {
 
     private func userFacingMessage(for error: Error) -> String {
         if let apiError = error as? APIClientError {
+            if case let .operationFailed(message) = apiError {
+                return MessagingErrorCopy.managementMessage(for: message)
+            }
             return apiError.localizedDescription
         }
         if let localizedError = error as? LocalizedError,

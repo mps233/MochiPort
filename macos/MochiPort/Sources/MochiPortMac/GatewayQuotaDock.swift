@@ -765,7 +765,13 @@ struct GatewayQuotaDock: View {
             return
         } catch {
             guard !Task.isCancelled, requestID == usageTaskID else { return }
-            providerUsageError = error.localizedDescription
+            if let apiError = error as? APIClientError {
+                providerUsageError = MessagingErrorCopy.managementMessage(
+                    for: apiError.localizedDescription
+                )
+            } else {
+                providerUsageError = "暂时无法获取额度信息，请稍后重试。"
+            }
         }
     }
 

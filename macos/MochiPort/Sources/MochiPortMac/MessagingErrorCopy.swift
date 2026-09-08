@@ -63,6 +63,34 @@ enum MessagingErrorCopy {
         return Notice(title: raw, hint: nil)
     }
 
+    /// 管理接口（保存设置、添加账号、额度刷新等）返回的原始错误串 →
+    /// 用户可读消息。识别不了的错误原样返回，不做破坏；daemon 日志
+    /// 始终保留原始串供排查。
+    static func managementMessage(for rawError: String) -> String {
+        let raw = rawError.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return rawError }
+
+        let lower = raw.lowercased()
+        let platform: MessagingAccountSummary.Platform
+        if lower.contains("feishu") {
+            platform = .feishu
+        } else if lower.contains("wecom") {
+            platform = .wecom
+        } else if lower.contains("wechat") {
+            platform = .wechat
+        } else if lower.contains("telegram") {
+            platform = .telegram
+        } else if raw.contains("error sending request") {
+            return "无法连接对应服务：通常是网络不通或代理未生效。请检查「设置 → 出站代理」是否指向可用的本地代理。"
+        } else {
+            return raw
+        }
+
+        let notice = notice(for: raw, platform: platform)
+        guard let hint = notice.hint else { return notice.title }
+        return "\(notice.title)。\(hint)"
+    }
+
     /// Extracts the leading integer after `status=` — the daemon formats
     /// upstream HTTP failures as `... failed: status=409 Conflict ...`.
     private static func httpStatus(in raw: String) -> Int? {

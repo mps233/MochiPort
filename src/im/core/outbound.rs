@@ -252,7 +252,7 @@ async fn send_wecom_outbound(
         }
         ImOutboundPayload::Approval(approval) => {
             match adapter
-                .send_approval_card(&message.route.chat_id, approval)
+                .send_approval_card(&message.route.chat_id, approval, im_text_for_state(state))
                 .await
             {
                 Ok(message_id) => Ok(message_id),
