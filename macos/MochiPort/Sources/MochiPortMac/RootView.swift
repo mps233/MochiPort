@@ -337,14 +337,6 @@ private struct OverviewView: View {
                 }
 
                 ConnectionTopologyView()
-
-                OverviewAccountPoolSummaryRow(
-                    admin: model.sub2ApiAdmin,
-                    pool: model.sub2ApiAccountPool,
-                    isLoading: model.sub2ApiAccountPoolLoading,
-                    loadError: model.sub2ApiAccountPoolError,
-                    onOpen: { model.selection = .accountPool }
-                )
             }
             .frame(maxWidth: MochiPortPageLayout.maxContentWidth, alignment: .leading)
             .padding(.top, MochiPortPageLayout.topPadding)
@@ -359,12 +351,6 @@ private struct OverviewView: View {
             for: .scrollContent
         )
         .scrollIndicators(.never)
-        .task {
-            await model.refreshSub2ApiAccountPool()
-        }
-        .onDisappear {
-            model.cancelSub2ApiAccountPoolRefresh()
-        }
     }
 }
 
@@ -1075,99 +1061,5 @@ private struct OverviewSignalDivider: View {
     var body: some View {
         Divider()
             .frame(maxHeight: 34)
-    }
-}
-
-private struct OverviewAccountPoolSummaryRow: View {
-    let admin: ManageSub2ApiAdmin?
-    let pool: ManageSub2ApiAccountPoolResponse.Pool?
-    let isLoading: Bool
-    let loadError: String?
-    let onOpen: () -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: onOpen) {
-            HStack(spacing: 12) {
-                Image(systemName: "person.3.sequence")
-                    .font(.system(size: 19, weight: .medium))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 34, height: 34)
-                    .accessibilityHidden(true)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Sub2API 账号池")
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(.primary)
-                    Text(detailText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 12)
-
-                if let dotTint {
-                    Circle()
-                        .fill(dotTint)
-                        .frame(width: 7, height: 7)
-                        .accessibilityHidden(true)
-                }
-
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 26, height: 26)
-                    .background(
-                        Color.primary.opacity(isHovered ? 0.06 : 0),
-                        in: Circle()
-                    )
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
-        .animation(.easeOut(duration: 0.14), value: isHovered)
-        .startHereGlassSurface()
-        .help("打开账号池页面")
-        .accessibilityLabel("Sub2API 账号池，\(detailText)")
-        .accessibilityIdentifier("overview.sub2api-account-pool")
-    }
-
-    private var detailText: String {
-        if admin?.configured != true {
-            return "未连接 · 点击去连接"
-        }
-        if let pool, !pool.accounts.isEmpty {
-            let summary = sub2ApiPoolSummary(pool.accounts)
-            var parts = [
-                "\(summary.total) 个账号",
-                "\(summary.available)/\(summary.total) 可用",
-            ]
-            if summary.attention > 0 {
-                parts.append("\(summary.attention) 异常")
-            }
-            parts.append("余额 \(summary.balanceText)")
-            return parts.joined(separator: " · ")
-        }
-        if isLoading {
-            return "正在读取账号池…"
-        }
-        if loadError != nil {
-            return "暂时无法读取账号池"
-        }
-        return "账号池中还没有账号"
-    }
-
-    private var dotTint: Color? {
-        guard let pool, !pool.accounts.isEmpty else { return nil }
-        let summary = sub2ApiPoolSummary(pool.accounts)
-        if summary.attention > 0 { return .red }
-        if summary.available == summary.total { return Theme.safeGreen }
-        return .orange
     }
 }
