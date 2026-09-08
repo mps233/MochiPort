@@ -542,9 +542,10 @@ private struct AnimatedMetricValue: View {
 /// view owns its breathing, blink, and relay-ring motion.
 private struct TokenMascotView: View {
     let value: Double
+    var animates: Bool = false
 
     var body: some View {
-        TokenCompanionAnimator()
+        TokenCompanionAnimator(animates: animates)
             .frame(width: 76, height: 58)
             .accessibilityHidden(true)
             .allowsHitTesting(false)
@@ -557,6 +558,7 @@ private struct OverviewUsageMetricCard: View {
     let format: (Double) -> String
     let label: String
     let emphasis: Emphasis
+    var mascotAnimates: Bool = false
 
     enum Emphasis {
         case hero
@@ -584,7 +586,7 @@ private struct OverviewUsageMetricCard: View {
 
             switch emphasis {
             case .hero:
-                TokenMascotView(value: value)
+                TokenMascotView(value: value, animates: mascotAnimates)
             case .standard:
                 EmptyView()
             }
@@ -620,6 +622,9 @@ struct OverviewUsageInsightsView: View {
     let store: UsageStore
     let statsStore: DailyStatsStore?
     let providerUsage: ManageProviderUsageResponse?
+    /// Whether the hero card's companion mascot animates. Off by default: the
+    /// motion costs a full hosting-view layout per frame.
+    var mascotAnimates: Bool = false
     @State private var range: UsageTrendRange = .week
     @Environment(\.colorScheme) private var colorScheme
 
@@ -721,7 +726,8 @@ struct OverviewUsageInsightsView: View {
                 value: metrics.todayTokens,
                 format: { formatTokens(Int($0)) },
                 label: "今日请求 Token",
-                emphasis: .hero
+                emphasis: .hero,
+                mascotAnimates: mascotAnimates
             )
             metricRow(metrics)
         }

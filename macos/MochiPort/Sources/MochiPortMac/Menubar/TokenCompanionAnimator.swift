@@ -187,22 +187,39 @@ private func motion(
 public struct TokenCompanionAnimator: View {
     @Binding private var externalState: TokenCompanionState
     @State private var internalState: TokenCompanionState = .idle
-    @State private var animationStart = Date.distantPast
-    @State private var reactionStart = Date.distantPast
-    @State private var displayedState: TokenCompanionState = .idle
+    @State private var animationStart = Date()
+    @State private var reactionStart = Date()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
 
+    /// Whether the breathing / blinking / reaction motion runs.
+    ///
+    /// The motion costs a full hosting-view layout per frame (measured ~14% CPU
+    /// with the menu-bar window open, versus ~0% static), so it is opt-in via
+    /// the settings toggle rather than always on.
+    private let animates: Bool
     private let usesExternalBinding: Bool
+
+    /// 30fps. `.periodic` is Timer-backed, so this is the actual update rate
+    /// rather than a hint the display link may ignore.
+    private static let frameInterval: TimeInterval = 1.0 / 30.0
 
     public init() {
         self._externalState = .constant(.idle)
         self.usesExternalBinding = false
+        self.animates = false
     }
 
-    public init(state: Binding<TokenCompanionState>) {
+    public init(animates: Bool) {
+        self._externalState = .constant(.idle)
+        self.usesExternalBinding = false
+        self.animates = animates
+    }
+
+    public init(state: Binding<TokenCompanionState>, animates: Bool = false) {
         self._externalState = state
         self.usesExternalBinding = true
+        self.animates = animates
     }
 
     private var currentState: TokenCompanionState {
@@ -210,38 +227,17 @@ public struct TokenCompanionAnimator: View {
     }
 
     public var body: some View {
-        // The mascot must not force its host view tree to re-evaluate: this
-        // view sits inside the menu-bar dashboard next to the usage chart, and
-        // a `TimelineView` that rebuilds sibling SwiftUI views every frame cost
-        // ~7 points of CPU. Draw into a single `Canvas` so the per-frame work
-        // stays inside this view's own drawing closure.
         Group {
-            if reduceMotion {
-                // No animation is visible anyway; a static frame avoids the
-                // 30fps redraw entirely for reduce-motion users.
-                Canvas { context, size in
-                    drawCompanion(
-                        context: &context,
-                        size: size,
-                        move: motion(
-                            for: displayedState,
-                            elapsed: 0,
-                            reactionElapsed: 0,
-                            reduceMotion: true
-                        )
-                    )
-                }
-            } else {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-                    let now = context.date
-                    let elapsed = max(0, now.timeIntervalSince(animationStart))
-                    let reactionElapsed = max(0, now.timeIntervalSince(reactionStart))
+            if animates && !reduceMotion {
+                TimelineView(.periodic(from: animationStart, by: Self.frameInterval)) { context in
+                    let elapsed = max(0, context.date.timeIntervalSince(animationStart))
+                    let reactionElapsed = max(0, context.date.timeIntervalSince(reactionStart))
                     Canvas { canvas, size in
                         drawCompanion(
                             context: &canvas,
                             size: size,
                             move: motion(
-                                for: displayedState,
+                                for: currentState,
                                 elapsed: elapsed,
                                 reactionElapsed: reactionElapsed,
                                 reduceMotion: false
@@ -249,23 +245,28 @@ public struct TokenCompanionAnimator: View {
                         )
                     }
                 }
+            } else {
+                // Static frame: no timeline, so the view is not re-laid-out.
+                Canvas { context, size in
+                    drawCompanion(
+                        context: &context,
+                        size: size,
+                        move: motion(
+                            for: currentState,
+                            elapsed: 0,
+                            reactionElapsed: 0,
+                            reduceMotion: true
+                        )
+                    )
+                }
             }
         }
         .frame(width: 76, height: 58)
-        .onAppear {
-            let now = Date()
-            animationStart = now
-            reactionStart = now
-            displayedState = currentState
-        }
-        .onChange(of: currentState) { _, newState in
-            displayedState = newState
-            reactionStart = Date()
-        }
+        .onChange(of: currentState) { _, _ in reactionStart = Date() }
         .accessibilityHidden(true)
     }
 
-    /// Draw one mascot frame at the current motion offsets.
+    /// Draw the mascot for one state.
     ///
     /// `Canvas` resolves the shape and the face from the same `size`, so the
     /// body and eyes stay aligned exactly as the previous view hierarchy did.
@@ -292,7 +293,7 @@ public struct TokenCompanionAnimator: View {
             let body = ThreadBlobBody(wobble: move.wobble, squish: move.squish)
                 .path(in: frame)
             layer.fill(body, with: .linearGradient(
-                Gradient(colors: fillColors(for: displayedState, colorScheme: colorScheme)),
+                Gradient(colors: fillColors(for: currentState, colorScheme: colorScheme)),
                 startPoint: CGPoint(x: frame.minX, y: frame.minY),
                 endPoint: CGPoint(x: frame.maxX, y: frame.maxY)
             ))

@@ -68,6 +68,7 @@ final class AppSettings {
         static let funStreak = "mochiport.funStreak"
         static let funWeeklyReport = "mochiport.funWeeklyReport"
         static let funSoundEnabled = "mochiport.funSoundEnabled"
+        static let mascotAnimates = "mochiport.mascotAnimates"
         static let onboardingCompleted = "mochiport.onboardingCompleted"
         static let notifyLimitThreshold = "mochiport.notifyLimitThreshold"
         static let notifyDepletion = "mochiport.notifyDepletion"
@@ -86,7 +87,7 @@ final class AppSettings {
             let keys = [
                 warnThreshold, critThreshold, notificationsEnabled, launchAtLogin,
                 menubarMode, menubarItems, funMilestone, funRecord, funStreak,
-                funWeeklyReport, funSoundEnabled, onboardingCompleted,
+                funWeeklyReport, funSoundEnabled, mascotAnimates, onboardingCompleted,
                 notifyLimitThreshold, notifyDepletion, notifyWindowReset,
                 notifyBurnSpike, notifyComeback, notifyBriefing, notifyUpdate,
                 realMode, customMessages,
@@ -194,6 +195,13 @@ final class AppSettings {
     var funSoundEnabled: Bool {
         didSet { defaults.set(funSoundEnabled, forKey: Key.funSoundEnabled) }
     }
+    /// 概览页吉祥物是否播放动画。默认关。
+    ///
+    /// 动画会让 SwiftUI 按显示器刷新率重排整个菜单栏视图树：实测窗口打开时
+    /// 约 14% CPU，静止时约 0%。因此默认关闭，由用户按需打开。
+    var mascotAnimates: Bool {
+        didSet { defaults.set(mascotAnimates, forKey: Key.mascotAnimates) }
+    }
     /// 首次启动引导是否已完成。false 时启动显示引导向导。默认 false。
     var onboardingCompleted: Bool {
         didSet { defaults.set(onboardingCompleted, forKey: Key.onboardingCompleted) }
@@ -227,6 +235,7 @@ final class AppSettings {
         funStreak = defaults.object(forKey: Key.funStreak) as? Bool ?? true
         funWeeklyReport = defaults.object(forKey: Key.funWeeklyReport) as? Bool ?? true
         funSoundEnabled = defaults.object(forKey: Key.funSoundEnabled) as? Bool ?? false
+        mascotAnimates = defaults.object(forKey: Key.mascotAnimates) as? Bool ?? false
         onboardingCompleted = defaults.object(forKey: Key.onboardingCompleted) as? Bool ?? false
         // 菜单栏条目：有新格式键就直接使用，否则从旧 menubarMode 迁移一次。
         if let rawItems = defaults.stringArray(forKey: Key.menubarItems) {

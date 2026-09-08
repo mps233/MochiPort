@@ -326,7 +326,8 @@ private struct OverviewView: View {
                 OverviewUsageInsightsView(
                     store: menubar.store,
                     statsStore: menubar.statsStore,
-                    providerUsage: model.gatewayProviderUsage
+                    providerUsage: model.gatewayProviderUsage,
+                    mascotAnimates: menubar.settings.mascotAnimates
                 )
                 .task {
                     while !Task.isCancelled {

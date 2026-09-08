@@ -58,6 +58,10 @@ struct MenubarSettingsView: View {
                 Toggle("时段摘要包含连续使用天数", isOn: $settings.funStreak)
                 Toggle("周一显示上周报告", isOn: $settings.funWeeklyReport)
                 Toggle("提示音", isOn: $settings.funSoundEnabled)
+                Toggle("概览吉祥物动画", isOn: $settings.mascotAnimates)
+                Text("动画会让界面按显示器刷新率重排，窗口打开时约多占 14% CPU；关闭后吉祥物保持静止。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle("检测新版本", isOn: $settings.notifyUpdate)
             }
 
