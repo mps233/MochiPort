@@ -56,14 +56,6 @@ struct AccountPoolView: View {
                                 )
                             }
                         },
-                        onToggleGroupSchedulable: { accountIDs, schedulable in
-                            for accountID in accountIDs {
-                                _ = await model.toggleSub2ApiAccountSchedulable(
-                                    accountID: accountID,
-                                    schedulable: schedulable
-                                )
-                            }
-                        },
                         onRetry: {
                             Task { await model.refreshSub2ApiAccountPool(forceBillingRefresh: true) }
                         }
@@ -310,7 +302,6 @@ private struct AccountPoolContentSection: View {
     @Binding var filter: AccountPoolStatsFilter?
     let mutationIDs: Set<Int64>
     let onToggleSchedulable: (Int64, Bool) -> Void
-    let onToggleGroupSchedulable: ([Int64], Bool) async -> Void
     let onRetry: () -> Void
 
     var body: some View {
@@ -343,8 +334,7 @@ private struct AccountPoolContentSection: View {
                     accounts: pool.accounts,
                     filter: filter,
                     mutationIDs: mutationIDs,
-                    onToggleSchedulable: onToggleSchedulable,
-                    onToggleGroupSchedulable: onToggleGroupSchedulable
+                    onToggleSchedulable: onToggleSchedulable
                 )
 
                 Text("更新于 \(sub2ApiFetchedTime(pool.fetchedAtMs))")
@@ -542,6 +532,7 @@ private struct AccountPoolAccountGroup: Identifiable {
 
 private enum AccountPoolTableLayout {
     static let columnSpacing: CGFloat = 12
+    static let groupWidth: CGFloat = 128
     static let statusWidth: CGFloat = 104
     static let schedulableWidth: CGFloat = 72
     static let balanceWidth: CGFloat = 96
@@ -555,7 +546,6 @@ private struct AccountPoolAccountTable: View {
     let filter: AccountPoolStatsFilter?
     let mutationIDs: Set<Int64>
     let onToggleSchedulable: (Int64, Bool) -> Void
-    let onToggleGroupSchedulable: ([Int64], Bool) async -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("accountpool.expandedGroups") private var storedExpandedGroups: Data = Data()
     @State private var expandedGroupKeys: Set<String> = []
@@ -619,6 +609,8 @@ private struct AccountPoolAccountTable: View {
             HStack(spacing: AccountPoolTableLayout.columnSpacing) {
                 Text("站点 / 账号")
                     .frame(maxWidth: .infinity, alignment: .leading)
+                Text("分组")
+                    .frame(width: AccountPoolTableLayout.groupWidth, alignment: .leading)
                 Text("状态")
                     .frame(width: AccountPoolTableLayout.statusWidth, alignment: .leading)
                 Text("调度")
@@ -659,9 +651,7 @@ private struct AccountPoolAccountTable: View {
                     AccountPoolAccountGroupRow(
                         group: group,
                         isExpanded: expandedGroupKeys.contains(group.id),
-                        isTogglingBatch: isGroupToggling(group),
-                        onToggle: { toggleGroup(group.id) },
-                        onToggleGroupSchedulable: onToggleGroupSchedulable
+                        onToggle: { toggleGroup(group.id) }
                     )
                     AccountPoolNestedRows(
                         group: group,
@@ -687,10 +677,6 @@ private struct AccountPoolAccountTable: View {
             persistExpandedGroups()
         }
     }
-
-    private func isGroupToggling(_ group: AccountPoolAccountGroup) -> Bool {
-        group.accounts.contains { mutationIDs.contains($0.id) }
-    }
 }
 
 /// 组行下方的子账号列表。内容常驻、高度在 0 与自然高度之间动画，
@@ -703,6 +689,26 @@ private struct AccountPoolNestedRows: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var naturalHeight: CGFloat = 0
 
+    /// 与兄弟渠道共享同一上游钱包的账号：同一把 key（walletGroup），
+    /// 或同站点下余额完全一致（"一个账号多把 key"的重复读数）。
+    /// 它们的余额已在站点行汇总显示，子行里不再重复。
+    private var sharedWalletAccountIDs: Set<Int64> {
+        var hidden: Set<Int64> = []
+        for account in group.accounts {
+            for other in group.accounts where other.id != account.id {
+                let sameWallet = account.walletGroup != nil
+                    && account.walletGroup == other.walletGroup
+                let sameBalance = sub2ApiBalanceText(account.upstreamBalance)
+                    == sub2ApiBalanceText(other.upstreamBalance)
+                if sameWallet || sameBalance {
+                    hidden.insert(account.id)
+                    break
+                }
+            }
+        }
+        return hidden
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ForEach(Array(group.accounts.enumerated()), id: \.element.id) { childIndex, account in
@@ -710,6 +716,7 @@ private struct AccountPoolNestedRows: View {
                     account: account,
                     nested: true,
                     mutationIDs: mutationIDs,
+                    hidesBalance: sharedWalletAccountIDs.contains(account.id),
                     onToggleSchedulable: onToggleSchedulable
                 )
                 // 逐行轻微延迟淡入，展开时呈现自上而下的级联；收起时全部立即淡出。
@@ -757,14 +764,13 @@ private struct AccountPoolNestedRows: View {
     }
 }
 
+/// 站点折叠行：只承担"站点标题 + 展开/收起"与站点级余额汇总；
+/// 分组、状态、调度留空，账号明细一律在展开的子账号行里看。
 private struct AccountPoolAccountGroupRow: View {
     let group: AccountPoolAccountGroup
     let isExpanded: Bool
-    let isTogglingBatch: Bool
     let onToggle: () -> Void
-    let onToggleGroupSchedulable: ([Int64], Bool) async -> Void
     @State private var isHovering = false
-    @State private var isBatchToggling = false
 
     private var groupTitle: String {
         // 站点自报的名字优先；没有（或被 daemon 判定为模板默认名）时回退域名。
@@ -782,6 +788,8 @@ private struct AccountPoolAccountGroupRow: View {
         })
     }
 
+    /// 钱包是站点级资产：余额汇总在外层显示一次；子渠道共享同一钱包时
+    /// 各自的余额列留空，避免"同一钱包显示 N 遍"的误导。
     private var balanceSummaryText: String {
         let values = group.accounts.map { sub2ApiBalanceText($0.upstreamBalance) }
         var uniqueValues: [String] = []
@@ -801,35 +809,10 @@ private struct AccountPoolAccountGroupRow: View {
         return .primary
     }
 
-    private var hasErrorAccount: Bool {
-        group.accounts.contains { $0.status.lowercased() == "error" }
-    }
-
-    private var statusTint: Color {
-        // 红色只表示组内存在错误账号；其余按可用比例给中性/警示色。
-        if hasErrorAccount { return .red }
-        if availableCount == group.accounts.count { return Theme.safeGreen }
-        if availableCount > 0 { return .orange }
-        return .secondary
-    }
-
-    private var statusText: String {
-        availableCount == group.accounts.count
-            ? "全部可用"
-            : "\(availableCount)/\(group.accounts.count) 可用"
-    }
-
-    private var allChildrenSchedulable: Bool {
-        group.accounts.allSatisfy(\.schedulable)
-    }
-
-    private func toggleGroupSchedulable(_ newValue: Bool) {
-        guard !isBatchToggling else { return }
-        isBatchToggling = true
-        Task {
-            await onToggleGroupSchedulable(group.accounts.map(\.id), newValue)
-            await MainActor.run { isBatchToggling = false }
-        }
+    private var balanceHelp: String {
+        group.accounts
+            .map { "\($0.name)：\(sub2ApiBalanceText($0.upstreamBalance))" }
+            .joined(separator: "\n")
     }
 
     var body: some View {
@@ -861,31 +844,19 @@ private struct AccountPoolAccountGroupRow: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
+                    .help(group.siteUrl ?? "")
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .help(group.siteUrl ?? "")
-
-                AccountPoolStatusCapsule(text: statusText, tint: statusTint)
-                    .frame(width: AccountPoolTableLayout.statusWidth, alignment: .leading)
-
-                Toggle("批量调度", isOn: Binding(
-                    get: { allChildrenSchedulable },
-                    set: { toggleGroupSchedulable($0) }
-                ))
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .labelsHidden()
-                .disabled(isTogglingBatch || isBatchToggling)
-                .frame(width: AccountPoolTableLayout.schedulableWidth, alignment: .leading)
-                .help("批量切换该站点全部账号的调度")
-                .accessibilityLabel("\(groupTitle)批量调度")
 
                 AccountPoolBalanceValue(text: balanceSummaryText, tint: balanceTint)
                     .frame(width: AccountPoolTableLayout.balanceWidth, alignment: .trailing)
+                    .help(balanceHelp)
             }
+            // 标题行只承载站点名与计数，比账号行更紧凑；
+            // padding 必须在 minHeight 之内，否则会把行高撑到基准之外。
             .padding(.horizontal, AccountPoolTableLayout.horizontalPadding)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
             .background(Color.accentColor.opacity(isHovering ? 0.055 : 0.022))
         }
         .buttonStyle(.plain)
@@ -897,7 +868,7 @@ private struct AccountPoolAccountGroupRow: View {
             "\(groupTitle)，\(group.accounts.count) 个账号，\(availableCount) 个可用，余额 \(balanceSummaryText)"
         )
         .accessibilityValue(isExpanded ? "子账号已展开" : "子账号已收起")
-        .accessibilityHint("主账号汇总始终显示，仅切换下面的子账号列表")
+        .accessibilityHint("点击展开或收起该站点的子账号列表")
     }
 }
 
@@ -946,6 +917,7 @@ private struct AccountPoolAccountRow: View {
     let account: ManageSub2ApiAccountPoolResponse.Account
     let nested: Bool
     let mutationIDs: Set<Int64>
+    let hidesBalance: Bool
     let onToggleSchedulable: (Int64, Bool) -> Void
     @State private var isHovering = false
 
@@ -953,11 +925,13 @@ private struct AccountPoolAccountRow: View {
         account: ManageSub2ApiAccountPoolResponse.Account,
         nested: Bool = false,
         mutationIDs: Set<Int64> = [],
+        hidesBalance: Bool = false,
         onToggleSchedulable: @escaping (Int64, Bool) -> Void = { _, _ in }
     ) {
         self.account = account
         self.nested = nested
         self.mutationIDs = mutationIDs
+        self.hidesBalance = hidesBalance
         self.onToggleSchedulable = onToggleSchedulable
     }
 
@@ -1029,6 +1003,9 @@ private struct AccountPoolAccountRow: View {
             .padding(.leading, nested ? AccountPoolTableLayout.nestedContentInset : 0)
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            AccountPoolGroupsValue(groups: sub2ApiAccountGroups(account))
+                .frame(width: AccountPoolTableLayout.groupWidth, alignment: .leading)
+
             AccountPoolStatusCapsule(
                 text: sub2ApiAccountStatusText(account),
                 tint: accountTint
@@ -1052,12 +1029,18 @@ private struct AccountPoolAccountRow: View {
             .accessibilityValue(account.schedulable ? "已开启" : "已关闭")
             .accessibilityHint("只修改是否参与调度，不会清除账号错误或冷却状态")
 
-            AccountPoolBalanceValue(
-                text: sub2ApiBalanceText(account.upstreamBalance),
-                tint: balanceTint
-            )
-            .frame(width: AccountPoolTableLayout.balanceWidth, alignment: .trailing)
-            .help(sub2ApiBalanceHelp(account.upstreamBalance))
+            // 与兄弟渠道共享同一钱包时余额已在站点行汇总，这里留空占位。
+            if hidesBalance {
+                Color.clear
+                    .frame(width: AccountPoolTableLayout.balanceWidth)
+            } else {
+                AccountPoolBalanceValue(
+                    text: sub2ApiBalanceText(account.upstreamBalance),
+                    tint: balanceTint
+                )
+                .frame(width: AccountPoolTableLayout.balanceWidth, alignment: .trailing)
+                .help(sub2ApiBalanceHelp(account.upstreamBalance))
+            }
 
         }
         .padding(.horizontal, AccountPoolTableLayout.horizontalPadding)
@@ -1077,7 +1060,8 @@ private struct AccountPoolAccountRow: View {
         .animation(.easeOut(duration: 0.12), value: isHovering)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(
-            "\(accountTitle)（\(account.name)），\(sub2ApiAccountStatusText(account))，本地倍率 \(sub2ApiMultiplierText(account.localRateMultiplier))，上游倍率 \(sub2ApiUpstreamRateText(account.upstreamBilling))，余额 \(sub2ApiBalanceText(account.upstreamBalance))"
+            "\(accountTitle)（\(account.name)），\(sub2ApiAccountStatusText(account))，分组 \(sub2ApiGroupsAccessibilityText(sub2ApiAccountGroups(account)))，本地倍率 \(sub2ApiMultiplierText(account.localRateMultiplier))，上游倍率 \(sub2ApiUpstreamRateText(account.upstreamBilling))"
+            + (hidesBalance ? "" : "，余额 \(sub2ApiBalanceText(account.upstreamBalance))")
         )
     }
 }
@@ -1097,6 +1081,111 @@ private struct AccountPoolBalanceValue: View {
             .foregroundStyle(isUnlimited ? Color.secondary : tint)
             .lineLimit(1)
             .minimumScaleFactor(0.78)
+    }
+}
+
+/// 分组列统一排版：每个分组渲染为一枚轻量胶囊，一排放不下自动折行，
+/// 保证所有分组名完整可见；未分组的账号弱化为次要色的 "—"。
+private struct AccountPoolGroupsValue: View {
+    let groups: [String]
+
+    var body: some View {
+        Group {
+            if groups.isEmpty {
+                Text("—")
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+                    .help("未加入任何分组")
+            } else {
+                AccountPoolGroupChipFlow(spacing: 4) {
+                    ForEach(groups, id: \.self) { name in
+                        AccountPoolGroupChip(name: name)
+                    }
+                }
+                .help(sub2ApiGroupsHelp(groups))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("分组 \(sub2ApiGroupsAccessibilityText(groups))")
+    }
+}
+
+/// 单枚分组胶囊：视觉语言与状态胶囊同源（同字号、同透明度配方），
+/// 用中性次要色表达"元数据"而非"状态"。
+private struct AccountPoolGroupChip: View {
+    let name: String
+
+    var body: some View {
+        Text(name)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(Color.secondary)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Color.secondary.opacity(0.10), in: Capsule())
+            .overlay {
+                Capsule()
+                    .strokeBorder(Color.secondary.opacity(0.18), lineWidth: 0.5)
+            }
+    }
+}
+
+/// 分组胶囊的流式换行布局：一排放不下就折到下一排，
+/// 让所有分组都能完整展示而不互相挤压。
+private struct AccountPoolGroupChipFlow: Layout {
+    var spacing: CGFloat = 4
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        let maxWidth = proposal.width ?? subviews
+            .map { $0.sizeThatFits(.unspecified).width + spacing }
+            .reduce(0, +)
+            .rounded(.up)
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > maxWidth {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+        return CGSize(width: maxWidth, height: y + rowHeight)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > bounds.width {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            subview.place(
+                at: CGPoint(x: bounds.minX + x, y: bounds.minY + y),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(size)
+            )
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
     }
 }
 
@@ -1147,11 +1236,17 @@ func sub2ApiPoolSummary(
 }
 
 /// 余额按币种分别求和；无法读取余额或无限额度的账号不参与合计。
+/// 同一上游钱包只计一次，两种信号任一命中即视为共享：
+/// ① daemon 的 walletGroup——同一把 key 挂多个渠道（权威）；
+/// ② 同站点且余额完全一致——中转站常见"一个账号多把 key"，
+///    余额相同即同一钱包的重复读数（启发式）。
 func sub2ApiPoolBalanceSummaryText(
     _ accounts: [ManageSub2ApiAccountPoolResponse.Account]
 ) -> String {
     var totals: [String: Double] = [:]
     var units: [String] = []
+    var countedWallets: Set<Int> = []
+    var countedSiteBalances: Set<String> = []
     for account in accounts {
         let balance = account.upstreamBalance
         guard balance.state == "available",
@@ -1159,6 +1254,11 @@ func sub2ApiPoolBalanceSummaryText(
               let remaining = balance.remaining,
               remaining.isFinite
         else { continue }
+        let siteKey = account.siteUrl ?? "acct:\(account.id)"
+        let siteBalanceKey = "\(siteKey)|\(sub2ApiBalanceText(balance))"
+        let walletCounted = account.walletGroup.map { !countedWallets.insert($0).inserted }
+        let siteBalanceCounted = !countedSiteBalances.insert(siteBalanceKey).inserted
+        if walletCounted == true || siteBalanceCounted { continue }
         let unit = balance.unit?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .uppercased() ?? ""
@@ -1319,6 +1419,21 @@ private func sub2ApiAccountStatusText(
     case "cooldown": return "冷却中"
     default: return account.status.isEmpty ? "未知" : account.status
     }
+}
+
+/// 分组列的无障碍与汇总文案：空为 "未分组"，多个分组逐个念全。
+private func sub2ApiGroupsAccessibilityText(_ groups: [String]) -> String {
+    groups.isEmpty ? "未分组" : groups.joined(separator: "、")
+}
+
+private func sub2ApiGroupsHelp(_ groups: [String]) -> String {
+    groups.isEmpty ? "未加入任何分组" : "分组：" + groups.joined(separator: " · ")
+}
+
+private func sub2ApiAccountGroups(
+    _ account: ManageSub2ApiAccountPoolResponse.Account
+) -> [String] {
+    (account.groups ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 }
 
 private func sub2ApiAccountKindText(

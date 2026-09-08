@@ -2096,6 +2096,8 @@ final class AppModel: ObservableObject {
             name: account.name,
             siteUrl: account.siteUrl,
             siteName: account.siteName,
+            groups: account.groups,
+            walletGroup: account.walletGroup,
             platform: account.platform,
             accountType: account.accountType,
             status: account.status,

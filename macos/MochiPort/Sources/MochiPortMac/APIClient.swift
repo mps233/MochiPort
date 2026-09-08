@@ -578,6 +578,13 @@ struct ManageSub2ApiAccountPoolResponse: Decodable, Equatable, Sendable {
         /// The display name the upstream site reports for itself, when it
         /// exposes one and it is not a template default.
         let siteName: String?
+        /// Sub2API scheduling groups the account is attached to, by name.
+        /// Absent on daemons that predate the group column.
+        let groups: [String]?
+        /// Opaque per-snapshot index from the daemon: channels probing the
+        /// same upstream credential (same wallet) share one number, so shared
+        /// balances are only counted once. Nil when the wallet is unknown.
+        let walletGroup: Int?
         let platform: String
         let accountType: String
         let status: String

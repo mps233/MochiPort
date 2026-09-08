@@ -31,6 +31,9 @@ const MAX_ACCOUNTS: usize = 10_000;
 const MAX_ACCOUNT_PAGES: usize = 10;
 const USAGE_PAGE_SIZE: usize = 100;
 const MAX_USAGE_PAGES: usize = 10;
+// Group names are needed only for display; a group directory fetch that fails
+// leaves the affected accounts labeled by id instead of blocking the pool.
+const MAX_GROUP_NAMES: usize = 1_000;
 const PROBE_BATCH_SIZE: usize = 20;
 // Direct upstream balance probing (stock Sub2API has no batch usage probe).
 // The cache keeps the per-request fan-out infrequent; a successful probe is
@@ -101,6 +104,17 @@ pub struct AccountPoolAccount {
     /// expose one or only exposes a template default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub site_name: Option<String>,
+    /// Sub2API scheduling groups the account is attached to, by name. Empty
+    /// when the deployment exposes no group data for the account.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+    /// Opaque per-snapshot index identifying the upstream wallet: channels
+    /// whose backup-export credentials share the same (site root, API key)
+    /// get the same number, so the GUI can count a shared wallet once.
+    /// Carries no credential material. None when the wallet cannot be
+    /// identified (non-export probing or unmatched entries).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallet_group: Option<u32>,
     pub platform: String,
     pub account_type: String,
     pub status: String,
@@ -217,10 +231,25 @@ struct AdminAccount {
     #[serde(default = "default_true")]
     schedulable: bool,
     rate_multiplier: Option<f64>,
+    /// Sub2API scheduling groups the account is attached to. The non-lite
+    /// admin list embeds full group objects (id + name); keep only the name.
+    #[serde(default)]
+    groups: Vec<AdminAccountGroup>,
+    /// Older or lite deployments return bare group ids instead.
+    #[serde(default)]
+    group_ids: Vec<i64>,
     #[serde(default)]
     credentials: Value,
     #[serde(default)]
     extra: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AdminAccountGroup {
+    #[serde(default)]
+    id: i64,
+    #[serde(default)]
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -418,10 +447,12 @@ async fn fetch_account_pool_inner(
 
     // Balance probing and site-name discovery are independent fan-outs against
     // the same upstreams; run them together so a cold cache keeps the whole
-    // pool request inside the client-visible budget.
+    // pool request inside the client-visible budget. The probe also yields an
+    // opaque wallet grouping (export path only) for balance deduplication.
+    let group_names = resolve_group_names(client, base_url, admin_api_key, &accounts).await;
     let usage_probe = async {
         if api_key_ids.is_empty() {
-            Some(HashMap::new())
+            (Some(HashMap::new()), HashMap::new())
         } else {
             match fetch_probe_batches(
                 client,
@@ -432,7 +463,9 @@ async fn fetch_account_pool_inner(
             )
             .await
             {
-                Ok(results) => Some(probe_map(results)),
+                // Sub2API probes the upstreams itself here, so the daemon never
+                // sees the credentials and cannot tag shared wallets.
+                Ok(results) => (Some(probe_map(results)), HashMap::new()),
                 Err(Sub2ApiAccountPoolError::Unsupported) => {
                     // Stock Sub2API builds never expose the batch probe. Fall back
                     // to the official admin backup export: read upstream
@@ -441,29 +474,29 @@ async fn fetch_account_pool_inner(
                     match probe_balances_via_export(client, base_url, admin_api_key, &accounts)
                         .await
                     {
-                        Ok(results) => Some(results),
+                        Ok((results, wallet_groups)) => (Some(results), wallet_groups),
                         Err(Sub2ApiAccountPoolError::Unsupported) => {
                             warnings.push("balance_export_unavailable");
-                            None
+                            (None, HashMap::new())
                         }
                         Err(Sub2ApiAccountPoolError::Forbidden) => {
                             warnings.push("balance_export_forbidden");
-                            None
+                            (None, HashMap::new())
                         }
                         Err(_) => {
                             warnings.push("usage_probe_failed");
-                            Some(HashMap::new())
+                            (Some(HashMap::new()), HashMap::new())
                         }
                     }
                 }
                 Err(_) => {
                     warnings.push("usage_probe_failed");
-                    Some(HashMap::new())
+                    (Some(HashMap::new()), HashMap::new())
                 }
             }
         }
     };
-    let (usage_results, site_names) =
+    let ((usage_results, wallet_groups), site_names) =
         tokio::join!(usage_probe, probe_site_names(client, &accounts));
 
     let normalized = accounts
@@ -485,12 +518,15 @@ async fn fetch_account_pool_inner(
             let balance = usage_results
                 .as_ref()
                 .and_then(|results| results.get(&account.id));
+            let wallet_group = wallet_groups.get(&account.id).copied();
             normalize_account(
                 account,
                 billing.as_ref(),
                 balance,
                 usage_results.is_none(),
                 &site_names,
+                &group_names,
+                wallet_group,
             )
         })
         .collect();
@@ -550,6 +586,52 @@ async fn fetch_accounts(
         page += 1;
     }
     Ok(accounts)
+}
+
+/// Read the full admin group directory once (`GET /api/v1/admin/groups/all`)
+/// so accounts whose list response only carries group ids can still be
+/// labeled by group name. Any failure yields an empty map: the pool stays
+/// usable and the GUI falls back to "分组 <id>".
+async fn fetch_group_name_map(
+    client: &reqwest::Client,
+    base_url: &str,
+    admin_api_key: &str,
+) -> HashMap<i64, String> {
+    let root = provider_api_root(base_url);
+    let header = match sensitive_header(admin_api_key) {
+        Ok(header) => header,
+        Err(_) => return HashMap::new(),
+    };
+    let Ok(envelope) = send_json::<ApiEnvelope<Vec<AdminGroupEntry>>>(
+        client
+            .get(format!("{root}/api/v1/admin/groups/all"))
+            .header("x-api-key", header),
+    )
+    .await
+    else {
+        return HashMap::new();
+    };
+    if envelope.code != 0 {
+        return HashMap::new();
+    }
+    envelope
+        .data
+        .into_iter()
+        .filter(|group| group.id > 0)
+        .take(MAX_GROUP_NAMES)
+        .filter_map(|group| {
+            let name = group.name.trim();
+            (!name.is_empty()).then(|| (group.id, name.chars().take(256).collect()))
+        })
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminGroupEntry {
+    #[serde(default)]
+    id: i64,
+    #[serde(default)]
+    name: String,
 }
 
 async fn fetch_probe_batches(
@@ -717,18 +799,25 @@ fn cache_insert_balance(
 /// probed directly against each upstream. Credentials come from the official
 /// admin backup export and live only inside this call; results are cached per
 /// upstream root so the fan-out stays infrequent across pool refreshes.
+///
+/// Also returns an opaque wallet grouping: matched accounts whose export
+/// credentials share the same (root, API key) are one upstream wallet and get
+/// the same index, letting the GUI count that wallet once. The index is a
+/// per-snapshot ordinal and contains no credential material.
 async fn probe_balances_via_export(
     client: &reqwest::Client,
     base_url: &str,
     admin_api_key: &str,
     accounts: &[AdminAccount],
-) -> Result<HashMap<i64, ProbeResult>, Sub2ApiAccountPoolError> {
+) -> Result<(HashMap<i64, ProbeResult>, HashMap<i64, u32>), Sub2ApiAccountPoolError> {
     let root = provider_api_root(base_url);
     let export = fetch_credential_export(client, &root, admin_api_key).await?;
-    let mut credentials = match_upstream_credentials(&export, accounts);
+    let credentials = match_upstream_credentials(&export, accounts);
+    let wallet_groups = wallet_group_indexes(&credentials);
     let now_ms = unix_time_ms();
     let mut results = HashMap::new();
-    credentials.retain(
+    let mut pending = credentials;
+    pending.retain(
         |(id, credential)| match cached_balance(&credential.root, *id, now_ms) {
             Some(cached) => {
                 results.insert(*id, cached);
@@ -737,9 +826,9 @@ async fn probe_balances_via_export(
             None => true,
         },
     );
-    if !credentials.is_empty() {
+    if !pending.is_empty() {
         let live_ids: HashSet<i64> = accounts.iter().map(|account| account.id).collect();
-        let mut probes = futures_util::stream::iter(credentials)
+        let mut probes = futures_util::stream::iter(pending)
             .map(|(id, credential)| async move {
                 let snapshot = tokio::time::timeout(
                     UPSTREAM_PROBE_TIMEOUT,
@@ -770,7 +859,21 @@ async fn probe_balances_via_export(
         let mut cache = balance_cache().lock().expect("balance cache poisoned");
         cache.retain(|(cached_root, id), _| cached_root == &root && live_ids.contains(id));
     }
-    Ok(results)
+    Ok((results, wallet_groups))
+}
+
+/// Assign one ordinal per distinct (root, API key) pair across the matched
+/// credentials. Ordinals are arbitrary and valid only within one snapshot.
+fn wallet_group_indexes(credentials: &[(i64, UpstreamCredential)]) -> HashMap<i64, u32> {
+    let mut indexes: HashMap<(String, String), u32> = HashMap::new();
+    let mut groups = HashMap::new();
+    for (id, credential) in credentials {
+        let key = (credential.root.clone(), credential.api_key.clone());
+        let next = indexes.len() as u32;
+        let index = *indexes.entry(key).or_insert(next);
+        groups.insert(*id, index);
+    }
+    groups
 }
 
 async fn fetch_credential_export(
@@ -1313,6 +1416,8 @@ fn normalize_account(
     usage_result: Option<&ProbeResult>,
     usage_not_exposed: bool,
     site_names: &HashMap<String, String>,
+    group_names: &HashMap<i64, String>,
+    wallet_group: Option<u32>,
 ) -> AccountPoolAccount {
     let is_api_key = account.account_type.eq_ignore_ascii_case("apikey");
     let site_url = sanitized_site_url(&account.credentials);
@@ -1320,11 +1425,14 @@ fn normalize_account(
         .as_deref()
         .map(provider_api_root)
         .and_then(|root| site_names.get(&root).cloned());
+    let groups = account_group_names(&account, group_names);
     AccountPoolAccount {
         id: account.id,
         name: nonempty(account.name).unwrap_or_else(|| format!("账号 {}", account.id)),
         site_url,
         site_name,
+        groups,
+        wallet_group,
         platform: account.platform,
         account_type: account.account_type,
         status: account.status,
@@ -1335,6 +1443,61 @@ fn normalize_account(
         upstream_billing: normalize_billing(billing_result, is_api_key),
         upstream_balance: normalize_balance(usage_result, is_api_key, usage_not_exposed),
     }
+}
+
+/// Resolve group names for accounts whose list response only carries ids.
+/// The admin group directory is read once per pool refresh and only when some
+/// referenced id has no embedded name; a failed read leaves those ids labeled
+/// by number instead of failing the whole pool request.
+async fn resolve_group_names(
+    client: &reqwest::Client,
+    base_url: &str,
+    admin_api_key: &str,
+    accounts: &[AdminAccount],
+) -> HashMap<i64, String> {
+    let needs_lookup = accounts.iter().any(|account| {
+        account
+            .group_ids
+            .iter()
+            .any(|id| account.groups.iter().all(|group| group.id != *id))
+    });
+    if !needs_lookup {
+        return HashMap::new();
+    }
+    fetch_group_name_map(client, base_url, admin_api_key).await
+}
+
+/// Ordered, deduplicated group display names for one account: embedded group
+/// objects first, then bare ids resolved through the directory. An id whose
+/// name never resolves keeps a stable "分组 <id>" label so the GUI can still
+/// tell that the account is grouped.
+fn account_group_names(account: &AdminAccount, resolved: &HashMap<i64, String>) -> Vec<String> {
+    let mut ordered_ids: Vec<i64> = Vec::new();
+    for group in &account.groups {
+        if group.id > 0 && !ordered_ids.contains(&group.id) {
+            ordered_ids.push(group.id);
+        }
+    }
+    for id in &account.group_ids {
+        if *id > 0 && !ordered_ids.contains(id) {
+            ordered_ids.push(*id);
+        }
+    }
+    let mut names: Vec<String> = Vec::new();
+    for id in ordered_ids {
+        let embedded = account
+            .groups
+            .iter()
+            .find(|group| group.id == id)
+            .and_then(|group| nonempty(group.name.clone()));
+        let name = embedded
+            .or_else(|| resolved.get(&id).cloned())
+            .unwrap_or_else(|| format!("分组 {id}"));
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// Keep only a safe, stable URL for presentation/grouping. Sub2API redacts
@@ -1602,6 +1765,11 @@ mod tests {
             status: "active".to_string(),
             schedulable: true,
             rate_multiplier: Some(1.0),
+            groups: vec![AdminAccountGroup {
+                id: 3,
+                name: "claude-主力".to_string(),
+            }],
+            group_ids: vec![3, 9],
             credentials: serde_json::json!({
                 "base_url": "https://relay.example.test/v1/?tracking=removed",
             }),
@@ -1622,9 +1790,21 @@ mod tests {
             error: String::new(),
         };
 
-        let normalized = normalize_account(account, Some(&billing), None, true, &HashMap::new());
+        let mut resolved_groups = HashMap::new();
+        resolved_groups.insert(9_i64, "备用池".to_string());
+        let normalized = normalize_account(
+            account,
+            Some(&billing),
+            None,
+            true,
+            &HashMap::new(),
+            &resolved_groups,
+            Some(4),
+        );
 
         assert_eq!(normalized.local_rate_multiplier, Some(1.0));
+        assert_eq!(normalized.groups, vec!["claude-主力", "备用池"]);
+        assert_eq!(normalized.wallet_group, Some(4));
         assert_eq!(
             normalized.site_url.as_deref(),
             Some("https://relay.example.test/v1")
@@ -1638,6 +1818,82 @@ mod tests {
             Some(0.09)
         );
         assert_eq!(normalized.upstream_balance.state, "not_exposed");
+    }
+
+    #[test]
+    fn group_names_prefer_embedded_names_and_fall_back_to_directory_ids() {
+        let mut resolved_groups = HashMap::new();
+        resolved_groups.insert(5_i64, "目录分组".to_string());
+
+        // Bare group ids without an embedded name resolve through the directory;
+        // ids the directory cannot resolve keep a stable numeric label.
+        let id_only = AdminAccount {
+            id: 1,
+            name: "a".to_string(),
+            platform: "openai".to_string(),
+            account_type: "apikey".to_string(),
+            status: "active".to_string(),
+            schedulable: true,
+            rate_multiplier: None,
+            groups: vec![],
+            group_ids: vec![5, 11],
+            credentials: Value::Null,
+            extra: Value::Null,
+        };
+        assert_eq!(
+            account_group_names(&id_only, &resolved_groups),
+            vec!["目录分组".to_string(), "分组 11".to_string()]
+        );
+
+        // Embedded group objects win over the directory and dedupe against ids.
+        let embedded = AdminAccount {
+            id: 2,
+            name: "b".to_string(),
+            platform: "openai".to_string(),
+            account_type: "apikey".to_string(),
+            status: "active".to_string(),
+            schedulable: true,
+            rate_multiplier: None,
+            groups: vec![
+                AdminAccountGroup {
+                    id: 5,
+                    name: "内嵌分组".to_string(),
+                },
+                AdminAccountGroup {
+                    id: 0,
+                    name: "无效 id".to_string(),
+                },
+            ],
+            group_ids: vec![5, 5],
+            credentials: Value::Null,
+            extra: Value::Null,
+        };
+        assert_eq!(
+            account_group_names(&embedded, &resolved_groups),
+            vec!["内嵌分组".to_string()]
+        );
+
+        // An embedded group with an empty name still resolves by id.
+        let unnamed = AdminAccount {
+            id: 3,
+            name: "c".to_string(),
+            platform: "openai".to_string(),
+            account_type: "apikey".to_string(),
+            status: "active".to_string(),
+            schedulable: true,
+            rate_multiplier: None,
+            groups: vec![AdminAccountGroup {
+                id: 5,
+                name: "  ".to_string(),
+            }],
+            group_ids: vec![],
+            credentials: Value::Null,
+            extra: Value::Null,
+        };
+        assert_eq!(
+            account_group_names(&unnamed, &resolved_groups),
+            vec!["目录分组".to_string()]
+        );
     }
 
     #[test]
@@ -2079,6 +2335,8 @@ mod tests {
             status: "active".to_string(),
             schedulable: false,
             rate_multiplier: Some(1.0),
+            groups: vec![],
+            group_ids: vec![],
             credentials: serde_json::json!({
                 "base_url": "https://api.aixoras.com/v1",
             }),
@@ -2252,6 +2510,156 @@ mod tests {
                 .as_str(),
             format!("Bearer {UPSTREAM_KEY}")
         );
+    }
+
+    #[tokio::test]
+    async fn pool_accounts_tag_channels_sharing_one_upstream_wallet() {
+        const ADMIN_KEY: &str = "admin-key-must-not-leak";
+        let upstream = Router::new().route(
+            "/v1/usage",
+            get(|| async {
+                Json(serde_json::json!({
+                    "balance": 8.92,
+                    "isValid": true,
+                    "mode": "unrestricted",
+                    "planName": "sub",
+                    "unit": "USD",
+                }))
+            }),
+        );
+        let upstream_address = spawn_server(upstream).await;
+        let shared_base_url = format!("http://{upstream_address}/v1");
+        let accounts_base_url = shared_base_url.clone();
+
+        let sub2api = Router::new()
+            .route(
+                "/api/v1/admin/accounts",
+                get(move || {
+                    let accounts_base_url = accounts_base_url.clone();
+                    async move {
+                        Json(serde_json::json!({
+                            "code": 0,
+                            "message": "success",
+                            "data": { "items": [
+                                {
+                                    "id": 1,
+                                    "name": "稳定通道",
+                                    "platform": "openai",
+                                    "type": "apikey",
+                                    "status": "active",
+                                    "schedulable": true,
+                                    "credentials": { "base_url": accounts_base_url },
+                                    "extra": {},
+                                },
+                                {
+                                    "id": 2,
+                                    "name": "拉闸通道",
+                                    "platform": "openai",
+                                    "type": "apikey",
+                                    "status": "active",
+                                    "schedulable": true,
+                                    "credentials": { "base_url": accounts_base_url },
+                                    "extra": {},
+                                }
+                            ], "pages": 1 }
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/admin/accounts/data",
+                get(move || {
+                    let shared_base_url = shared_base_url.clone();
+                    async move {
+                        Json(serde_json::json!({
+                            "code": 0,
+                            "message": "success",
+                            "data": {
+                                "accounts": [
+                                    {
+                                        "name": "稳定通道",
+                                        "platform": "openai",
+                                        "type": "apikey",
+                                        "credentials": {
+                                            "api_key": "sk-shared-upstream-key",
+                                            "base_url": shared_base_url,
+                                        },
+                                    },
+                                    {
+                                        "name": "拉闸通道",
+                                        "platform": "openai",
+                                        "type": "apikey",
+                                        "credentials": {
+                                            "api_key": "sk-shared-upstream-key",
+                                            "base_url": shared_base_url,
+                                        },
+                                    }
+                                ],
+                            }
+                        }))
+                    }
+                }),
+            );
+        let address = spawn_server(sub2api).await;
+
+        let snapshot = fetch_account_pool(
+            &reqwest::Client::new(),
+            &format!("http://{address}"),
+            ADMIN_KEY,
+            false,
+        )
+        .await
+        .expect("account pool fetch");
+
+        // Both channels are the same upstream wallet: one ordinal, identical balance.
+        assert_eq!(
+            snapshot.accounts[0].wallet_group,
+            snapshot.accounts[1].wallet_group
+        );
+        assert!(snapshot.accounts[0].wallet_group.is_some());
+        assert_eq!(snapshot.accounts[0].upstream_balance.remaining, Some(8.92));
+        assert_eq!(snapshot.accounts[1].upstream_balance.remaining, Some(8.92));
+    }
+
+    #[test]
+    fn wallet_group_indexes_assign_one_ordinal_per_credential() {
+        let credentials = vec![
+            (
+                1_i64,
+                UpstreamCredential {
+                    api_key: "sk-a".to_string(),
+                    root: "https://one.test".to_string(),
+                },
+            ),
+            (
+                2_i64,
+                UpstreamCredential {
+                    api_key: "sk-a".to_string(),
+                    root: "https://one.test".to_string(),
+                },
+            ),
+            (
+                3_i64,
+                UpstreamCredential {
+                    api_key: "sk-b".to_string(),
+                    root: "https://one.test".to_string(),
+                },
+            ),
+            (
+                4_i64,
+                UpstreamCredential {
+                    api_key: "sk-a".to_string(),
+                    root: "https://two.test".to_string(),
+                },
+            ),
+        ];
+
+        let groups = wallet_group_indexes(&credentials);
+
+        assert_eq!(groups[&1], groups[&2]);
+        assert_ne!(groups[&1], groups[&3]);
+        assert_ne!(groups[&1], groups[&4]);
+        assert_eq!(groups.values().collect::<HashSet<_>>().len(), 3);
     }
 
     #[tokio::test]
@@ -2469,5 +2877,110 @@ mod tests {
         // The second site only reports the template default, so no name is
         // published and the GUI keeps labeling it by its domain.
         assert_eq!(snapshot.accounts[1].site_name, None);
+    }
+
+    #[tokio::test]
+    async fn pool_accounts_carry_group_names_with_directory_fallback() {
+        let app = Router::new()
+            .route(
+                "/api/v1/admin/accounts",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "code": 0,
+                        "message": "success",
+                        "data": { "items": [
+                            {
+                                "id": 1,
+                                "name": "embedded",
+                                "platform": "openai",
+                                "type": "apikey",
+                                "status": "active",
+                                "schedulable": true,
+                                "groups": [{ "id": 2, "name": "内嵌分组" }],
+                                "group_ids": [2]
+                            },
+                            {
+                                "id": 2,
+                                "name": "id-only",
+                                "platform": "openai",
+                                "type": "apikey",
+                                "status": "active",
+                                "schedulable": true,
+                                "group_ids": [7]
+                            },
+                            {
+                                "id": 3,
+                                "name": "ungrouped",
+                                "platform": "openai",
+                                "type": "apikey",
+                                "status": "active",
+                                "schedulable": true
+                            }
+                        ], "pages": 1 }
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/admin/groups/all",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "code": 0,
+                        "message": "success",
+                        "data": [{ "id": 7, "name": "目录分组" }]
+                    }))
+                }),
+            );
+        let address = spawn_server(app).await;
+
+        let snapshot = fetch_account_pool(
+            &reqwest::Client::new(),
+            &format!("http://{address}"),
+            "admin-key",
+            false,
+        )
+        .await
+        .expect("account pool fetch");
+
+        assert_eq!(snapshot.accounts[0].groups, vec!["内嵌分组".to_string()]);
+        assert_eq!(snapshot.accounts[1].groups, vec!["目录分组".to_string()]);
+        assert!(snapshot.accounts[2].groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pool_fetch_survives_a_missing_group_directory() {
+        let app = Router::new().route(
+            "/api/v1/admin/accounts",
+            get(|| async {
+                Json(serde_json::json!({
+                    "code": 0,
+                    "message": "success",
+                    "data": { "items": [
+                        {
+                            "id": 1,
+                            "name": "id-only",
+                            "platform": "openai",
+                            "type": "apikey",
+                            "status": "active",
+                            "schedulable": true,
+                            "group_ids": [7]
+                        }
+                    ], "pages": 1 }
+                }))
+            }),
+        );
+        let address = spawn_server(app).await;
+
+        let snapshot = fetch_account_pool(
+            &reqwest::Client::new(),
+            &format!("http://{address}"),
+            "admin-key",
+            false,
+        )
+        .await
+        .expect("account pool fetch without a group directory");
+
+        // The directory endpoint is absent (older deployments); the account
+        // keeps a stable numeric label instead of failing the whole pool.
+        assert_eq!(snapshot.accounts[0].groups, vec!["分组 7".to_string()]);
     }
 }

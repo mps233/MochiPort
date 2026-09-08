@@ -5203,6 +5203,8 @@ final class APIContractTests: XCTestCase {
                 name: "AtlasAPI",
                 siteUrl: "https://api.aixoras.com/v1",
                 siteName: nil,
+                groups: nil,
+                walletGroup: nil,
                 platform: "openai",
                 accountType: "apikey",
                 status: "active",
@@ -5439,6 +5441,115 @@ final class APIContractTests: XCTestCase {
         )
         let legacyPool = try JSONDecoder().decode(ManageSub2ApiAccountPoolResponse.self, from: legacy).pool
         XCTAssertNil(legacyPool.accounts.first?.siteName)
+    }
+
+    func testSub2ApiAccountPoolDecodesGroupNames() throws {
+        let grouped = Data(
+            #"{"ok":true,"pool":{"source":"sub2api_admin","fetchedAtMs":1786752000000,"accounts":[{"id":26,"name":"FastAI","siteUrl":"https://www.fastaitoken.com","siteName":"FastAI 模型","groups":["claude-主力","备用池"],"platform":"openai","accountType":"apikey","status":"active","schedulable":true,"upstreamBilling":{"state":"available","stale":false},"upstreamBalance":{"state":"not_exposed","unlimited":false}},{"id":27,"name":"ungrouped","platform":"openai","accountType":"apikey","status":"active","schedulable":true,"upstreamBilling":{"state":"not_exposed","stale":false},"upstreamBalance":{"state":"not_exposed","unlimited":false}}]}}"#.utf8
+        )
+        let pool = try JSONDecoder().decode(ManageSub2ApiAccountPoolResponse.self, from: grouped).pool
+        XCTAssertEqual(pool.accounts.first?.groups, ["claude-主力", "备用池"])
+        // 未分组账号由 daemon 省略字段；老版本 daemon 也按 nil 解码。
+        XCTAssertNil(pool.accounts.last?.groups)
+    }
+
+    func testSub2ApiAccountPoolDecodesWalletGroupAndSummaryCountsSharedWalletsOnce() throws {
+        let walletBalance = ManageSub2ApiAccountPoolResponse.Account.Balance(
+            state: "available",
+            remaining: 8.92,
+            unlimited: false,
+            unit: "USD",
+            mode: "unrestricted",
+            planName: "sub",
+            accountValid: true,
+            accountStatus: "active",
+            observedAt: nil
+        )
+        let soloBalance = ManageSub2ApiAccountPoolResponse.Account.Balance(
+            state: "available",
+            remaining: 1.00,
+            unlimited: false,
+            unit: "USD",
+            mode: nil,
+            planName: nil,
+            accountValid: true,
+            accountStatus: nil,
+            observedAt: nil
+        )
+        func makeChannel(
+            id: Int64,
+            name: String,
+            walletGroup: Int?,
+            balance: ManageSub2ApiAccountPoolResponse.Account.Balance,
+            siteUrl: String = "https://vip.mdkj.lol"
+        ) -> ManageSub2ApiAccountPoolResponse.Account {
+            ManageSub2ApiAccountPoolResponse.Account(
+                id: id,
+                name: name,
+                siteUrl: siteUrl,
+                siteName: nil,
+                groups: nil,
+                walletGroup: walletGroup,
+                platform: "openai",
+                accountType: "apikey",
+                status: "active",
+                schedulable: true,
+                localRateMultiplier: 1.0,
+                upstreamBilling: ManageSub2ApiAccountPoolResponse.Account.Billing(
+                    state: "not_exposed",
+                    resolvedRateMultiplier: nil,
+                    effectiveRateMultiplier: nil,
+                    observedAt: nil,
+                    freshUntil: nil,
+                    stale: false
+                ),
+                upstreamBalance: balance
+            )
+        }
+
+        // daemon 标记的 walletGroup 正常解码。
+        let tagged = Data(
+            #"{"ok":true,"pool":{"source":"sub2api_admin","fetchedAtMs":1786752000000,"accounts":[{"id":1,"name":"稳定通道","walletGroup":3,"platform":"openai","accountType":"apikey","status":"active","schedulable":true,"upstreamBilling":{"state":"not_exposed","stale":false},"upstreamBalance":{"state":"available","remaining":8.92,"unlimited":false,"unit":"USD"}}]}}"#.utf8
+        )
+        let pool = try JSONDecoder().decode(ManageSub2ApiAccountPoolResponse.self, from: tagged).pool
+        XCTAssertEqual(pool.accounts.first?.walletGroup, 3)
+
+        // 同一钱包挂三个渠道 + 一个独立钱包：合计只算 8.92 一次。
+        let accounts = [
+            makeChannel(id: 1, name: "稳定通道", walletGroup: 3, balance: walletBalance),
+            makeChannel(id: 2, name: "拉闸通道", walletGroup: 3, balance: walletBalance),
+            makeChannel(id: 3, name: "特惠通道", walletGroup: 3, balance: walletBalance),
+            makeChannel(id: 4, name: "独立渠道", walletGroup: nil, balance: soloBalance)
+        ]
+        XCTAssertEqual(sub2ApiPoolBalanceSummaryText(accounts), "$9.92")
+
+        // 同站点、余额一致、但 key 不同（中转站"一个账号多把 key"）：
+        // 同样视为同一钱包，只计一次。
+        let sameSiteDistinctKeys = [
+            makeChannel(id: 1, name: "稳定通道", walletGroup: 1, balance: walletBalance),
+            makeChannel(id: 2, name: "拉闸通道", walletGroup: 2, balance: walletBalance),
+            makeChannel(id: 3, name: "特惠通道", walletGroup: 3, balance: walletBalance)
+        ]
+        XCTAssertEqual(sub2ApiPoolBalanceSummaryText(sameSiteDistinctKeys), "$8.92")
+
+        // daemon 无法识别钱包归属（nil）时，同站点同余额按同一钱包去重，
+        // 不同站点则分别累计。
+        let legacySameSite = [
+            makeChannel(id: 1, name: "稳定通道", walletGroup: nil, balance: walletBalance),
+            makeChannel(id: 2, name: "拉闸通道", walletGroup: nil, balance: walletBalance)
+        ]
+        XCTAssertEqual(sub2ApiPoolBalanceSummaryText(legacySameSite), "$8.92")
+        let legacyDistinctSites = [
+            makeChannel(id: 1, name: "稳定通道", walletGroup: nil, balance: walletBalance),
+            makeChannel(
+                id: 2,
+                name: "拉闸通道",
+                walletGroup: nil,
+                balance: walletBalance,
+                siteUrl: "https://api.wanfeng.me/v1"
+            )
+        ]
+        XCTAssertEqual(sub2ApiPoolBalanceSummaryText(legacyDistinctSites), "$17.84")
     }
 
     func testProviderRecentAccountUsesExpectedProtectedRoute() async throws {
