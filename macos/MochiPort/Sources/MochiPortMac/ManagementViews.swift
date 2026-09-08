@@ -2271,6 +2271,7 @@ private struct GatewayProviderEditor: View {
     @State private var timeoutSecs: Int
     @State private var apiKey = ""
     @State private var clearAPIKey = false
+    @State private var advancedSettingsExpanded = false
     @State private var saving = false
     @State private var aliasEntries: [ModelAliasEntry]
     @State private var templates: [ManageProviderTemplate] = []
@@ -2363,76 +2364,53 @@ private struct GatewayProviderEditor: View {
                             Text(template.displayName).tag(template.id)
                         }
                     }
+                    .help("选择常用服务商后，地址和协议会自动填好，只需粘贴 API Key。")
                     .accessibilityLabel("选择服务商模板")
                     .onChange(of: selectedTemplateID) { _, id in
-                        guard let template = templates.first(where: { $0.id == id }) else { return }
+                        guard let template = templates.first(where: { $0.id == id }) else {
+                            // 「自定义」没有模板可套，展开高级设置让用户直接填协议等字段。
+                            if id.isEmpty { advancedSettingsExpanded = true }
+                            return
+                        }
                         applyTemplate(template)
                     }
                 }
                 TextField("名称", text: $name)
+                    .help("这个服务在 MochiPort 里显示的名字。")
                 Toggle("启用", isOn: $enabled)
-                Picker("协议", selection: $providerType) {
-                    ForEach(providerTypes, id: \.self) { type in
-                        Text(gatewayProtocolDisplayName(type, compatibility: nil)).tag(type)
-                    }
-                }
-                TextField("兼容配置（可选）", text: $compatibility)
                 TextField("Base URL", text: $baseURL)
-                TextField("Models URL（可选）", text: $modelsURL)
+                    .help("服务商的接口地址（以 https:// 开头），可在服务商的控制台或文档里找到。")
                 SecureField(
                     state.provider?.secretSet == true ? "API Key（已设置）" : "API Key",
                     text: $apiKey
                 )
                 .disabled(clearAPIKey)
+                .help("服务商提供的密钥，粘贴一次即可；保存后界面不再显示。")
                 if state.provider?.secretSet == true {
                     Toggle("清除已保存的 API Key", isOn: $clearAPIKey)
                 }
                 if state.provider != nil {
                     providerUsageSection
                 }
-                TextField("Prompt Cache Retention（可选）", text: $promptCacheRetention)
-                Stepper("权重：\(weight)", value: $weight, in: 1...10_000)
-                Stepper("超时：\(timeoutSecs) 秒", value: $timeoutSecs, in: 1...3_600)
                 modelDiscoverySection
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("模型映射（对外别名 → 上游模型）")
-                    Text("Codex 侧使用别名调用时，网关会替换为对应的上游模型标识。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("检测到 Claude 系列模型时会自动补充对应的 Codex 别名，手动映射优先。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    ForEach($aliasEntries) { $entry in
-                        HStack(spacing: 8) {
-                            TextField("对外别名", text: $entry.alias)
-                                .textFieldStyle(.roundedBorder)
-                            Image(systemName: "arrow.right")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            TextField("上游模型", text: $entry.target)
-                                .textFieldStyle(.roundedBorder)
-                            Button {
-                                aliasEntries.removeAll { $0.id == entry.id }
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.red)
-                            .help("删除映射")
-                            .accessibilityLabel("删除映射 \(entry.alias)")
+                DisclosureGroup("高级设置", isExpanded: $advancedSettingsExpanded) {
+                    Picker("协议", selection: $providerType) {
+                        ForEach(providerTypes, id: \.self) { type in
+                            Text(gatewayProtocolDisplayName(type, compatibility: nil)).tag(type)
                         }
                     }
-                    if hasDuplicateAliases {
-                        Text("存在重复的对外别名，请先去重再保存。")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-                    Button {
-                        aliasEntries.append(ModelAliasEntry(alias: "", target: ""))
-                    } label: {
-                        Label("添加映射", systemImage: "plus")
-                    }
-                    .accessibilityLabel("添加模型映射")
+                    .help("决定网关如何与该服务商通信；使用模板时会自动选好，不确定时保持默认。")
+                    TextField("兼容配置（可选）", text: $compatibility)
+                        .help("个别服务商需要填写兼容模式（例如 glm_anthropic）；没有特殊要求时留空。")
+                    TextField("Models URL（可选）", text: $modelsURL)
+                        .help("模型列表的接口地址；留空时会从 Base URL 推断。")
+                    TextField("Prompt Cache Retention（可选）", text: $promptCacheRetention)
+                        .help("上游提示词缓存的保留设置；留空使用服务商默认。")
+                    Stepper("权重：\(weight)", value: $weight, in: 1...10_000)
+                        .help("多个服务同时启用时，权重越高越优先被使用。")
+                    Stepper("超时：\(timeoutSecs) 秒", value: $timeoutSecs, in: 1...3_600)
+                        .help("单次请求允许的最长等待时间。")
+                    modelAliasSection
                 }
             }
             .formStyle(.grouped)
@@ -2440,13 +2418,16 @@ private struct GatewayProviderEditor: View {
 
             Divider()
 
+            if let error = model.managementOperationError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 16)
+                    .help(error)
+            }
+
             HStack {
-                if let error = model.managementOperationError {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .lineLimit(2)
-                }
                 Spacer()
                 Button("取消", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -2466,6 +2447,15 @@ private struct GatewayProviderEditor: View {
         }
         .frame(minWidth: 700, idealWidth: 760, minHeight: 700, idealHeight: 760)
         .task {
+            // 编辑已有服务时，高级字段里已保存的自定义值不能被折叠藏住。
+            if let provider = state.provider {
+                advancedSettingsExpanded = !(provider.compatibility ?? "").isEmpty
+                    || !(provider.modelsUrl ?? "").isEmpty
+                    || !(provider.promptCacheRetention ?? "").isEmpty
+                    || provider.weight != 100
+                    || provider.timeoutSecs != 600
+                    || !(provider.modelAliases ?? [:]).isEmpty
+            }
             // Templates only make sense when creating a provider; failures
             // (including older daemons without the endpoint) silently keep
             // the plain form.
@@ -2494,6 +2484,50 @@ private struct GatewayProviderEditor: View {
 
     private var canFetchProviderUsage: Bool {
         state.provider?.secretSet == true && !clearAPIKey && !fetchingProviderUsage
+    }
+
+    /// 高级折叠里的模型映射；编辑已有服务时已填的映射不能被折叠藏住。
+    private var modelAliasSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("模型映射（对外别名 → 上游模型）")
+            Text("Codex 侧使用别名调用时，网关会替换为对应的上游模型标识。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("检测到 Claude 系列模型时会自动补充对应的 Codex 别名，手动映射优先。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach($aliasEntries) { $entry in
+                HStack(spacing: 8) {
+                    TextField("对外别名", text: $entry.alias)
+                        .textFieldStyle(.roundedBorder)
+                    Image(systemName: "arrow.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("上游模型", text: $entry.target)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        aliasEntries.removeAll { $0.id == entry.id }
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.red)
+                    .help("删除映射")
+                    .accessibilityLabel("删除映射 \(entry.alias)")
+                }
+            }
+            if hasDuplicateAliases {
+                Text("存在重复的对外别名，请先去重再保存。")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            Button {
+                aliasEntries.append(ModelAliasEntry(alias: "", target: ""))
+            } label: {
+                Label("添加映射", systemImage: "plus")
+            }
+            .accessibilityLabel("添加模型映射")
+        }
     }
 
     @ViewBuilder
