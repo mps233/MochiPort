@@ -47,6 +47,10 @@ public final class DailyStatsStore {
     // Swift 6 nonisolated deinitializer.
     nonisolated(unsafe) private var db: OpaquePointer?
     private var databasePath: String?
+    /// Bumped on every successful write. Views cache the expensive daily
+    /// aggregates against this value so a re-render does not re-run the
+    /// SQLite query unless the underlying rows actually changed.
+    public private(set) var revision: Int = 0
     // v4 switches Codex daily buckets from UTC to the user's local calendar
     // day. Existing rows must be rebuilt from raw logs rather than mixed with
     // the new boundary.
@@ -441,6 +445,7 @@ public final class DailyStatsStore {
             sqlite3_reset(stmt)
         }
         sqlite3_exec(db, "COMMIT", nil, nil, nil)
+        revision &+= 1
     }
 
     /// Replace every Codex row after a verified complete scan of the raw
@@ -513,6 +518,7 @@ public final class DailyStatsStore {
             return false
         }
         needsCodexRebuild = false
+        revision &+= 1
         return true
     }
 

@@ -171,6 +171,35 @@ final class APIContractTests: XCTestCase {
     }
 
     @MainActor
+    func testDailyStatsRevisionAdvancesOnlyOnWrites() throws {
+        // The dashboard caches its trend aggregates against `revision`, so a
+        // write must bump it and a read must not. If reads bumped it the cache
+        // would never hit; if writes did not, the chart would go stale.
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-revision-\(UUID().uuidString).db").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let stats = try XCTUnwrap(DailyStatsStore(path: path))
+        let now = Date()
+
+        let initial = stats.revision
+        _ = stats.dailyTotalsByService(days: 7, now: now, calendar: .utc)
+        XCTAssertEqual(stats.revision, initial, "a read must not invalidate the cache")
+
+        stats.upsert(events: [
+            TokenEvent(service: .codex, timestamp: now, model: "gpt-codex",
+                       inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+                       cacheCreationTokens: 0, source: "ai-gateway",
+                       reportedTotalTokens: 2)
+        ], calendar: .utc)
+        XCTAssertGreaterThan(stats.revision, initial, "a write must invalidate the cache")
+
+        // An empty batch returns early and changes nothing.
+        let afterWrite = stats.revision
+        stats.upsert(events: [], calendar: .utc)
+        XCTAssertEqual(stats.revision, afterWrite)
+    }
+
+    @MainActor
     func testDailyStatsMigratesLegacyRowsToTheDefaultSource() throws {
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent("aiglass-legacy-stats-\(UUID().uuidString).db").path

@@ -831,13 +831,58 @@ private struct UsageTrendContent: View {
     /// 从 0.0 增长到 1.0，只乘在 BarMark 的 y 值上。
     /// 轴/刻度/布局固定为最终数据，不随动画移动。
     @State private var growFactor: Double = 0
+    /// `rawData` 的缓存。这个视图的 body 会被周围任意状态变化带动重算
+    /// （菜单栏内容观察多个轮询对象），而 `rawData` 每次都要查一次 SQLite 并
+    /// 解析日期。键取廉价的变化信号，命中时直接复用上次的聚合结果。
+    ///
+    /// 用引用类型而非 `@State` 值：写入缓存不能反过来触发一次渲染，
+    /// 否则每次未命中都要多跑一轮 body。
+    @State private var rawDataCache = RawDataCache()
+
+    /// 决定 `rawData` 何时必须重算的廉价信号。全部取自已有属性的读取，
+    /// 不触发额外查询；任一变化都意味着聚合结果可能过期。
+    private struct RawDataCacheKey: Equatable {
+        let range: UsageTrendRange
+        let eventCount: Int
+        let lastEventTimestamp: Date?
+        let statsRevision: Int
+        let dayStart: Date
+    }
 
     private let enabled: [ServiceID] = [.codex]
+
+    private var rawDataCacheKey: RawDataCacheKey {
+        RawDataCacheKey(
+            range: range,
+            eventCount: store.events.count,
+            lastEventTimestamp: store.events.last?.timestamp,
+            statsRevision: statsStore?.revision ?? 0,
+            dayStart: Calendar.current.startOfDay(for: Date())
+        )
+    }
 
     /// The seven-day view follows local natural days from the recent event tail.
     /// This keeps events after local midnight visible immediately, even though
     /// the long-term SQLite archive is still bucketed by UTC day.
     private var rawData: [(day: Date, service: ServiceID, tokens: Int)] {
+        let key = rawDataCacheKey
+        if let cached = rawDataCache.rows, rawDataCache.key == key {
+            return cached
+        }
+        let rows = computeRawData()
+        rawDataCache.key = key
+        rawDataCache.rows = rows
+        return rows
+    }
+
+    /// Plain reference box: mutating it must not invalidate the view.
+    @MainActor
+    private final class RawDataCache {
+        var key: RawDataCacheKey?
+        var rows: [(day: Date, service: ServiceID, tokens: Int)]?
+    }
+
+    private func computeRawData() -> [(day: Date, service: ServiceID, tokens: Int)] {
         let now = Date()
         let days = range == .week ? 7 : 30
         if range == .week {

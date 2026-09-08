@@ -210,36 +210,48 @@ public struct TokenCompanionAnimator: View {
     }
 
     public var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-            let now = context.date
-            let elapsed = max(0, now.timeIntervalSince(animationStart))
-            let reactionElapsed = max(0, now.timeIntervalSince(reactionStart))
-            let state = displayedState
-            let move = motion(
-                for: state,
-                elapsed: elapsed,
-                reactionElapsed: reactionElapsed,
-                reduceMotion: reduceMotion
-            )
-
-            ZStack {
-                Group {
-                    ThreadBlobBody(wobble: move.wobble, squish: move.squish)
-                        .fill(bodyFill(for: state, colorScheme: colorScheme))
-                        .frame(width: 76, height: 58)
-
-                    ThreadBlobFace(
-                        eyeOffsetX: move.eyeOffsetX,
-                        eyeScaleY: move.eyeScaleY,
-                        colorScheme: colorScheme
+        // The mascot must not force its host view tree to re-evaluate: this
+        // view sits inside the menu-bar dashboard next to the usage chart, and
+        // a `TimelineView` that rebuilds sibling SwiftUI views every frame cost
+        // ~7 points of CPU. Draw into a single `Canvas` so the per-frame work
+        // stays inside this view's own drawing closure.
+        Group {
+            if reduceMotion {
+                // No animation is visible anyway; a static frame avoids the
+                // 30fps redraw entirely for reduce-motion users.
+                Canvas { context, size in
+                    drawCompanion(
+                        context: &context,
+                        size: size,
+                        move: motion(
+                            for: displayedState,
+                            elapsed: 0,
+                            reactionElapsed: 0,
+                            reduceMotion: true
+                        )
                     )
                 }
-                .scaleEffect(x: move.scaleX, y: move.scaleY, anchor: .bottom)
-                .rotationEffect(.degrees(move.rotation), anchor: .bottom)
-                .offset(x: move.offsetX, y: move.offsetY)
+            } else {
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+                    let now = context.date
+                    let elapsed = max(0, now.timeIntervalSince(animationStart))
+                    let reactionElapsed = max(0, now.timeIntervalSince(reactionStart))
+                    Canvas { canvas, size in
+                        drawCompanion(
+                            context: &canvas,
+                            size: size,
+                            move: motion(
+                                for: displayedState,
+                                elapsed: elapsed,
+                                reactionElapsed: reactionElapsed,
+                                reduceMotion: false
+                            )
+                        )
+                    }
+                }
             }
-            .frame(width: 76, height: 58)
         }
+        .frame(width: 76, height: 58)
         .onAppear {
             let now = Date()
             animationStart = now
@@ -253,57 +265,74 @@ public struct TokenCompanionAnimator: View {
         .accessibilityHidden(true)
     }
 
+    /// Draw one mascot frame at the current motion offsets.
+    ///
+    /// `Canvas` resolves the shape and the face from the same `size`, so the
+    /// body and eyes stay aligned exactly as the previous view hierarchy did.
+    private func drawCompanion(
+        context: inout GraphicsContext,
+        size: CGSize,
+        move: ThreadBlobMotion
+    ) {
+        let ink = colorScheme == .light
+            ? Theme.mascotLightInk
+            : Color(red: 0.306, green: 0.306, blue: 0.306)
+        let frame = CGRect(origin: .zero, size: size)
+
+        context.drawLayer { layer in
+            // The previous modifiers used `.bottom` as the scale/rotation
+            // anchor, so the body pivots on its base rather than its centre.
+            let anchor = CGPoint(x: size.width / 2, y: size.height)
+            layer.translateBy(x: anchor.x + move.offsetX, y: anchor.y + move.offsetY)
+            layer.scaleBy(x: move.scaleX, y: move.scaleY)
+            layer.rotate(by: .degrees(move.rotation))
+            layer.translateBy(x: -anchor.x, y: -anchor.y)
+
+            // Body.
+            let body = ThreadBlobBody(wobble: move.wobble, squish: move.squish)
+                .path(in: frame)
+            layer.fill(body, with: .linearGradient(
+                Gradient(colors: fillColors(for: displayedState, colorScheme: colorScheme)),
+                startPoint: CGPoint(x: frame.minX, y: frame.minY),
+                endPoint: CGPoint(x: frame.maxX, y: frame.maxY)
+            ))
+
+            // Face: two capsules whose size morphs as the eyes close.
+            // The previous HStack used `spacing = eyeCenterDistance * 2 - eyeWidth`,
+            // so each eye centre sits at ±eyeCenterDistance from the middle.
+            let bodyWidth: CGFloat = 62.5
+            let bodyHeight: CGFloat = 39.18
+            let closed = min(max(move.eyeScaleY, 0), 1)
+            let openEyeWidth = bodyWidth * (8.5 / 268)
+            let openEyeHeight = bodyHeight * (46 / 168)
+            let closedEyeWidth = bodyWidth * (20.5 / 268)
+            let closedEyeHeight = bodyHeight * (5.6 / 168)
+            let eyeWidth = openEyeWidth + (closedEyeWidth - openEyeWidth) * closed
+            let eyeHeight = openEyeHeight + (closedEyeHeight - openEyeHeight) * closed
+            let eyeY = size.height / 2 - bodyHeight * (32 / 168)
+                + bodyHeight * (7.5 / 168) * closed
+            let eyeCenterDistance = bodyWidth * (20.5 / 268)
+            let eyeOffset = move.eyeOffsetX
+            for sign in [CGFloat(-1), CGFloat(1)] {
+                let centerX = size.width / 2 + eyeOffset + sign * eyeCenterDistance
+                let rect = CGRect(
+                    x: centerX - eyeWidth / 2,
+                    y: eyeY - eyeHeight / 2,
+                    width: eyeWidth,
+                    height: eyeHeight
+                )
+                layer.fill(Path(roundedRect: rect, cornerRadius: min(eyeWidth, eyeHeight) / 2), with: .color(ink))
+            }
+        }
+    }
+
     // Kept for source compatibility with the old generated view.
     public mutating func setState(_ state: TokenCompanionState) {
         internalState = state
     }
 }
 
-private struct ThreadBlobFace: View {
-    let eyeOffsetX: CGFloat
-    let eyeScaleY: CGFloat
-    let colorScheme: ColorScheme
-
-    private var ink: Color {
-        colorScheme == .light
-            ? Theme.mascotLightInk
-            : Color(red: 0.306, green: 0.306, blue: 0.306)
-    }
-
-    // Exact relative measurements of the CodePen's outer 268 x 168 dango.
-    private let bodyWidth: CGFloat = 62.5
-    private let bodyHeight: CGFloat = 39.18
-
-    private var closedAmount: CGFloat {
-        min(max(eyeScaleY, 0), 1)
-    }
-
-    var body: some View {
-        ZStack {
-            let openEyeWidth = bodyWidth * (8.5 / 268)
-            let openEyeHeight = bodyHeight * (46 / 168)
-            let closedEyeWidth = bodyWidth * (20.5 / 268)
-            let closedEyeHeight = bodyHeight * (5.6 / 168)
-            let eyeWidth = openEyeWidth + (closedEyeWidth - openEyeWidth) * closedAmount
-            let eyeHeight = openEyeHeight + (closedEyeHeight - openEyeHeight) * closedAmount
-            let eyeY = -bodyHeight * (32 / 168) + bodyHeight * (7.5 / 168) * closedAmount
-            let eyeCenterDistance = bodyWidth * (20.5 / 268)
-
-            HStack(spacing: eyeCenterDistance * 2 - eyeWidth) {
-                Capsule()
-                    .fill(ink)
-                    .frame(width: eyeWidth, height: eyeHeight)
-                Capsule()
-                    .fill(ink)
-                    .frame(width: eyeWidth, height: eyeHeight)
-            }
-            .offset(x: eyeOffsetX, y: eyeY)
-        }
-        .frame(width: 76, height: 58)
-    }
-}
-
-private func bodyFill(for state: TokenCompanionState, colorScheme: ColorScheme) -> LinearGradient {
+private func fillColors(for state: TokenCompanionState, colorScheme: ColorScheme) -> [Color] {
     let top: Color
     let bottom: Color
 
@@ -324,11 +353,7 @@ private func bodyFill(for state: TokenCompanionState, colorScheme: ColorScheme) 
         }
     }
 
-    return LinearGradient(
-        colors: [top, bottom],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
+    return [top, bottom]
 }
 
 #if DEBUG
