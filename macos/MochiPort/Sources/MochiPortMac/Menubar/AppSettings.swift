@@ -136,7 +136,10 @@ final class AppSettings {
     var notifyBriefing: Bool {
         didSet { defaults.set(notifyBriefing, forKey: Key.notifyBriefing) }
     }
-    /// 活动通知——新版本发布。默认开。
+    /// 检测并通知新版本。默认开。
+    ///
+    /// Gates the whole check, not just the banner: with it off the app makes no
+    /// network request to the release endpoint at all.
     var notifyUpdate: Bool {
         didSet { defaults.set(notifyUpdate, forKey: Key.notifyUpdate) }
     }

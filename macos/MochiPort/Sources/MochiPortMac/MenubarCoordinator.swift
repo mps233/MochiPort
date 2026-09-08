@@ -70,6 +70,19 @@ final class MenubarCoordinator: ObservableObject {
         }
     }
 
+    /// Fetch the latest release and, if it is newer, surface it.
+    ///
+    /// The settings toggle gates the whole check, not just the notification:
+    /// with it off the app makes no network request for updates at all.
+    func checkForUpdates() async {
+        guard settings.notifyUpdate else { return }
+        guard let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              let release = await ReleaseChecker.fetchLatest(),
+              ReleaseChecker.isNewer(release.version, than: current) else { return }
+        updateState.available = release
+        notifier.notify(title: "MochiPort 有新版本", subtitle: "v\(release.version)")
+    }
+
     func refresh() {
         if !codexCollector.hasHydratedRecentHistory {
             if recentHydrationTask == nil,
@@ -166,10 +179,14 @@ final class MenubarCoordinator: ObservableObject {
             reportProvider: { [store] service in
                 store.sessionSummary(service: service, from: now.addingTimeInterval(-5 * 3600), to: now)
             })
-        guard let event = events.first(where: eventKindEnabled) else { return }
-        record(event)
-        if settings.notificationsEnabled { notifier.notify(title: event.title, subtitle: event.subtitle) }
-        if settings.funSoundEnabled { SoundPlayer.play() }
+        // Every enabled event in this pass is delivered. One evaluation can
+        // produce several (for example a threshold crossing and a burn spike in
+        // the same tick); taking only the first silently dropped the rest.
+        for event in events where eventKindEnabled(event) {
+            record(event)
+            if settings.notificationsEnabled { notifier.notify(title: event.title, subtitle: event.subtitle) }
+            if settings.funSoundEnabled { SoundPlayer.play() }
+        }
     }
 
     private func depletionMap(now: Date) -> [ServiceID: [Depletion]] {
@@ -323,14 +340,6 @@ final class MenubarCoordinator: ObservableObject {
     private func record(_ event: HUDEvent) {
         eventLog.append(event)
         objectWillChange.send()
-    }
-
-    func checkForUpdates() async {
-        guard let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-              let release = await ReleaseChecker.fetchLatest(),
-              ReleaseChecker.isNewer(release.version, than: current) else { return }
-        updateState.available = release
-        if settings.notifyUpdate { notifier.notify(title: "MochiPort 有新版本", subtitle: "v\(release.version)") }
     }
 
     private static func homePath(_ suffix: String) -> URL {

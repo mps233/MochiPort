@@ -146,6 +146,41 @@ final class APIContractTests: XCTestCase {
     }
 
     @MainActor
+    func testEventEngineEmitsEveryTriggeredEventInOnePass() {
+        // A single evaluation can cross a threshold and spike at once. The
+        // coordinator must deliver both: taking only the first (the previous
+        // `first(where:)`) silently dropped the rest.
+        let engine = EventEngine()
+        engine.thresholds = [70, 90]
+        engine.spikeMultiplier = 2.0
+        let now = Date()
+
+        // Seed the engine below both thresholds so the next pass can cross one.
+        _ = engine.evaluate(
+            limits: [.codex: [LimitWindow(kind: .session5h, usedPercent: 60, resetsAt: nil)]],
+            burnRate: 0, baseline: 0, now: now
+        )
+
+        // 60% -> 95% crosses the 90% threshold; the burn rate is 10x baseline,
+        // so the spike rule fires in the same pass.
+        let events = engine.evaluate(
+            limits: [.codex: [LimitWindow(kind: .session5h, usedPercent: 95, resetsAt: nil)]],
+            burnRate: 10_000,
+            baseline: 1_000,
+            now: now.addingTimeInterval(1)
+        )
+        let kinds = events.map(\.kind)
+        XCTAssertGreaterThanOrEqual(
+            events.count, 2,
+            "a spike alongside a threshold crossing must produce more than one event, got \(kinds)"
+        )
+        XCTAssertTrue(kinds.contains { if case .limitThreshold = $0 { true } else { false } },
+                      "expected a threshold event in \(kinds)")
+        XCTAssertTrue(kinds.contains { if case .burnSpike = $0 { true } else { false } },
+                      "expected a burn-spike event in \(kinds)")
+    }
+
+    @MainActor
     func testDailyStatsSeparatesProvidersAndPersistsReportedTotalsForTrends() throws {
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent("aiglass-stats-\(UUID().uuidString).db").path
