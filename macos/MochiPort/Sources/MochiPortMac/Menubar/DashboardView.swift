@@ -149,8 +149,8 @@ private struct OverviewTab: View {
                          format: { formatTokens(Int($0)) }, label: "今日请求 Token")
                 StatCard(value: metrics.todayCost,
                          format: metrics.formatCost, label: "今日成本")
-                StatCard(value: metrics.tokensPerMinute,
-                         format: { formatTokens(Int($0)) }, label: "当前请求 Token/分钟")
+                StatCard(value: metrics.tokensPerSecond,
+                         format: formatTokenRate, label: "当前请求 Token/秒")
             }
         }
     }
@@ -198,11 +198,25 @@ private func formatTokens(_ n: Int) -> String {
     }
 }
 
+/// 每秒速率：数值通常只有个位到几百，保留一位小数才看得出变化，
+/// 不能用 `formatTokens`（它对小数会截断成 0）。
+private func formatTokenRate(_ value: Double) -> String {
+    guard value.isFinite else { return "0" }
+    let v = max(0, value)
+    switch v {
+    case 1_000_000...: return String(format: "%.1fM", v / 1_000_000)
+    case 1_000...: return String(format: "%.1fK", v / 1_000)
+    case 100...: return String(format: "%.0f", v)
+    default: return String(format: "%.1f", v)
+    }
+}
+
 @MainActor
 private struct UsageMetricSnapshot {
     let todayTokens: Double
     let todayCost: Double
-    let tokensPerMinute: Double
+    /// 近 3 分钟的平均吞吐，单位 token/秒。
+    let tokensPerSecond: Double
 
     init(
         store: UsageStore,
@@ -216,9 +230,10 @@ private struct UsageMetricSnapshot {
             services.contains($0.service) && $0.timestamp >= start
         }
         var todayTokensValue = Double(events.reduce(0) { $0 + $1.requestTokens })
-        tokensPerMinute = services.reduce(0) {
+        // store 的度量是 token/分钟，除以 60 得到每秒。
+        tokensPerSecond = services.reduce(0) {
             $0 + store.tokensPerMinute(service: $1, windowMinutes: 3, now: now)
-        }
+        } / 60
 
         // Match ai-token-monitor: today's cost is always the API-equivalent
         // Codex estimate derived from local per-turn usage. Provider actual
@@ -742,9 +757,9 @@ struct OverviewUsageInsightsView: View {
                 emphasis: .standard
             )
             OverviewUsageMetricCard(
-                value: metrics.tokensPerMinute,
-                format: { "\(formatTokens(Int($0)))/m" },
-                label: "当前请求 Token/分钟",
+                value: metrics.tokensPerSecond,
+                format: { "\(formatTokenRate($0))/s" },
+                label: "当前请求 Token/秒",
                 emphasis: .standard
             )
         }

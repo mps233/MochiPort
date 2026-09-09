@@ -498,7 +498,8 @@ private struct MenuBarStatusLabel: View {
         case .todayTokens:
             return formatTokens(menubar.store.todayTokens(now: now))
         case .burnRate:
-            return formatRate(menubar.store.tokensPerMinute(windowMinutes: 3, now: now)) + "/m"
+            // store 的度量是 token/分钟，除以 60 得到每秒。
+            return formatRate(menubar.store.tokensPerMinute(windowMinutes: 3, now: now) / 60) + "/s"
         case .usagePercent:
             return Theme.formatUsagePercent(menubar.store.maxUsedPercent)
         case .resetCountdown:
@@ -506,11 +507,15 @@ private struct MenuBarStatusLabel: View {
         }
     }
 
+    /// 每秒速率：数值通常很小，保留一位小数才看得出变化。
     private func formatRate(_ value: Double) -> String {
-        switch value {
-        case 1_000_000...: return String(format: "%.1fM", value / 1_000_000)
-        case 1_000...: return String(format: "%.0fK", value / 1_000)
-        default: return String(Int(value.rounded()))
+        guard value.isFinite else { return "0" }
+        let v = max(0, value)
+        switch v {
+        case 1_000_000...: return String(format: "%.1fM", v / 1_000_000)
+        case 1_000...: return String(format: "%.1fK", v / 1_000)
+        case 100...: return String(format: "%.0f", v)
+        default: return String(format: "%.1f", v)
         }
     }
 
