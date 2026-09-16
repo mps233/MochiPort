@@ -8,7 +8,9 @@ static JITTER_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Periodic timers and retry loops use this so multiple accounts,
 /// connections, and daemon restarts do not reconnect in lockstep.
 pub fn jittered(duration: Duration, fraction: f64) -> Duration {
-    if duration.is_zero() || !(fraction > 0.0) {
+    // `!fraction.is_finite() || fraction <= 0.0` 同时覆盖三种情况：
+    // NaN（比较恒为 false，故用 is_finite 显式拦下）、负数与零。
+    if duration.is_zero() || !fraction.is_finite() || fraction <= 0.0 {
         return duration;
     }
     let spread = duration.as_secs_f64() * fraction.clamp(0.0, 1.0);
@@ -63,6 +65,15 @@ mod tests {
             }
         }
         assert!(above && below);
+    }
+
+    #[test]
+    fn jittered_nan_or_infinite_fraction_is_ignored() {
+        // NaN 与 ±inf 都可能来自配置解析，必须原样返回而不是产生非法时长。
+        let base = Duration::from_secs(10);
+        assert_eq!(jittered(base, f64::NAN), base);
+        assert_eq!(jittered(base, f64::INFINITY), base);
+        assert_eq!(jittered(base, f64::NEG_INFINITY), base);
     }
 
     #[test]

@@ -51,6 +51,18 @@ enum UnifiedUpdateState: Equatable, Sendable {
     case both(ui: UpdateComponentRelease, daemon: UpdateComponentRelease)
 }
 
+/// 概览吉祥物的在飞工作量信号（快速轮询的 lifecycle 快照）。
+struct CompanionWorkload: Equatable {
+    var gatewayInFlight: Int = 0
+    var pendingWork: Int = 0
+}
+
+/// 最近一次失败的网关请求，取自请求日志的 status=failed 记录。
+struct CompanionRequestFailure: Equatable {
+    let logID: Int64
+    let date: Date
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var selection: AppSection? = .overview
@@ -58,6 +70,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastCheckedAt: Date?
     @Published private(set) var dashboard: ManageDashboard?
     @Published private(set) var lifecycle: ManageLifecycle?
+    /// 概览吉祥物的轻量工作信号，来自独立的快速轮询，不等 15 秒全量刷新。
+    @Published private(set) var companionWorkload = CompanionWorkload()
+    /// 最近一次失败的网关请求（来自请求日志 status=failed 记录）。
+    /// 只在出现"更新的一条"时才更新，旧失败不会重复触发。
+    @Published private(set) var companionLatestFailure: CompanionRequestFailure?
     @Published private(set) var imAccounts: [ManageIMAccount] = []
     @Published private(set) var imAccountsAvailability: MessagingAccountsAvailability = .loading
     @Published private(set) var telegramProjectGroupAccounts: [ManageTelegramProjectGroupAccount] = []
@@ -129,6 +146,9 @@ final class AppModel: ObservableObject {
     private var startupRefreshStarted = false
     private var refreshTask: Task<Void, Never>?
     private var autoRefreshStarted = false
+    /// 为待切换版本执行的短间隔刷新次数；用于在切换被阻塞时限时退避，
+    /// 避免永远以 3 秒间隔轮询。
+    private var pendingUpgradeFastRefreshCount = 0
     private var windowVisible = true
     private var sectionLoadGenerations: [AppSection: Int] = [:]
     private var sectionActivityCounts: [AppSection: Int] = [:]
@@ -499,7 +519,7 @@ final class AppModel: ObservableObject {
         refreshTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                let delay = self.windowVisible ? 15 : 60
+                let delay = await self.autoRefreshDelay()
                 do {
                     try await Task.sleep(for: .seconds(delay))
                 } catch {
@@ -509,6 +529,29 @@ final class AppModel: ObservableObject {
                 await self.refresh()
             }
         }
+    }
+
+    /// 短间隔刷新的最大次数：约 2 分钟。超过后回落到常规间隔，
+    /// 避免切换被长期阻塞时持续高频轮询。
+    private static let pendingUpgradeFastRefreshLimit = 40
+
+    /// 自动刷新间隔（秒）。
+    ///
+    /// 常规是 15 秒（窗口可见）或 60 秒（隐藏）；但**有待切换的内置后台版本时
+    /// 必须用短间隔**：版本切换只在 `refresh()` 里协调，若沿用常规间隔，启动时
+    /// 第一次刷新没抢到管理租约就要干等一整个周期，实测把切换拖到 169 秒。
+    @MainActor
+    private func autoRefreshDelay() -> Int {
+        guard daemonUpgradePending else {
+            pendingUpgradeFastRefreshCount = 0
+            return windowVisible ? 15 : 60
+        }
+        // 限时快轮询：足够覆盖启动时争抢租约的窗口，又不会永久高频。
+        if pendingUpgradeFastRefreshCount < Self.pendingUpgradeFastRefreshLimit {
+            pendingUpgradeFastRefreshCount += 1
+            return 3
+        }
+        return windowVisible ? 15 : 60
     }
 
     func setWindowVisible(_ visible: Bool) {
@@ -525,6 +568,44 @@ final class AppModel: ObservableObject {
     /// Read by page-local refresh loops (for example the request-log list)
     /// so they can pause while the window is hidden.
     var isWindowVisible: Bool { windowVisible }
+
+    /// 概览页吉祥物的轻量信号轮询：每 4 秒拉一次 lifecycle 的 in-flight
+    /// 计数和最新一条失败请求。由概览视图的 .task 驱动，离开概览页即
+    /// 取消，不给 daemon 增加常驻负载。预览模式不轮询。
+    func companionSignalWatchLoop() async {
+        guard fixtureStatus == nil else { return }
+        while !Task.isCancelled {
+            await pollCompanionSignals()
+            do {
+                try await Task.sleep(for: .seconds(4))
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func pollCompanionSignals() async {
+        if let lifecycle = try? await apiClient.lifecycle() {
+            let items = lifecycle.protectedWorkItems
+            companionWorkload = CompanionWorkload(
+                gatewayInFlight: items.aiGatewayRequests,
+                pendingWork: max(items.total - items.aiGatewayRequests, 0)
+            )
+        }
+        if let response = try? await apiClient.requestLogs(
+            filters: RequestLogFilters(status: "failed"),
+            limit: 1
+        ), let newest = response.logs.first {
+            // 只在出现"更新的一条"时发布；历史旧失败不会把团子卡红，
+            // 是否近期由视图按时间戳判断。
+            if newest.id > companionLatestFailure?.logID ?? -1 {
+                companionLatestFailure = CompanionRequestFailure(
+                    logID: newest.id,
+                    date: Date(timeIntervalSince1970: Double(newest.createdAtMs) / 1000)
+                )
+            }
+        }
+    }
 
     func refresh() async {
         guard !refreshInFlight else { return }
@@ -1499,7 +1580,10 @@ final class AppModel: ObservableObject {
             filterImageGenerationTool: current.filterImageGenerationTool,
             requestLoggingEnabled: current.requestLoggingEnabled,
             requestLogDetailsEnabled: current.requestLogDetailsEnabled,
-            codexVisibleModels: current.codexVisibleModels
+            codexVisibleModels: current.codexVisibleModels,
+            customModels: current.customModels,
+            modelOwners: current.modelOwners,
+            providerDisplayPrefix: current.providerDisplayPrefix
         )
     }
 
@@ -1788,7 +1872,12 @@ final class AppModel: ObservableObject {
         filterImageGenerationTool: Bool,
         requestLoggingEnabled: Bool,
         requestLogDetailsEnabled: Bool,
-        codexVisibleModels: [String]
+        codexVisibleModels: [String],
+        customModels: [ManageCustomModel]? = nil,
+        modelOwners: [String: String]? = nil,
+        providerDisplayPrefix: Bool? = nil,
+        requestLogRetentionDays: Int? = nil,
+        requestLogMaxMb: Int? = nil
     ) async -> Bool {
         await performManagementAction(section: .gateway) {
             self.gateway = try await self.apiClient.updateGateway(
@@ -1796,7 +1885,12 @@ final class AppModel: ObservableObject {
                 filterImageGenerationTool: filterImageGenerationTool,
                 requestLoggingEnabled: requestLoggingEnabled,
                 requestLogDetailsEnabled: requestLogDetailsEnabled,
-                codexVisibleModels: codexVisibleModels
+                requestLogRetentionDays: requestLogRetentionDays,
+                requestLogMaxMb: requestLogMaxMb,
+                codexVisibleModels: codexVisibleModels,
+                customModels: customModels,
+                modelOwners: modelOwners,
+                providerDisplayPrefix: providerDisplayPrefix
             )
             return "已保存网关设置"
         }
@@ -2202,7 +2296,12 @@ final class AppModel: ObservableObject {
         apiKey: String?
     ) async throws -> ManageProviderModelsFetchResponse {
         guard fixtureStatus == nil else {
-            return ManageProviderModelsFetchResponse(ok: false, models: [], attempts: [])
+            return ManageProviderModelsFetchResponse(
+                ok: false,
+                models: [],
+                modelDetails: nil,
+                attempts: []
+            )
         }
         return try await apiClient.fetchGatewayProviderModels(
             providerName: providerName,

@@ -31,11 +31,24 @@ pub struct FetchAttempt {
     pub preview: Option<String>,
 }
 
+/// 上游声明的单个模型：只有上游明确给出的字段才会带上。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchedModel {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_image_input: Option<bool>,
+}
+
 /// 拉取结果：`models` 为 `Some` 表示某个候选成功并解析出非空模型列表；
 /// `attempts` 按尝试顺序记录每个候选（含成功那一次）。
 #[derive(Debug)]
 pub struct FetchOutcome {
-    pub models: Option<Vec<String>>,
+    pub models: Option<Vec<FetchedModel>>,
     pub attempts: Vec<FetchAttempt>,
 }
 
@@ -121,16 +134,104 @@ pub fn known_models_url(
 
 /// 从 JSON 响应中提取模型 id：支持根数组 / `data` 数组 / `models` 数组三种形态，
 /// 元素取 `id`、`slug` 字段或字符串本身；去重保序。
+#[cfg(test)]
 pub fn extract_model_ids(value: &Value) -> Vec<String> {
-    let mut models = Vec::new();
-    if let Some(items) = value.get("data").and_then(|value| value.as_array()) {
-        push_model_items(&mut models, items);
-    } else if let Some(items) = value.get("models").and_then(|value| value.as_array()) {
-        push_model_items(&mut models, items);
-    } else if let Some(items) = value.as_array() {
-        push_model_items(&mut models, items);
+    extract_models(value)
+        .into_iter()
+        .map(|model| model.id)
+        .collect()
+}
+
+/// 从 JSON 响应中提取模型及其上游声明过的元数据。
+///
+/// id 兼容 `id` / `slug` / `model` / 字符串本身；展示名兼容 `display_name` /
+/// `displayName` / `name`；上下文窗口兼容 `context_window` / `contextWindow` /
+/// `context_length` / `max_context_window`；图片能力只在 `input_modalities`、
+/// `modalities`、`supports_image_input` 明确包含/声明图片时才认为是真。
+/// 上游没声明的一律留空，不做推测。
+pub fn extract_models(value: &Value) -> Vec<FetchedModel> {
+    let items = value
+        .get("data")
+        .and_then(Value::as_array)
+        .or_else(|| value.get("models").and_then(Value::as_array))
+        .or_else(|| value.as_array());
+    let Some(items) = items else {
+        return Vec::new();
+    };
+
+    let mut models: Vec<FetchedModel> = Vec::new();
+    for item in items {
+        let Some(id) = model_id(item) else {
+            continue;
+        };
+        if models.iter().any(|existing| existing.id == id) {
+            continue;
+        }
+        models.push(FetchedModel {
+            display_name: model_display_name(item, &id),
+            context_window: model_context_window(item),
+            supports_image_input: model_supports_image_input(item),
+            id,
+        });
     }
     models
+}
+
+fn model_id(item: &Value) -> Option<String> {
+    item.as_str()
+        .or_else(|| item.get("id").and_then(Value::as_str))
+        .or_else(|| item.get("slug").and_then(Value::as_str))
+        .or_else(|| item.get("model").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn model_display_name(item: &Value, id: &str) -> Option<String> {
+    let name = ["display_name", "displayName", "name"]
+        .iter()
+        .find_map(|key| item.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != id)?;
+    Some(name.to_string())
+}
+
+fn model_context_window(item: &Value) -> Option<u64> {
+    for key in [
+        "context_window",
+        "contextWindow",
+        "context_length",
+        "contextLength",
+        "max_context_window",
+        "maxContextWindow",
+    ] {
+        if let Some(value) = item.get(key).and_then(Value::as_u64)
+            && value > 0
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn model_supports_image_input(item: &Value) -> Option<bool> {
+    if let Some(value) = item
+        .get("supports_image_input")
+        .or_else(|| item.get("supportsImageInput"))
+        .and_then(Value::as_bool)
+    {
+        return Some(value);
+    }
+    for key in ["input_modalities", "inputModalities", "modalities"] {
+        if let Some(values) = item.get(key).and_then(Value::as_array) {
+            return Some(values.iter().any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|text| text.eq_ignore_ascii_case("image"))
+            }));
+        }
+    }
+    None
 }
 
 /// DeepSeek Responses 专用过滤：只保留 Pro 和 Flash（大小写不敏感，
@@ -138,8 +239,8 @@ pub fn extract_model_ids(value: &Value) -> Vec<String> {
 /// 不假定具体厂商，因此不过滤。
 pub fn filter_fetched_models_for_provider(
     provider_type: &ProviderType,
-    models: Vec<String>,
-) -> Vec<String> {
+    models: Vec<FetchedModel>,
+) -> Vec<FetchedModel> {
     if provider_type != &ProviderType::DeepSeekResponses {
         return models;
     }
@@ -147,29 +248,12 @@ pub fn filter_fetched_models_for_provider(
     models
         .into_iter()
         .filter(|model| {
-            model.trim().rsplit('/').next().is_some_and(|slug| {
+            model.id.trim().rsplit('/').next().is_some_and(|slug| {
                 slug.eq_ignore_ascii_case("deepseek-v4-pro")
                     || slug.eq_ignore_ascii_case("deepseek-v4-flash")
             })
         })
         .collect()
-}
-
-fn push_model_items(models: &mut Vec<String>, items: &[Value]) {
-    for item in items {
-        let id = item
-            .as_str()
-            .or_else(|| item.get("id").and_then(|value| value.as_str()))
-            .or_else(|| item.get("slug").and_then(|value| value.as_str()))
-            .map(str::trim)
-            .filter(|id| !id.is_empty());
-        if let Some(id) = id {
-            let id = id.to_string();
-            if !models.iter().any(|existing| existing == &id) {
-                models.push(id);
-            }
-        }
-    }
 }
 
 /// 响应体预览：截断到 240 字符并压平换行/制表符，避免把长响应回显给客户端。
@@ -233,7 +317,7 @@ pub async fn fetch_models(
 
         match serde_json::from_str::<Value>(&body) {
             Ok(json) => {
-                let models = extract_model_ids(&json);
+                let models = extract_models(&json);
                 if models.is_empty() {
                     attempts.push(FetchAttempt {
                         url: url.clone(),
@@ -351,34 +435,118 @@ mod tests {
         assert!(extract_model_ids(&json!({ "object": "list" })).is_empty());
     }
 
+    fn fetched(id: &str) -> FetchedModel {
+        FetchedModel {
+            id: id.to_string(),
+            display_name: None,
+            context_window: None,
+            supports_image_input: None,
+        }
+    }
+
+    fn fetched_ids(models: &[FetchedModel]) -> Vec<&str> {
+        models.iter().map(|model| model.id.as_str()).collect()
+    }
+
     #[test]
     fn deepseek_responses_accepts_pro_and_flash_without_filtering_other_protocols() {
         let models = vec![
-            "deepseek-v4-pro".to_string(),
-            "DeepSeek-V4-Pro".to_string(),
-            "vendor/deepseek-v4-pro".to_string(),
-            "deepseek-v4-flash".to_string(),
-            "ns/deepseek-v4-flash".to_string(),
-            "other-model".to_string(),
+            fetched("deepseek-v4-pro"),
+            fetched("DeepSeek-V4-Pro"),
+            fetched("vendor/deepseek-v4-pro"),
+            fetched("deepseek-v4-flash"),
+            fetched("ns/deepseek-v4-flash"),
+            fetched("other-model"),
         ];
 
+        let all = fetched_ids(&models)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         assert_eq!(
-            filter_fetched_models_for_provider(&ProviderType::ChatCompletions, models.clone()),
-            models.clone()
+            fetched_ids(&filter_fetched_models_for_provider(
+                &ProviderType::ChatCompletions,
+                models.clone()
+            ))
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+            all.clone()
         );
         assert_eq!(
-            filter_fetched_models_for_provider(&ProviderType::DeepSeekResponses, models.clone()),
+            fetched_ids(&filter_fetched_models_for_provider(
+                &ProviderType::DeepSeekResponses,
+                models.clone()
+            )),
             vec![
-                "deepseek-v4-pro".to_string(),
-                "DeepSeek-V4-Pro".to_string(),
-                "vendor/deepseek-v4-pro".to_string(),
-                "deepseek-v4-flash".to_string(),
-                "ns/deepseek-v4-flash".to_string(),
+                "deepseek-v4-pro",
+                "DeepSeek-V4-Pro",
+                "vendor/deepseek-v4-pro",
+                "deepseek-v4-flash",
+                "ns/deepseek-v4-flash",
             ]
         );
         assert_eq!(
-            filter_fetched_models_for_provider(&ProviderType::OpenAiResponses, models.clone()),
+            fetched_ids(&filter_fetched_models_for_provider(
+                &ProviderType::OpenAiResponses,
+                models
+            ))
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+            all
+        );
+    }
+
+    #[test]
+    fn extract_models_reads_only_upstream_declared_metadata() {
+        let value = json!({
+            "data": [
+                {
+                    "id": "deepseek-v4.1-flash",
+                    "display_name": "Deepseek-V4.1-Flash",
+                    "context_window": 1048576,
+                    "input_modalities": ["text", "image"]
+                },
+                { "id": "plain-model" },
+                { "id": "name-only", "name": "Name Only" },
+                { "slug": "slug-model", "context_length": 128000 }
+            ]
+        });
+
+        let models = extract_models(&value);
+        assert_eq!(
             models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "deepseek-v4.1-flash",
+                "plain-model",
+                "name-only",
+                "slug-model"
+            ]
+        );
+        assert_eq!(
+            models[0].display_name.as_deref(),
+            Some("Deepseek-V4.1-Flash")
+        );
+        assert_eq!(models[0].context_window, Some(1_048_576));
+        assert_eq!(models[0].supports_image_input, Some(true));
+        // 上游没声明的一律留空，不做推测。
+        assert_eq!(models[1].display_name, None);
+        assert_eq!(models[1].context_window, None);
+        assert_eq!(models[1].supports_image_input, None);
+        assert_eq!(models[2].display_name.as_deref(), Some("Name Only"));
+        assert_eq!(models[3].context_window, Some(128_000));
+        // 展示名与 id 相同时不重复记录。
+        let same = json!({ "data": [{ "id": "same", "display_name": "same" }] });
+        assert_eq!(extract_models(&same)[0].display_name, None);
+        // 明确声明不支持图片时按上游口径记录。
+        let text_only = json!({ "data": [{ "id": "t", "input_modalities": ["text"] }] });
+        assert_eq!(
+            extract_models(&text_only)[0].supports_image_input,
+            Some(false)
         );
     }
 

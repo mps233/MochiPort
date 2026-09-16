@@ -58,11 +58,18 @@ struct MenubarSettingsView: View {
                 Toggle("时段摘要包含连续使用天数", isOn: $settings.funStreak)
                 Toggle("周一显示上周报告", isOn: $settings.funWeeklyReport)
                 Toggle("提示音", isOn: $settings.funSoundEnabled)
+                Toggle("检测新版本", isOn: $settings.notifyUpdate)
+            }
+
+            Section("概览吉祥物") {
                 Toggle("概览吉祥物动画", isOn: $settings.mascotAnimates)
                 Text("动画会让界面按显示器刷新率重排，窗口打开时约多占 14% CPU；关闭后吉祥物保持静止。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Toggle("检测新版本", isOn: $settings.notifyUpdate)
+                idleStylePicker
+                Text("点卡片选择待机动画，预览会实时播放（需开启动画）。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
 
             Section("自定义通知文案") {
@@ -110,6 +117,52 @@ struct MenubarSettingsView: View {
                 if enabled { settings.menubarItems.insert(item) }
                 else { settings.menubarItems.remove(item) }
             })
+    }
+
+    private var idleStyle: CompanionIdleStyle {
+        CompanionIdleStyle(rawValue: settings.companionIdleStyleRaw) ?? .classic
+    }
+
+    /// 待机动画风格选择：每个选项是一张实时播放的动画预览卡，点击即选中。
+    private var idleStylePicker: some View {
+        HStack(spacing: 8) {
+            ForEach(CompanionIdleStyle.allCases, id: \.self) { style in
+                idleStylePreview(style)
+            }
+        }
+    }
+
+    private func idleStylePreview(_ style: CompanionIdleStyle) -> some View {
+        let isSelected = style == idleStyle
+        return Button {
+            settings.companionIdleStyleRaw = style.rawValue
+        } label: {
+            VStack(spacing: 4) {
+                TokenCompanionAnimator(
+                    state: .constant(.idle),
+                    animates: settings.mascotAnimates,
+                    idleStyle: style
+                )
+                .scaleEffect(0.66)
+                .frame(width: 50, height: 38)
+                Text(style.label)
+                    .font(.caption2.weight(isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+            }
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(.primary.opacity(isSelected ? 0.08 : 0.03))
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(isSelected ? Color.accentColor.opacity(0.7) : .clear, lineWidth: 1.5)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("待机动画 \(style.label)")
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 
     private var milestoneBinding: Binding<Bool> {

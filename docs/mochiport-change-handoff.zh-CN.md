@@ -95,6 +95,11 @@ GUI-only 交接不得重新构建、替换、切换或重启 daemon。组装 App
 
 4. 受保护任务非零、管理租约失效、当前 runtime 身份无法核验或回滚条件不完整时，升级必须 fail closed：不切换、不强杀，并在 GUI 中显示可操作错误，等待下一次刷新或重新打开正式 App。
 
+   实测两个常见的 defer 原因：
+
+   - **受保护任务非零**：交接瞬间有进行中的 AI 网关请求、Codex turn 或 IM 流，GUI 会等它归零；`GET /api/v1/manage/lifecycle` 的 `protectedWorkItems` 可直接确认。
+   - **Codex App 持有管理租约**：用「启动 Codex」（增强启动）拉起过 Codex 时，它的 app-server 会占用管理租约，此时 GUI 会一直 fail closed：新 helper 只完成 staging，`runtimes/current` 不切换，daemon 反复重启回旧版本。**退出 Codex App 后重开正式 App 即可完成切换**。
+
 5. GUI-only 改动仍不得重启 daemon；只有 daemon-affecting 改动且新正式 App 已安装时，才允许按上一事务自动切换。用户无需再手动重启后台服务。
 
 设置页保留的“安全重启后台服务”是用户主动操作，不属于版本升级流程。该操作只能针对当前已确认身份的 daemon，并由 daemon 先检查受保护工作项。
@@ -132,6 +137,25 @@ GUI-only 更新前后 daemon 的 PID、路径和 SHA-256 应保持一致。daemo
 - 为了交接创建 ZIP 压缩包
 
 普通 GUI 启动会复用已运行的兼容 daemon，或按上一节以无 `-k` 的 `kickstart` 恢复已验证停止的服务。只有 daemon-affecting 更新同时满足租约、受保护任务和身份校验时，才允许执行一次明确的 runtime 切换；GUI 关闭或崩溃不应停止 launchd 托管的 daemon。
+
+## 交接脚本的探测窗口
+
+`scripts/build-and-restart-macos.sh` 在打开正式 App 后，用约 60 秒的窗口（240 次 × 0.25 秒）探测「daemon 已切到新 build」。
+
+**切换本身由 GUI 驱动**：它必须先拿到有效的后台管理租约（`ownsDaemonLease`）才会执行 `coordinateDaemonUpgradeIfNeeded`，而这段协调逻辑只在 `refresh()` 里运行。
+
+历史上这里有个已修复的问题：自动刷新间隔是 15 秒（窗口可见）/ 60 秒（隐藏），启动时第一次刷新若没抢到租约，就要干等一整个周期，实测把切换拖到 **169 秒**，必然超出脚本窗口并误报失败。现在 `autoRefreshDelay()` 在 `daemonUpgradePending` 时改用 3 秒间隔（上限约 2 分钟，之后回落常规间隔以免长期高频轮询），实测总耗时降到 41 秒且脚本退出码为 0。
+
+若仍然看到脚本打印 `daemon did not pass authenticated lifecycle verification at build N`，**交接未必失败**。判断方法是直接看真实状态：
+
+```sh
+readlink "$HOME/Library/Application Support/MochiPort/runtimes/current"   # 是否已指向新 build
+curl -sH "Authorization: Bearer <token>" http://127.0.0.1:3847/api/v1/manage/lifecycle
+# 期望：runtime.state=active、runtime.buildNumber=<新 build>、
+#       executableSha256 与 App 内 helper 的 sha256 一致
+```
+
+若三项都正确，说明切换已完成、只是慢于脚本窗口，无需重跑；否则再按上面的排障步骤处理。
 
 ## 交接后的报告
 

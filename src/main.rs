@@ -453,6 +453,135 @@ async fn run_daemon_startup_tasks(
             .push_event("warn", "bridge_disabled", "bridge disabled by config")
             .await;
     }
+    tokio::spawn(run_official_catalog_sync(state.clone()));
+    tokio::spawn(run_request_log_retention(state));
+}
+
+/// 定期清理 AI Gateway 请求日志。
+///
+/// 请求日志库会随使用持续增长（实测数周可达数十 MB），而它默认只提供手动清理
+/// 接口。这里在启动时先跑一次，之后每小时执行：先按保留天数删除旧记录，再按体积
+/// 上限从旧到新裁剪，避免长期运行后数据库无界膨胀。
+///
+/// 两个维度都设为 0 时表示用户要完全手动管理，此时该任务不做任何事。
+async fn run_request_log_retention(state: crate::app_state::SharedState) {
+    const TICK: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+    loop {
+        let (retention_days, max_mb) = {
+            let config = state.config.lock().await;
+            (
+                config.ai_gateway.request_log_retention_days,
+                config.ai_gateway.request_log_max_mb,
+            )
+        };
+
+        if retention_days > 0 || max_mb > 0 {
+            let store = state.ai_gateway_request_logs.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                let mut deleted = 0usize;
+                if retention_days > 0 {
+                    let cutoff_ms = crate::ai_gateway::request_log::now_ms()
+                        .saturating_sub(retention_days as i64 * 86_400_000);
+                    deleted += store.delete_older_than(cutoff_ms)?;
+                }
+                let trimmed = if max_mb > 0 {
+                    store.trim_to_size(max_mb * 1024 * 1024)?
+                } else {
+                    0
+                };
+                Ok::<_, rusqlite::Error>((deleted, trimmed, store.database_size_bytes()))
+            })
+            .await;
+
+            match outcome {
+                Ok(Ok((deleted, trimmed, size))) => {
+                    if deleted > 0 || trimmed > 0 {
+                        state
+                            .push_event(
+                                "info",
+                                "request_log_retention",
+                                format!(
+                                    "请求日志已清理：过期 {deleted} 条、超限 {trimmed} 条，当前 {:.1} MB",
+                                    size as f64 / 1_048_576.0
+                                ),
+                            )
+                            .await;
+                    }
+                }
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        target: "mochiport::ai_gateway",
+                        error = %err,
+                        "request log retention failed"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "mochiport::ai_gateway",
+                        error = %err,
+                        "request log retention task panicked"
+                    );
+                }
+            }
+        }
+
+        tokio::time::sleep(TICK).await;
+    }
+}
+
+/// 定期同步 Codex 官方模型目录。
+///
+/// 内置 `models.json` 是官方目录的忠实副本，会随官方更新而过期。这里在启动时
+/// 立即同步一次，之后每 24 小时同步一次；同步结果写到数据目录下的用户级覆盖
+/// 文件，由 `catalog` 合并生效，因此官方更新无需改源码或重建 daemon。
+///
+/// 网络失败、格式异常一律静默跳过并保持现状，绝不用坏数据覆盖。
+async fn run_official_catalog_sync(state: crate::app_state::SharedState) {
+    loop {
+        // 先加载已有覆盖文件，让重启后立刻生效（不必等这次网络请求）。
+        let data_dir = crate::ai_gateway::model_sync::data_directory(&state.config_path);
+        let loaded = crate::ai_gateway::catalog::load_official_overlay(&data_dir);
+        if loaded > 0 {
+            tracing::info!(
+                target: "mochiport::ai_gateway",
+                entries = loaded,
+                "official model catalog overlay loaded"
+            );
+        }
+
+        let embedded = crate::ai_gateway::catalog::embedded_catalog();
+        match crate::ai_gateway::model_sync::sync_official_catalog(&data_dir, &embedded, false)
+            .await
+        {
+            crate::ai_gateway::model_sync::SyncOutcome::Updated(changes) => {
+                let count = crate::ai_gateway::catalog::load_official_overlay(&data_dir);
+                state
+                    .push_event(
+                        "info",
+                        "official_model_catalog_updated",
+                        format!(
+                            "官方模型目录已同步：{} 个条目生效（{}）",
+                            count,
+                            changes.join("、")
+                        ),
+                    )
+                    .await;
+            }
+            crate::ai_gateway::model_sync::SyncOutcome::Unchanged => {}
+            crate::ai_gateway::model_sync::SyncOutcome::Skipped(reason) => {
+                state
+                    .push_event(
+                        "info",
+                        "official_model_catalog_sync_skipped",
+                        format!("官方模型目录同步跳过：{reason}"),
+                    )
+                    .await;
+            }
+        }
+
+        tokio::time::sleep(crate::ai_gateway::model_sync::SYNC_INTERVAL).await;
+    }
 }
 
 fn environment_switch_enabled(value: Option<&std::ffi::OsStr>) -> bool {

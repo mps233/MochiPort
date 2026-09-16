@@ -554,13 +554,16 @@ private struct AnimatedMetricValue: View {
 }
 
 /// Small Mochi companion for the usage hero card. The native SwiftUI
-/// view owns its breathing, blink, and relay-ring motion.
+/// view owns its breathing, blink, and relay-ring motion. `state` drives
+/// which mood the companion performs (idle/working/success/…).
 private struct TokenMascotView: View {
+    let state: TokenCompanionState
     let value: Double
     var animates: Bool = false
+    var idleStyle: CompanionIdleStyle = .classic
 
     var body: some View {
-        TokenCompanionAnimator(animates: animates)
+        TokenCompanionAnimator(state: .constant(state), animates: animates, idleStyle: idleStyle)
             .frame(width: 76, height: 58)
             .accessibilityHidden(true)
             .allowsHitTesting(false)
@@ -568,12 +571,44 @@ private struct TokenMascotView: View {
     }
 }
 
+/// Live service signals the overview companion reacts to, snapshot from
+/// AppModel's polled health, lifecycle, and dashboard data.
+struct CompanionSignals {
+    /// daemon 健康探测通过；false 时团子进入断连（灰色闭眼）状态。
+    var serviceAvailable: Bool = true
+    /// AI 网关正在进行的请求数；大于 0 表示有 token 在流动（working）。
+    var gatewayInFlight: Int = 0
+    /// 其余受保护任务（Codex turn、IM 流、待审批等）；大于 0 且无网关
+    /// 吞吐时表示工作已受理但还没产出（waiting）。
+    var pendingWork: Int = 0
+    /// 远程控制连接已建立但不健康（连接拓扑页同样将其标红）。
+    var remoteControlUnhealthy: Bool = false
+    /// 最近一次失败的网关请求（请求日志 status=failed 的最新一条）。
+    /// ID 变化表示出现了新失败；视口按时间戳限时展示，旧失败不触发。
+    var latestFailureID: Int64?
+    var latestFailureDate: Date?
+}
+
+/// ID of the newest celebration-worthy HUD event, for the mascot's happy
+/// pulse.Celebrations: daily token milestones, new daily records, comebacks.
+@MainActor
+func companionCelebrationEventID(in log: EventLog) -> UUID? {
+    log.records.first { record in
+        switch record.event.kind {
+        case .milestone, .record, .comeback: return true
+        default: return false
+        }
+    }?.id
+}
+
 private struct OverviewUsageMetricCard: View {
     let value: Double
     let format: (Double) -> String
     let label: String
     let emphasis: Emphasis
+    var mascotState: TokenCompanionState = .idle
     var mascotAnimates: Bool = false
+    var mascotIdleStyle: CompanionIdleStyle = .classic
 
     enum Emphasis {
         case hero
@@ -601,7 +636,12 @@ private struct OverviewUsageMetricCard: View {
 
             switch emphasis {
             case .hero:
-                TokenMascotView(value: value, animates: mascotAnimates)
+                TokenMascotView(
+                    state: mascotState,
+                    value: value,
+                    animates: mascotAnimates,
+                    idleStyle: mascotIdleStyle
+                )
             case .standard:
                 EmptyView()
             }
@@ -637,10 +677,25 @@ struct OverviewUsageInsightsView: View {
     let store: UsageStore
     let statsStore: DailyStatsStore?
     let providerUsage: ManageProviderUsageResponse?
+    /// Live service signals the companion mascot reacts to. Built by the
+    /// caller from AppModel's polled dashboard/lifecycle data.
+    var companionSignals = CompanionSignals()
+    /// ID of the newest celebration-worthy HUD event (milestone/record/
+    /// comeback); a new ID pulses the mascot into its happy mood.
+    var celebrationEventID: UUID? = nil
     /// Whether the hero card's companion mascot animates. Off by default: the
     /// motion costs a full hosting-view layout per frame.
     var mascotAnimates: Bool = false
+    /// 待机动画风格，与设置页的选择联动。
+    var idleStyle: CompanionIdleStyle = .classic
     @State private var range: UsageTrendRange = .week
+    /// Timed celebration pulses: a finished request celebrates briefly, a
+    /// HUD celebration lasts a little longer, then both fall back to the
+    /// steady state derived from `companionSignals`.
+    @State private var successUntil: Date = .distantPast
+    @State private var happyUntil: Date = .distantPast
+    /// 请求失败的红色脉冲：新失败触发 10 秒，到期自动回落，旧失败不触发。
+    @State private var requestFailureUntil: Date = .distantPast
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -651,13 +706,15 @@ struct OverviewUsageInsightsView: View {
             now: Date(),
             statsStore: statsStore
         )
+        let eventCount = store.events.count
+        let mascotState = companionState(metrics: metrics)
 
         VStack(alignment: .leading, spacing: 12) {
             header
 
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .top, spacing: 18) {
-                    metricRail(metrics)
+                    metricRail(metrics, mascotState: mascotState)
                         .frame(width: 220)
                     UsageTrendContent(
                         store: store,
@@ -688,6 +745,59 @@ struct OverviewUsageInsightsView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("overview.usage-insights")
+        .onChange(of: eventCount) { _, _ in
+            guard eventCount > 0 else { return }
+            successUntil = Date().addingTimeInterval(1.8)
+        }
+        .onChange(of: celebrationEventID) { _, newValue in
+            guard newValue != nil else { return }
+            happyUntil = Date().addingTimeInterval(4)
+        }
+        .onChange(of: companionSignals.latestFailureID) { _, newValue in
+            guard let id = newValue, id != 0 else { return }
+            // 只有"近期"的失败才点亮红色；启动时带出的历史旧失败不触发。
+            if let date = companionSignals.latestFailureDate,
+               Date().timeIntervalSince(date) < 60 {
+                requestFailureUntil = Date().addingTimeInterval(10)
+            }
+        }
+        .task(id: pulseExpiry) {
+            await expirePulses()
+        }
+    }
+
+    private var pulseExpiry: Date {
+        max(requestFailureUntil, max(successUntil, happyUntil))
+    }
+
+    /// Clears expired celebration and failure pulses so the mascot falls
+    /// back to the steady state derived from `companionSignals`.
+    private func expirePulses() async {
+        guard pulseExpiry > .distantPast else { return }
+        let wait = pulseExpiry.timeIntervalSinceNow + 0.05
+        if wait > 0 {
+            try? await Task.sleep(for: .seconds(wait))
+        }
+        guard !Task.isCancelled else { return }
+        successUntil = .distantPast
+        happyUntil = .distantPast
+        requestFailureUntil = .distantPast
+    }
+
+    /// Maps live signals onto the companion's moods, most critical first:
+    /// service down, an unhealthy remote-control link, a recent failed
+    /// request, celebration pulses, active token throughput, other protected
+    /// work, and finally idle.
+    private func companionState(metrics: UsageMetricSnapshot) -> TokenCompanionState {
+        if !companionSignals.serviceAvailable { return .disconnected }
+        if companionSignals.remoteControlUnhealthy { return .error }
+        let now = Date()
+        if now < requestFailureUntil { return .error }
+        if now < successUntil { return .success }
+        if now < happyUntil { return .happy }
+        if companionSignals.gatewayInFlight > 0 || metrics.tokensPerSecond > 0 { return .working }
+        if companionSignals.pendingWork > 0 { return .waiting }
+        return .idle
     }
 
     @ViewBuilder
@@ -735,14 +845,16 @@ struct OverviewUsageInsightsView: View {
         .accessibilityLabel("用量范围")
     }
 
-    private func metricRail(_ metrics: UsageMetricSnapshot) -> some View {
+    private func metricRail(_ metrics: UsageMetricSnapshot, mascotState: TokenCompanionState) -> some View {
         VStack(spacing: 8) {
             OverviewUsageMetricCard(
                 value: metrics.todayTokens,
                 format: { formatTokens(Int($0)) },
                 label: "今日请求 Token",
                 emphasis: .hero,
-                mascotAnimates: mascotAnimates
+                mascotState: mascotState,
+                mascotAnimates: mascotAnimates,
+                mascotIdleStyle: idleStyle
             )
             metricRow(metrics)
         }

@@ -59,6 +59,7 @@
 		B100000000000000000020 /* MenubarCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000020 /* MenubarCoordinator.swift */; };
 		B100000000000000000021 /* MenubarSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000021 /* MenubarSettingsView.swift */; };
 		B100000000000000000022 /* TokenCompanionAnimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000022 /* TokenCompanionAnimator.swift */; };
+		B100000000000000000060 /* CompanionBlobGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000060 /* CompanionBlobGeometry.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -119,6 +120,7 @@
 		B200000000000000000020 /* MenubarCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/MenubarCoordinator.swift; sourceTree = "<group>"; };
 		B200000000000000000021 /* MenubarSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/MenubarSettingsView.swift; sourceTree = "<group>"; };
 		B200000000000000000022 /* TokenCompanionAnimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Menubar/TokenCompanionAnimator.swift; sourceTree = "<group>"; };
+		B200000000000000000060 /* CompanionBlobGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Menubar/CompanionBlobGeometry.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -171,6 +173,7 @@
 				A20000000000000000000013 /* ProviderLogos */,
 				A20000000000000000000015 /* ClientLogos */,
 				B200000000000000000022 /* TokenCompanionAnimator.swift */,
+				B200000000000000000060 /* CompanionBlobGeometry.swift */,
 			);
 			path = Sources/MochiPortMac;
 			sourceTree = SOURCE_ROOT;
@@ -341,6 +344,7 @@
 				B100000000000000000020 /* MenubarCoordinator.swift in Sources */ ,
 				B100000000000000000021 /* MenubarSettingsView.swift in Sources */ ,
 				B100000000000000000022 /* TokenCompanionAnimator.swift in Sources */ ,
+				B100000000000000000060 /* CompanionBlobGeometry.swift in Sources */ ,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			};

@@ -159,7 +159,88 @@ supports_standalone_web_search = true
 
 新增渠道时 `models` 初始为空。模型列表只来自手工添加或远端模型列表同步；空列表不会按渠道名自动匹配模型。
 
-Codex 可见模型由 `aiGateway.codexVisibleModels` 控制。它不是 provider 上游模型列表的简单合并，而是一个显式白名单：只有配置在该列表里，并且内置 `src/ai_gateway/models.json` 中 `supported_in_api = true`、`visibility = "list"` 的模型，才会出现在 `GET /ai-gateway/v1/models` 返回值里。
+Codex 可见模型由 `aiGateway.codexVisibleModels` 控制。它是一个显式白名单：只有配置在该列表里的模型名才会出现在 `GET /ai-gateway/v1/models` 返回值里；白名单之外的名字一律不出现。
+
+每个模型名的目录条目按三层解析（`src/ai_gateway/catalog.rs`）：
+
+1. **内置目录** `src/ai_gateway/models.json`（编译进二进制，`visibility = "list"`）；
+2. **用户自定义条目** `aiGateway.customModels[]`（`slug` / `providerName` / `displayName` / `description` / `family` / `contextWindow` / `supportsImageInput`），字段可选，未填的部分继承协议家族模板；
+3. **自动合成**：既不在内置目录、也没有自定义条目，但被某个已启用 provider 的 `models`（或 `modelAliases`）声明过的模型名，会按该 provider 的协议家族（`open_ai_responses` / `deepseek_responses` / `grok_responses` / `chat_completions` / `anthropic_messages`）合成一个条目：继承家族的 `comp_hash`、`use_responses_lite`、`apply_patch_tool_type`、`shell_type`、推理等级等 Codex 依赖字段。能力取值优先级是「自定义条目 → 上游 `/models` 的明确声明 → 家族保守兜底」：默认纯文本、不接受图片，上下文取家族兜底值；只有上游在 `input_modalities` 等字段里明确声明图片能力时才会打开图片，不做基于模型名的推测。
+
+上游 `/models` 的模型元数据在同步时落库到 `provider.discoveredModels[]`（`id` / `displayName` / `contextWindow` / `supportsImageInput`，字段全部可选）。「获取模型」按钮和新建服务商时的自动同步都会调用它：`POST /api/v1/manage/gateway/provider/models/fetch` 返回 `models`（名字，写进 `provider.models` 供路由匹配）和 `modelDetails`（元数据）。同步只负责“识别”，是否暴露给 Codex 仍由用户在「Codex 可用模型」里勾选决定。
+
+都没有命中的模型名会被静默跳过。GUI「AI 网关 → 概览 → Codex 可用模型」把三层来源分别标成「内置 / 自定义 / 自动」：勾选即可加入白名单，「新建自定义模型…」用来声明目录之外的名字。
+
+因此**新增一个模型不再需要改 Rust 源码或重建 daemon**：在 GUI 里声明（或让 provider 的模型列表覆盖它）→ 加入可见白名单 → 用「启动 Codex」重启一次 Codex 让它重新拉取目录。只有想修改内置条目本身的能力口径时才需要改 `models.json` 并重建。
+
+### 同名模型归属（`aiGateway.modelOwners`）
+
+同一个模型名可能被多个 provider 声明（例如两家网关都提供 `glm-5.3`）。默认按 `weight` + 会话粘性选路；需要钉死时配置归属：
+
+```toml
+[aiGateway.modelOwners]
+"glm-5.3" = "autoclaw"
+```
+
+- 归属命中且该 provider 仍然可用（存在、启用、声明该模型、未被健康检查拉黑、协议类型匹配）时，路由器直接锁定它，并写回会话绑定；优先级高于权重与已有粘性。
+- 归属失效时**静默回落**到默认选路，不报错；`GET /api/v1/manage/codex/models/catalog` 会在该条目上返回 `owner` 与 `ownerEffective=false`，GUI 用橙色提示「归属的服务商已停用或不再声明该模型」。
+- 归属只影响路由，不改变 Codex 侧看到的模型清单——Codex 依然是「一个名字一条」。若要让同一上游模型在两个服务商下各出现一次，需要改名字（用 `modelAliases` 把 `provider/模型名` 映射回上游名）。
+- 目录接口同时返回 `providers`（声明该模型的已启用服务商），GUI 的「Codex 可用模型」据此按服务商分组显示、并在同名时给出归属下拉。
+
+### 内置模型库
+
+`src/ai_gateway/model_library.json` 是编译进二进制的模型能力表（3700+ 个模型，约 930KB），由 `scripts/generate-model-library.py` 从社区目录 [models.dev](https://models.dev/api.json) 生成：
+
+- **生成期归并**：同一模型名会在几十家转售商里重复出现（`deepseek-v4-pro` 有 32 家），脚本按模型 id 归并——数值字段（上下文、最大输出）取**多数表决**，布尔能力取**并集**；上下文并列时偏向 2 的幂（转售商常把 1,048,576 写成 1,000,000 或 1,050,000）；
+- **运行期填充**：目录解析时，若某模型既无内置条目也无自定义条目，就查这张表补上 `display_name` / `context_window` / `input_modalities`；
+- **优先级**：自定义条目 → 内置模型库 → 上游 `/models` 声明 → 协议家族保守兜底。自定义条目放最前，用户显式声明的值永远生效；
+
+### 请求日志保留
+
+请求日志会随使用持续增长（实测数周达 37 MB / 7 万条），因此 daemon 内置自动清理：
+
+- `aiGateway.requestLogRetentionDays`（默认 30）：删除早于该天数的记录；设 0 关闭；
+- `aiGateway.requestLogMaxMb`（默认 256）：库体积超过上限时从最旧记录开始裁剪；设 0 不限制；
+- daemon 启动时先跑一次，之后每小时执行；清理后会 `VACUUM` 回收空间（否则文件只增不减）；
+- GUI 在「网关 → 概览 → 使用记录」里显示当前占用，并提供保留天数、体积上限与「清空请求日志」。
+
+两个维度都为 0 时完全手动管理。
+
+### 协议家族模板
+
+`src/ai_gateway/family_templates.json` 存每个协议家族的 **Codex 私有协议字段**（`comp_hash`、`use_responses_lite`、`tool_mode`、`shell_type`、`apply_patch_tool_type`、`truncation_policy` 以及 `base_instructions` 提示词等），由 `scripts/generate-family-templates.py` 生成。
+
+改版前，合成一个模型是"从内置目录里挑一条真实模型整条复制过来"——Chat Completions 家族借用 `deepseek-v4.1-flash`、Anthropic 家族借用 `GLM-5.2` 等。副作用是这些**模板条目必须留在模型目录里**，于是在用户的模型列表里显示成"没人提供的模型"（`Grok-4.6`、`DeepSeek-V4-Pro`、`DeepSeek-V4-Flash`、`GLM-5.2` 等）。
+
+现在协议字段已独立成表：
+
+| 层 | 提供什么 | 来源 |
+| --- | --- | --- |
+| 协议模板表 | `comp_hash` / `tool_mode` / 提示词等 Codex 私有字段 | `family_templates.json` |
+| 内置模型库 | 显示名 / 上下文 / 图片能力 | `model_library.json` |
+| 内置目录 | 官方与项目自建的**真实模型条目** | `models.json` |
+
+因此 `models.json` 里那些只当模板用的条目已经删除，目录只保留真实在用的模型；合成逻辑也不再依赖"目录里必须存在某个模板模型"，模板缺失时会直接失败的老路径一并消失。
+
+GUI 的「Codex 可用模型」列表还会滤掉**没有任何启用服务商提供**的内置条目（例如官方目录里有定义、但本地无上游可提供的 `gpt-5.6-luna`）——它们勾选后请求必然失败，属于纯噪音。用户显式声明的自定义条目不受此限制。
+
+- **边界**：库里**只有展示与能力字段**，不含 Codex 私有协议字段（`use_responses_lite` / `tool_mode` / `comp_hash` / `base_instructions`），后者永远来自本地协议家族模板或官方目录。
+
+更新方式：`python3 scripts/generate-model-library.py`（联网拉取后覆盖文件），然后重建 daemon。
+
+> ⚠️ models.dev 是社区数据，可能与官方 API 不一致（例如把 1,048,576 取整为 1,000,000）。它的上下文值只作为**兜底**，服务商自己声明过的值仍然优先。
+
+### 模型显示名前缀
+
+Codex App 的模型选择器是**扁平列表**：它只消费静态目录里的 `display_name` 与 Statsig 白名单（`available_models: Set<string>`），目录 schema 里没有任何"分组/来源"字段，前端也没有分组渲染逻辑。因此"按服务商分组显示"无法真正实现，只能把归属写进显示名：
+
+- `aiGateway.providerDisplayPrefix = true`：给每个模型名加上**服务商名**前缀（`Mac_Local · GPT-5.6-Terra`）。
+- 前缀只跟随 `provider.name`，没有逐服务商覆盖字段：改服务商名，前缀自动跟着变。
+- 前缀只改 `display_name`，不改 `slug`：Codex 发回的名字、路由匹配、`modelAliases` 全部不受影响，切换前缀不需要重建任何东西（但 Codex 侧要重新拉一次目录才能看到，见下节）。
+
+Codex 侧那个「默认 / 推荐模型集」（`composer.modelPicker.default.*`）是 Codex 自己渲染的 "Default" 选项，由客户端传入的 `defaultOption` 决定，MochiPort 无法通过目录字段去掉它。
+
+Codex 侧的目录缓存不在 MochiPort 控制内：Codex 会把 `/models` 的响应缓存在 Codex home 的 `models_cache.json`（默认 TTL 300 秒），并且前端模型选择器还会用 Statsig 的 `available_models` 白名单二次过滤；`model_catalog_json` 之类的 Codex 配置会把目录钉死在某个文件上，导致新增模型永远不出现。稳定刷新方式见「Codex 模型列表刷新机制」一节。
 
 默认本地 provider 不写占位 bearer token 或 `env_key`。Codex 官方账号状态由
 Codex 自己的 `auth.json` 维护；真实上游 provider key 只保存在 MochiPort 配置或

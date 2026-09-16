@@ -58,6 +58,21 @@ fn resolve_provider_with_state_matching<'a>(
     }
 
     let session_id = session_id.map(str::trim).filter(|value| !value.is_empty());
+
+    // 归属优先：显式配置了归属、且该 provider 仍然可用（启用、声明该模型、
+    // 未被健康检查拉黑、协议类型也匹配）时直接锁定它，不再按权重/粘性漂移。
+    // 归属失效（provider 被禁用/删除/不再声明该模型）时静默回落到默认选路。
+    if let Some(owner) = config.effective_model_owner(model)
+        && matches(owner)
+        && !state.is_blacklisted(&provider_route_id(owner), now)
+    {
+        let route_id = provider_route_id(owner);
+        if let Some(sid) = session_id {
+            state.bind(sid, &route_id, now);
+        }
+        return Ok((owner, route_id));
+    }
+
     let healthy: Vec<&ProviderConfig> = candidates
         .iter()
         .copied()
@@ -129,6 +144,79 @@ mod tests {
         let now = Instant::now();
         let (p, _) = resolve_provider_with_state("m", Some("s1"), &cfg, &mut state, now).unwrap();
         assert_eq!(p.name, "openai");
+    }
+
+    #[test]
+    fn configured_owner_wins_over_weight_and_stickiness() {
+        let mut cfg = config(vec![
+            provider("openai", 100, "m"),
+            provider("deepseek", 99, "m"),
+        ]);
+        cfg.model_owners
+            .insert("m".to_string(), "deepseek".to_string());
+        let mut state = GatewayRoutingState::default();
+        let now = Instant::now();
+        // 即使会话已经粘在 openai 上，显式归属也要赢。
+        let openai_route = provider_route_id(&cfg.providers[0]);
+        state.bind("s1", &openai_route, now);
+
+        let (p, route_id) = resolve_provider_with_state("m", Some("s1"), &cfg, &mut state, now)
+            .expect("owner should resolve");
+        assert_eq!(p.name, "deepseek");
+        // 归属会写回会话绑定，后续请求继续走同一家。
+        assert_eq!(state.binding_for("s1", now), Some(route_id.as_str()));
+    }
+
+    #[test]
+    fn owner_falls_back_when_provider_is_not_usable() {
+        let mut cfg = config(vec![
+            provider("openai", 100, "m"),
+            provider("deepseek", 99, "m"),
+        ]);
+        cfg.model_owners
+            .insert("m".to_string(), "deepseek".to_string());
+        // provider 被禁用 → 归属失效，回落到权重选路。
+        cfg.providers[1].enabled = false;
+        let mut state = GatewayRoutingState::default();
+        let now = Instant::now();
+        let (p, _) = resolve_provider_with_state("m", Some("s1"), &cfg, &mut state, now).unwrap();
+        assert_eq!(p.name, "openai");
+
+        // 归属指向一个不再声明该模型的 provider 时同样回落。
+        let mut cfg = config(vec![
+            provider("openai", 100, "m"),
+            provider("deepseek", 99, "m"),
+        ]);
+        cfg.providers[1].models = vec!["other".to_string()];
+        cfg.model_owners
+            .insert("m".to_string(), "deepseek".to_string());
+        let mut state = GatewayRoutingState::default();
+        let (p, _) = resolve_provider_with_state("m", Some("s1"), &cfg, &mut state, now).unwrap();
+        assert_eq!(p.name, "openai");
+    }
+
+    #[test]
+    fn owner_is_ignored_when_blacklisted_then_used_after_cooldown() {
+        let mut cfg = config(vec![
+            provider("openai", 100, "m"),
+            provider("deepseek", 99, "m"),
+        ]);
+        cfg.model_owners
+            .insert("m".to_string(), "deepseek".to_string());
+        let mut state = GatewayRoutingState::default();
+        let now = Instant::now();
+        let deepseek_route = provider_route_id(&cfg.providers[1]);
+        for _ in 0..FAILURE_THRESHOLD {
+            state.record_failure(&deepseek_route, now);
+        }
+        // 归属目标被拉黑时临时改走健康的一家，而不是硬失败。
+        let (p, _) = resolve_provider_with_state("m", Some("s1"), &cfg, &mut state, now).unwrap();
+        assert_eq!(p.name, "openai");
+
+        // 冷却结束后归属重新生效。
+        let later = now + COOLDOWN + Duration::from_secs(1);
+        let (p, _) = resolve_provider_with_state("m", Some("s1"), &cfg, &mut state, later).unwrap();
+        assert_eq!(p.name, "deepseek");
     }
 
     #[test]

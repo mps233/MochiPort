@@ -302,8 +302,89 @@ struct ManageGateway: Decodable, Equatable {
     let filterImageGenerationTool: Bool
     let requestLoggingEnabled: Bool
     let requestLogDetailsEnabled: Bool
+    /// 请求日志保留天数；0 表示不自动清理。旧 daemon 不返回该字段。
+    let requestLogRetentionDays: Int
+    /// 请求日志库体积上限（MB）；0 表示不限制。
+    let requestLogMaxMb: Int
+    /// 请求日志库当前占用（字节）。
+    let requestLogDatabaseBytes: UInt64
     let codexVisibleModels: [String]
+    /// 自定义模型条目；旧 daemon 不返回该字段，缺省为空数组，保证升级窗口内
+    /// 新 GUI 仍能读旧 daemon 的网关配置。
+    let customModels: [ManageCustomModel]
+    /// 同名模型归属；旧 daemon 不返回该字段。
+    let modelOwners: [String: String]
+    /// 是否用服务商名给模型加显示前缀。
+    let providerDisplayPrefix: Bool
     let providers: [ManageGatewayProvider]
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case filterImageGenerationTool
+        case requestLoggingEnabled
+        case requestLogDetailsEnabled
+        case requestLogRetentionDays
+        case requestLogMaxMb
+        case requestLogDatabaseBytes
+        case codexVisibleModels
+        case customModels
+        case modelOwners
+        case providerDisplayPrefix
+        case providers
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        filterImageGenerationTool = try container.decode(Bool.self, forKey: .filterImageGenerationTool)
+        requestLoggingEnabled = try container.decode(Bool.self, forKey: .requestLoggingEnabled)
+        requestLogDetailsEnabled = try container.decode(Bool.self, forKey: .requestLogDetailsEnabled)
+        // 旧 daemon 不返回这些字段，缺省值与服务端默认保持一致。
+        requestLogRetentionDays =
+            try container.decodeIfPresent(Int.self, forKey: .requestLogRetentionDays) ?? 30
+        requestLogMaxMb =
+            try container.decodeIfPresent(Int.self, forKey: .requestLogMaxMb) ?? 256
+        requestLogDatabaseBytes =
+            try container.decodeIfPresent(UInt64.self, forKey: .requestLogDatabaseBytes) ?? 0
+        codexVisibleModels = try container.decode([String].self, forKey: .codexVisibleModels)
+        customModels =
+            try container.decodeIfPresent([ManageCustomModel].self, forKey: .customModels) ?? []
+        modelOwners =
+            try container.decodeIfPresent([String: String].self, forKey: .modelOwners) ?? [:]
+        providerDisplayPrefix =
+            try container.decodeIfPresent(Bool.self, forKey: .providerDisplayPrefix) ?? false
+        providers = try container.decode([ManageGatewayProvider].self, forKey: .providers)
+    }
+}
+
+/// 用户自定义的模型目录条目：内置目录之外的新模型在这里声明后即可被选中。
+/// 不声明时，服务商 `models` 列表里出现过的模型名也会按协议家族自动合成能力。
+struct ManageCustomModel: Codable, Equatable, Identifiable, Sendable {
+    var slug: String
+    var providerName: String?
+    var displayName: String?
+    /// 说明文案；接口里叫 `description`，这里改名为 `summary` 避免与
+    /// `CustomStringConvertible` 的同名属性混淆。
+    var summary: String?
+    /// 显式声明的协议家族；为空时按所属服务商推断。
+    var family: String?
+    var contextWindow: Int?
+    var supportsImageInput: Bool?
+    /// 服务端返回的实际生效家族（只读）。
+    var resolvedFamily: String?
+
+    var id: String { slug }
+
+    enum CodingKeys: String, CodingKey {
+        case slug
+        case providerName
+        case displayName
+        case summary = "description"
+        case family
+        case contextWindow
+        case supportsImageInput
+        case resolvedFamily
+    }
 }
 
 struct ManageGatewayProvider: Codable, Equatable, Identifiable, Sendable {
@@ -314,6 +395,8 @@ struct ManageGatewayProvider: Codable, Equatable, Identifiable, Sendable {
     let baseUrl: String
     let modelsUrl: String?
     let models: [String]
+    /// 上游 `/models` 发现到的模型元数据；旧 daemon 不返回该字段。
+    let discoveredModels: [ManageDiscoveredModel]?
     let modelAliases: [String: String]
     let promptCacheRetention: String?
     let weight: Int
@@ -340,15 +423,35 @@ struct ManageProviderTemplate: Decodable, Equatable, Identifiable {
     let models: [String]
 }
 
+/// 从上游 `/models` 发现到的模型元数据；只有上游明确声明的字段才有值。
+struct ManageDiscoveredModel: Codable, Equatable, Sendable {
+    var id: String
+    var displayName: String?
+    var contextWindow: Int?
+    var supportsImageInput: Bool?
+}
+
 struct ManageCodexModelCatalogResponse: Decodable, Equatable {
     let models: [ManageCodexCatalogModel]
 }
 
-/// Entry of the built-in Codex model catalog; `id` is the exact value that
-/// goes back into `codexVisibleModels`.
+/// Entry of the Codex model catalog; `id` is the exact value that goes back
+/// into `codexVisibleModels`. `source` is `builtin`, `custom` or `auto`.
 struct ManageCodexCatalogModel: Decodable, Equatable, Identifiable {
     let id: String
     let displayName: String
+    let description: String
+    let source: String
+    let contextWindow: Int?
+    let supportsImageInput: Bool?
+    /// 声明该模型的已启用服务商；旧 daemon 不返回该字段。
+    let providers: [String]?
+    /// 当前归属的服务商；nil 表示按权重 + 会话粘性自动选路。
+    let owner: String?
+    /// 归属是否仍然生效（provider 被禁用/删除/不再声明时为 false）。
+    let ownerEffective: Bool?
+
+    var declaringProviders: [String] { providers ?? [] }
 }
 
 struct ManageSettings: Decodable, Equatable {
@@ -488,6 +591,8 @@ struct ManageProviderModelsFetchResponse: Decodable, Equatable {
 
     let ok: Bool
     let models: [String]
+    /// 上游明确声明过的模型元数据；旧 daemon 不返回该字段。
+    let modelDetails: [ManageDiscoveredModel]?
     let attempts: [Attempt]
 }
 
@@ -1658,7 +1763,12 @@ struct APIClient: Sendable {
         filterImageGenerationTool: Bool,
         requestLoggingEnabled: Bool,
         requestLogDetailsEnabled: Bool,
-        codexVisibleModels: [String]
+        requestLogRetentionDays: Int? = nil,
+        requestLogMaxMb: Int? = nil,
+        codexVisibleModels: [String],
+        customModels: [ManageCustomModel]? = nil,
+        modelOwners: [String: String]? = nil,
+        providerDisplayPrefix: Bool? = nil
     ) async throws -> ManageGateway {
         let response: ManageGatewayMutationResponse = try await performManagePOST(
             path: "api/v1/manage/gateway/settings",
@@ -1667,7 +1777,12 @@ struct APIClient: Sendable {
                 filterImageGenerationTool: filterImageGenerationTool,
                 requestLoggingEnabled: requestLoggingEnabled,
                 requestLogDetailsEnabled: requestLogDetailsEnabled,
-                codexVisibleModels: codexVisibleModels
+                requestLogRetentionDays: requestLogRetentionDays,
+                requestLogMaxMb: requestLogMaxMb,
+                codexVisibleModels: codexVisibleModels,
+                customModels: customModels,
+                modelOwners: modelOwners,
+                providerDisplayPrefix: providerDisplayPrefix
             )
         )
         return response.gateway
@@ -1690,6 +1805,7 @@ struct APIClient: Sendable {
                 baseUrl: provider.baseUrl,
                 modelsUrl: provider.modelsUrl,
                 models: provider.models,
+                discoveredModels: provider.discoveredModels,
                 modelAliases: provider.modelAliases,
                 promptCacheRetention: provider.promptCacheRetention,
                 weight: provider.weight,
@@ -2015,7 +2131,14 @@ struct APIClient: Sendable {
         let filterImageGenerationTool: Bool
         let requestLoggingEnabled: Bool
         let requestLogDetailsEnabled: Bool
+        let requestLogRetentionDays: Int?
+        let requestLogMaxMb: Int?
         let codexVisibleModels: [String]
+        /// nil 表示保留现有自定义模型条目（旧调用方行为不变）。
+        let customModels: [ManageCustomModel]?
+        /// nil 表示保留现有归属配置。
+        let modelOwners: [String: String]?
+        let providerDisplayPrefix: Bool?
     }
 
     private struct UpsertGatewayProviderRequest: Encodable {
@@ -2027,6 +2150,7 @@ struct APIClient: Sendable {
         let baseUrl: String
         let modelsUrl: String?
         let models: [String]
+        let discoveredModels: [ManageDiscoveredModel]?
         let modelAliases: [String: String]
         let promptCacheRetention: String?
         let weight: Int

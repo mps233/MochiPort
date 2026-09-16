@@ -69,6 +69,7 @@ final class AppSettings {
         static let funWeeklyReport = "mochiport.funWeeklyReport"
         static let funSoundEnabled = "mochiport.funSoundEnabled"
         static let mascotAnimates = "mochiport.mascotAnimates"
+        static let companionIdleStyle = "mochiport.companionIdleStyle"
         static let onboardingCompleted = "mochiport.onboardingCompleted"
         static let notifyLimitThreshold = "mochiport.notifyLimitThreshold"
         static let notifyDepletion = "mochiport.notifyDepletion"
@@ -87,7 +88,8 @@ final class AppSettings {
             let keys = [
                 warnThreshold, critThreshold, notificationsEnabled, launchAtLogin,
                 menubarMode, menubarItems, funMilestone, funRecord, funStreak,
-                funWeeklyReport, funSoundEnabled, mascotAnimates, onboardingCompleted,
+                funWeeklyReport, funSoundEnabled, mascotAnimates, companionIdleStyle,
+                onboardingCompleted,
                 notifyLimitThreshold, notifyDepletion, notifyWindowReset,
                 notifyBurnSpike, notifyComeback, notifyBriefing, notifyUpdate,
                 realMode, customMessages,
@@ -205,6 +207,10 @@ final class AppSettings {
     var mascotAnimates: Bool {
         didSet { defaults.set(mascotAnimates, forKey: Key.mascotAnimates) }
     }
+    /// 概览页吉祥物的待机动画风格（CompanionIdleStyle 的 rawValue）。默认经典。
+    var companionIdleStyleRaw: String {
+        didSet { defaults.set(companionIdleStyleRaw, forKey: Key.companionIdleStyle) }
+    }
     /// 首次启动引导是否已完成。false 时启动显示引导向导。默认 false。
     var onboardingCompleted: Bool {
         didSet { defaults.set(onboardingCompleted, forKey: Key.onboardingCompleted) }
@@ -239,6 +245,7 @@ final class AppSettings {
         funWeeklyReport = defaults.object(forKey: Key.funWeeklyReport) as? Bool ?? true
         funSoundEnabled = defaults.object(forKey: Key.funSoundEnabled) as? Bool ?? false
         mascotAnimates = defaults.object(forKey: Key.mascotAnimates) as? Bool ?? false
+        companionIdleStyleRaw = defaults.string(forKey: Key.companionIdleStyle) ?? "classic"
         onboardingCompleted = defaults.object(forKey: Key.onboardingCompleted) as? Bool ?? false
         // 菜单栏条目：有新格式键就直接使用，否则从旧 menubarMode 迁移一次。
         if let rawItems = defaults.stringArray(forKey: Key.menubarItems) {

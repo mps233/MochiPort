@@ -25,6 +25,24 @@ pub struct AiGatewayConfig {
     ///
     /// 该列表只控制 `/models` 暴露给 Codex App 的 catalog 模型，不参与上游 provider 路由。
     pub codex_visible_models: Vec<String>,
+    /// 用户自定义的模型目录条目。
+    ///
+    /// 内置 `models.json` 之外的新模型在这里声明后即可被 `codexVisibleModels`
+    /// 选中；没声明、但被某个 provider 的 `models` 列表覆盖的模型名，也会按该
+    /// provider 的协议家族自动合成一个保守的目录条目。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_models: Vec<CustomModelConfig>,
+    /// 同名模型由多个 provider 声明时的归属：Codex 侧模型名 → provider 名称。
+    ///
+    /// 未配置的模型继续按权重 + 会话粘性选路；配置了但对应 provider 不可用
+    /// （被禁用、被删除或不再声明该模型）时自动回落到默认选路。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_owners: BTreeMap<String, String>,
+    /// 是否用服务商名给模型加显示前缀（`AutoClaw · GLM-5.3-Flash`）。
+    ///
+    /// 前缀跟随 provider 的 `name`；没有逐服务商覆盖。
+    #[serde(default)]
+    pub provider_display_prefix: bool,
     /// 是否过滤 Codex 请求中的 image_generation tool。
     pub filter_image_generation_tool: bool,
     /// 是否启用请求日志记录。
@@ -33,6 +51,18 @@ pub struct AiGatewayConfig {
     /// 是否记录请求/响应/SSE 详情。关闭时仍保留摘要指标。
     #[serde(default = "default_false")]
     pub request_log_details_enabled: bool,
+    /// 请求日志保留天数；0 表示不自动清理。
+    ///
+    /// 请求日志库会随使用持续增长（实测数周可达数十 MB）。daemon 会定期删除
+    /// 早于该天数的记录并回收空间；设 0 可关闭自动清理、完全手动管理。
+    #[serde(default = "default_request_log_retention_days")]
+    pub request_log_retention_days: u64,
+    /// 请求日志库体积上限（MB）；0 表示不按体积限制。
+    ///
+    /// 超过上限时按时间从旧到新删除，直到回落到上限以内，避免长期运行后
+    /// 数据库无界膨胀。
+    #[serde(default = "default_request_log_max_mb")]
+    pub request_log_max_mb: u64,
     /// Optional read-only connection to a Sub2API administration API. This is
     /// deliberately separate from provider API keys: it reads the upstream
     /// account pool instead of authorizing model requests.
@@ -47,6 +77,177 @@ pub struct Sub2ApiAdminConfig {
     pub admin_api_key: String,
 }
 
+/// 协议家族：决定自动合成目录条目时继承哪一套能力模板。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelFamily {
+    /// OpenAI Responses 透传。
+    OpenAiResponses,
+    /// DeepSeek Responses 原生透传。
+    #[serde(rename = "deepseek_responses")]
+    DeepSeekResponses,
+    /// Grok/xAI Responses 透传。
+    GrokResponses,
+    /// Chat Completions（DeepSeek 等）。
+    ChatCompletions,
+    /// Anthropic Messages（Claude/GLM 等）。
+    AnthropicMessages,
+}
+
+impl ModelFamily {
+    pub fn from_provider_type(provider_type: &ProviderType) -> Self {
+        match provider_type {
+            ProviderType::OpenAiResponses => Self::OpenAiResponses,
+            ProviderType::DeepSeekResponses => Self::DeepSeekResponses,
+            ProviderType::GrokResponses => Self::GrokResponses,
+            ProviderType::ChatCompletions => Self::ChatCompletions,
+            ProviderType::AnthropicMessages => Self::AnthropicMessages,
+        }
+    }
+}
+
+/// 用户自定义的模型目录条目。
+///
+/// 只描述“这个模型是什么”；Codex 依赖的协议字段（`comp_hash`、
+/// `apply_patch_tool_type`、`use_responses_lite`、`shell_type`、推理等级等）
+/// 由 `family` 或所属 provider 的协议家族模板补齐。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CustomModelConfig {
+    /// 模型名（同时是 `/models` 返回的 slug 与路由匹配名）。
+    pub slug: String,
+    /// 提供该模型的服务商名称；为空时按各 provider 的 `models` 列表推断。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
+    /// 前端显示名；为空时用 slug。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// 说明文案；为空时用协议家族的默认说明。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 显式覆盖的协议家族；为空时按所属 provider 的类型推断。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family: Option<ModelFamily>,
+    /// 上下文窗口（token）；为空时继承家族模板。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// 是否接受图片输入；默认 false（保守）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_image_input: Option<bool>,
+}
+
+impl CustomModelConfig {
+    pub fn normalized_slug(&self) -> Option<&str> {
+        let slug = self.slug.trim();
+        (!slug.is_empty()).then_some(slug)
+    }
+
+    /// 解析该条目应使用的协议家族：显式声明优先，其次看 provider 类型。
+    pub fn resolve_family(&self, config: &AiGatewayConfig) -> ModelFamily {
+        if let Some(family) = self.family {
+            return family;
+        }
+        config
+            .provider_for_custom_model(self.normalized_slug().unwrap_or_default())
+            .map(|provider| ModelFamily::from_provider_type(&provider.provider_type))
+            .unwrap_or(ModelFamily::ChatCompletions)
+    }
+}
+
+impl AiGatewayConfig {
+    /// 声明了该模型名的自定义条目。
+    pub fn custom_model(&self, model: &str) -> Option<&CustomModelConfig> {
+        self.custom_models.iter().find(|entry| {
+            entry
+                .normalized_slug()
+                .is_some_and(|slug| slug.eq_ignore_ascii_case(model.trim()))
+        })
+    }
+
+    /// 服务该模型的 provider（优先看自定义条目声明的 providerName）。
+    pub fn provider_for_custom_model(&self, model: &str) -> Option<&ProviderConfig> {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        if let Some(entry) = self.custom_model(model)
+            && let Some(name) = entry
+                .provider_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+        {
+            return self.providers.iter().find(|provider| provider.name == name);
+        }
+        self.providers
+            .iter()
+            .find(|provider| provider.enabled && provider.matches_model(model))
+    }
+
+    /// 该模型名当前配置的归属 provider 名称（大小写不敏感匹配）。
+    pub fn model_owner(&self, model: &str) -> Option<&str> {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        self.model_owners
+            .iter()
+            .find(|(key, _)| key.trim().eq_ignore_ascii_case(model))
+            .map(|(_, owner)| owner.trim())
+            .filter(|owner| !owner.is_empty())
+    }
+
+    /// 归属是否真正生效：对应 provider 必须存在、启用且仍声明该模型。
+    ///
+    /// 归属失效时不报错，只是回落到默认的权重 + 粘性选路；GUI 会据此提示。
+    pub fn effective_model_owner(&self, model: &str) -> Option<&ProviderConfig> {
+        let owner = self.model_owner(model)?;
+        self.providers.iter().find(|provider| {
+            provider.name == owner && provider.enabled && provider.matches_model(model)
+        })
+    }
+
+    /// 该模型的显示名前缀：全局开关打开时就是服务商的名字（`Mac_Local`）。
+    ///
+    /// 前缀永远跟随服务商 `name`，没有逐服务商覆盖，改名字前缀自动跟着变。
+    pub fn model_display_prefix(&self, model: &str) -> Option<&str> {
+        if !self.provider_display_prefix {
+            return None;
+        }
+        let provider = self
+            .effective_model_owner(model)
+            .or_else(|| self.provider_for_custom_model(model))?;
+        let name = provider.name.trim();
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// 归一化归属表：去掉空 key / 空 value，key 去重（后者覆盖前者）。
+    pub fn normalize_model_owners(owners: BTreeMap<String, String>) -> BTreeMap<String, String> {
+        let mut normalized: BTreeMap<String, String> = BTreeMap::new();
+        for (key, value) in owners {
+            let key = key.trim();
+            let value = value.trim();
+            if key.is_empty() || value.is_empty() {
+                continue;
+            }
+            // 大小写不敏感去重：保留先出现的 key 拼写，后者只覆盖 value。
+            match normalized
+                .keys()
+                .find(|existing| existing.eq_ignore_ascii_case(key))
+                .cloned()
+            {
+                Some(existing) => {
+                    normalized.insert(existing, value.to_string());
+                }
+                None => {
+                    normalized.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+        normalized
+    }
+}
+
 impl Sub2ApiAdminConfig {
     pub fn is_empty(&self) -> bool {
         self.base_url.trim().is_empty() && self.admin_api_key.trim().is_empty()
@@ -55,6 +256,14 @@ impl Sub2ApiAdminConfig {
     pub fn is_configured(&self) -> bool {
         !self.base_url.trim().is_empty() && !self.admin_api_key.trim().is_empty()
     }
+}
+
+fn default_request_log_retention_days() -> u64 {
+    30
+}
+
+fn default_request_log_max_mb() -> u64 {
+    256
 }
 
 fn default_false() -> bool {
@@ -174,6 +383,42 @@ pub fn provider_display_base_url(base_url: &str) -> String {
     }
 }
 
+/// 上游 `/models` 发现到的单个模型元数据。
+///
+/// 字段全部可选：只有上游明确声明的信息才落库，避免把猜测当成能力。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscoveredModel {
+    /// 上游模型名。
+    pub id: String,
+    /// 上游声明的展示名。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// 上游声明的上下文窗口。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// 上游明确声明的图片输入能力。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_image_input: Option<bool>,
+}
+
+impl DiscoveredModel {
+    pub fn normalized_id(&self) -> Option<&str> {
+        let id = self.id.trim();
+        (!id.is_empty()).then_some(id)
+    }
+
+    fn normalized(mut self) -> Option<Self> {
+        self.id = self.normalized_id()?.to_string();
+        self.display_name = self
+            .display_name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        self.context_window = self.context_window.filter(|value| *value > 0);
+        Some(self)
+    }
+}
+
 /// 单个 provider 配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -196,6 +441,12 @@ pub struct ProviderConfig {
     pub api_key: String,
     /// 该 provider 支持的 model 列表（精确匹配用）。
     pub models: Vec<String>,
+    /// 从上游 `/models` 自动发现到的模型元数据。
+    ///
+    /// 只用于给「目录之外的模型名」补齐显示名、上下文窗口和图片能力；
+    /// 上游没有明确声明时保守留空，不参与路由匹配。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discovered_models: Vec<DiscoveredModel>,
     /// Codex 侧 model 到上游 provider model 的映射。
     ///
     /// 例如 `glm-5.2 = "GLM-5.2"`。路由使用 key 匹配 Codex 请求，出站使用 value。
@@ -221,6 +472,7 @@ impl Default for ProviderConfig {
             models_url: None,
             api_key: String::new(),
             models: Vec::new(),
+            discovered_models: Vec::new(),
             model_aliases: BTreeMap::new(),
             prompt_cache_retention: None,
             weight: DEFAULT_PROVIDER_WEIGHT,
@@ -232,6 +484,38 @@ impl Default for ProviderConfig {
 impl ProviderConfig {
     pub fn effective_weight(&self) -> u32 {
         self.weight.max(1)
+    }
+
+    /// 该 provider 记录的上游模型元数据。
+    pub fn discovered_model(&self, model: &str) -> Option<&DiscoveredModel> {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        self.discovered_models.iter().find(|entry| {
+            entry
+                .normalized_id()
+                .is_some_and(|id| id.eq_ignore_ascii_case(model))
+        })
+    }
+
+    /// 归一化并去重上游发现的模型元数据（后写覆盖先写）。
+    pub fn normalize_discovered_models(entries: Vec<DiscoveredModel>) -> Vec<DiscoveredModel> {
+        let mut normalized: Vec<DiscoveredModel> = Vec::new();
+        for entry in entries {
+            let Some(entry) = entry.normalized() else {
+                continue;
+            };
+            if let Some(existing) = normalized
+                .iter_mut()
+                .find(|existing| existing.id.eq_ignore_ascii_case(&entry.id))
+            {
+                *existing = entry;
+                continue;
+            }
+            normalized.push(entry);
+        }
+        normalized
     }
 
     pub fn matches_model(&self, model: &str) -> bool {
@@ -299,6 +583,51 @@ mod tests {
             providers,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn model_owners_are_case_insensitive_and_require_a_usable_provider() {
+        let mut config = AiGatewayConfig {
+            enabled: true,
+            providers: vec![
+                make_provider("openai", ProviderType::OpenAiResponses, vec!["m"]),
+                make_provider("autoclaw", ProviderType::ChatCompletions, vec!["m"]),
+            ],
+            ..Default::default()
+        };
+        config
+            .model_owners
+            .insert("M".to_string(), "autoclaw".to_string());
+
+        // 名字大小写不敏感。
+        assert_eq!(config.model_owner("m"), Some("autoclaw"));
+        assert_eq!(
+            config.effective_model_owner("m").map(|p| p.name.as_str()),
+            Some("autoclaw")
+        );
+
+        // provider 禁用后归属失效。
+        config.providers[1].enabled = false;
+        assert!(config.effective_model_owner("m").is_none());
+        assert_eq!(config.model_owner("m"), Some("autoclaw"));
+    }
+
+    #[test]
+    fn normalize_model_owners_drops_empty_entries_and_dedupes_case_insensitively() {
+        let mut owners = BTreeMap::new();
+        owners.insert("  ".to_string(), "autoclaw".to_string());
+        owners.insert("keep".to_string(), "  ".to_string());
+        // BTreeMap 按 key 排序迭代：先 "Model"（openai）后 "model"（autoclaw）。
+        owners.insert("Model".to_string(), "openai".to_string());
+        owners.insert("model".to_string(), "autoclaw".to_string());
+
+        let normalized = AiGatewayConfig::normalize_model_owners(owners);
+        assert_eq!(normalized.len(), 1);
+        // 保留先出现的 key 拼写，最后处理到的 value 生效。
+        assert_eq!(
+            normalized.get("Model").map(String::as_str),
+            Some("autoclaw")
+        );
     }
 
     #[test]

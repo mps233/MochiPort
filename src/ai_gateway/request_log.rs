@@ -331,6 +331,41 @@ impl RequestLogStore {
         self.run_maintenance(delete_all_with_conn)
     }
 
+    /// 数据库文件当前占用（主库 + WAL + SHM）。
+    pub fn database_size_bytes(&self) -> u64 {
+        let mut total = 0;
+        for suffix in ["", "-wal", "-shm"] {
+            let path = PathBuf::from(format!("{}{suffix}", self.inner.db_path.display()));
+            if let Ok(metadata) = std::fs::metadata(&path) {
+                total += metadata.len();
+            }
+        }
+        total
+    }
+
+    /// 按体积上限清理：从最旧的记录开始删，直到回落到 `max_bytes` 以内。
+    ///
+    /// 返回删除的行数；`max_bytes` 为 0 时不动作（表示不限制）。
+    pub fn trim_to_size(&self, max_bytes: u64) -> rusqlite::Result<usize> {
+        if max_bytes == 0 {
+            return Ok(0);
+        }
+        let mut total_deleted = 0;
+        // 每轮删一批再重新量体积：一次删太多既慢又可能清得过头。
+        // 上限 64 轮，避免异常情况下的长时间占用。
+        for _ in 0..64 {
+            if self.database_size_bytes() <= max_bytes {
+                break;
+            }
+            let deleted = self.run_maintenance(|conn| delete_oldest_batch_with_conn(conn, 500))?;
+            total_deleted += deleted;
+            if deleted == 0 {
+                break;
+            }
+        }
+        Ok(total_deleted)
+    }
+
     pub fn get_detail(&self, id: i64) -> rusqlite::Result<Option<RequestLogDetail>> {
         if self.inner.maintenance_active.load(Ordering::Acquire) {
             return Err(rusqlite::Error::InvalidQuery);
@@ -1245,6 +1280,20 @@ fn max_log_id_with_conn(conn: &Connection) -> rusqlite::Result<i64> {
     )
 }
 
+/// 删除最旧的 `limit` 条记录，返回实际删除行数。
+fn delete_oldest_batch_with_conn(conn: &Connection, limit: usize) -> rusqlite::Result<usize> {
+    let mut statement = conn.prepare(
+        "DELETE FROM ai_gateway_request_logs WHERE id IN (\
+             SELECT id FROM ai_gateway_request_logs ORDER BY created_at_ms ASC, id ASC LIMIT ?1\
+         )",
+    )?;
+    let deleted = statement.execute([limit as i64])?;
+    drop(statement);
+    // 回收空间，否则文件只会增长不会缩小。
+    vacuum_after_delete(conn, deleted)?;
+    Ok(deleted)
+}
+
 fn vacuum_after_delete(conn: &Connection, deleted: usize) -> rusqlite::Result<()> {
     if deleted == 0 {
         return Ok(());
@@ -1870,6 +1919,61 @@ mod tests {
             "codexhub-request-log-test-{}.sqlite",
             uuid::Uuid::new_v4()
         ))
+    }
+
+    #[test]
+    fn database_size_bytes_counts_the_main_file() {
+        let db_path = temp_db_path();
+        let store = test_store(&db_path);
+        store
+            .insert_record(&query_test_record("size", "m", "ch", "t", "ok", now_ms()))
+            .expect("insert");
+        assert!(
+            store.database_size_bytes() > 0,
+            "database should occupy space once written"
+        );
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn trim_to_size_is_a_noop_when_unlimited() {
+        let db_path = temp_db_path();
+        let store = test_store(&db_path);
+        store
+            .insert_record(&query_test_record("keep", "m", "ch", "t", "ok", now_ms()))
+            .expect("insert");
+        // 0 表示不限制：不删除任何行。
+        assert_eq!(store.trim_to_size(0).expect("trim"), 0);
+        assert_eq!(store.list_recent(10).expect("list").len(), 1);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn trim_to_size_deletes_oldest_rows_first() {
+        let db_path = temp_db_path();
+        let store = test_store(&db_path);
+        let now = now_ms();
+        for index in 0..300 {
+            store
+                .insert_record(&query_test_record(
+                    &format!("req-{index}"),
+                    "m",
+                    "ch",
+                    "t",
+                    "ok",
+                    now - (300 - index) * 1000,
+                ))
+                .expect("insert");
+        }
+        let before = store.database_size_bytes();
+        // 一个极小的上限，强制触发裁剪。
+        let deleted = store.trim_to_size(1024).expect("trim");
+        assert!(deleted > 0, "expected rows to be trimmed");
+        assert!(
+            store.database_size_bytes() <= before,
+            "trimming must not grow the database"
+        );
+        let _ = std::fs::remove_file(&db_path);
     }
 
     fn test_store(db_path: &Path) -> RequestLogStore {

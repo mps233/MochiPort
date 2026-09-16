@@ -13,7 +13,10 @@ use serde_json::{Value, json};
 use crate::{
     ai_gateway::{
         catalog,
-        config::{ProviderConfig, ProviderType, Sub2ApiAdminConfig},
+        config::{
+            AiGatewayConfig, CustomModelConfig, DiscoveredModel, ModelFamily, ProviderConfig,
+            ProviderType, Sub2ApiAdminConfig,
+        },
         model_fetch, provider_usage, request_log, sub2api_accounts,
         templates::{self, ProviderTemplate},
     },
@@ -30,8 +33,44 @@ struct ManageGatewayResponse {
     filter_image_generation_tool: bool,
     request_logging_enabled: bool,
     request_log_details_enabled: bool,
+    request_log_retention_days: u64,
+    request_log_max_mb: u64,
+    /// 请求日志库当前占用（字节），供界面显示。
+    request_log_database_bytes: u64,
     codex_visible_models: Vec<String>,
+    custom_models: Vec<ManageCustomModelResponse>,
+    model_owners: BTreeMap<String, String>,
+    provider_display_prefix: bool,
     providers: Vec<ManageProviderResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageCustomModelResponse {
+    slug: String,
+    provider_name: Option<String>,
+    display_name: Option<String>,
+    description: Option<String>,
+    family: Option<ModelFamily>,
+    context_window: Option<u64>,
+    supports_image_input: Option<bool>,
+    /// 该条目实际生效的协议家族（未显式声明时按所属服务商推断）。
+    resolved_family: ModelFamily,
+}
+
+impl ManageCustomModelResponse {
+    fn from_entry(config: &AiGatewayConfig, entry: &CustomModelConfig) -> Option<Self> {
+        Some(Self {
+            slug: entry.normalized_slug()?.to_string(),
+            provider_name: entry.provider_name.clone(),
+            display_name: entry.display_name.clone(),
+            description: entry.description.clone(),
+            family: entry.family,
+            context_window: entry.context_window,
+            supports_image_input: entry.supports_image_input,
+            resolved_family: entry.resolve_family(config),
+        })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -44,6 +83,7 @@ struct ManageProviderResponse {
     base_url: String,
     models_url: Option<String>,
     models: Vec<String>,
+    discovered_models: Vec<DiscoveredModel>,
     model_aliases: BTreeMap<String, String>,
     prompt_cache_retention: Option<String>,
     weight: u32,
@@ -61,6 +101,7 @@ impl From<&ProviderConfig> for ManageProviderResponse {
             base_url: masked_url(&provider.base_url),
             models_url: provider.models_url.as_deref().map(masked_url),
             models: provider.models.clone(),
+            discovered_models: provider.discovered_models.clone(),
             model_aliases: provider.model_aliases.clone(),
             prompt_cache_retention: provider.prompt_cache_retention.clone(),
             weight: provider.weight,
@@ -77,8 +118,23 @@ pub(super) struct UpdateGatewayRequest {
     filter_image_generation_tool: bool,
     request_logging_enabled: bool,
     request_log_details_enabled: bool,
+    /// 请求日志保留天数；缺省表示保持现状。
+    #[serde(default)]
+    request_log_retention_days: Option<u64>,
+    /// 请求日志库体积上限（MB）；缺省表示保持现状。
+    #[serde(default)]
+    request_log_max_mb: Option<u64>,
     #[serde(default)]
     codex_visible_models: Vec<String>,
+    /// 自定义模型条目；缺省表示保持现状（旧客户端不会带这个字段）。
+    #[serde(default)]
+    custom_models: Option<Vec<CustomModelConfig>>,
+    /// 同名模型归属；缺省表示保持现状。
+    #[serde(default)]
+    model_owners: Option<BTreeMap<String, String>>,
+    /// 是否用服务商名给模型加显示前缀；缺省表示保持现状。
+    #[serde(default)]
+    provider_display_prefix: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +149,9 @@ pub(super) struct UpsertProviderRequest {
     models_url: Option<String>,
     #[serde(default)]
     models: Vec<String>,
+    /// 从上游 `/models` 发现到的模型元数据（可选）。
+    #[serde(default)]
+    discovered_models: Vec<DiscoveredModel>,
     #[serde(default)]
     model_aliases: BTreeMap<String, String>,
     prompt_cache_retention: Option<String>,
@@ -257,6 +316,18 @@ struct CodexModelCatalogResponse {
 struct CodexCatalogModelResponse {
     id: String,
     display_name: String,
+    description: String,
+    /// builtin / custom / auto
+    source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supports_image_input: Option<bool>,
+    /// 声明该模型的已启用服务商。
+    providers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
+    owner_effective: bool,
 }
 
 /// 内置服务商模板：纯静态数据，与用户已配置的 provider 完全无关。
@@ -269,22 +340,38 @@ pub(super) async fn provider_templates() -> impl IntoResponse {
     })
 }
 
-/// 内置 Codex 模型目录中对 API 可见（可列出）的模型。
-pub(super) async fn codex_models_catalog() -> impl IntoResponse {
-    Json(CodexModelCatalogResponse {
-        models: catalog::visible_catalog_model_options()
-            .into_iter()
-            .map(|option| CodexCatalogModelResponse {
-                id: option.slug,
-                display_name: option.display_name,
-            })
-            .collect(),
-    })
+/// Codex 可用的模型目录：内置目录 + 用户自定义条目 + 服务商模型的自动合成项。
+pub(super) async fn codex_models_catalog(State(state): State<SharedState>) -> impl IntoResponse {
+    let config = state.config.lock().await;
+    let models = catalog::gui_catalog_model_options(&config.ai_gateway)
+        .into_iter()
+        .map(|option| CodexCatalogModelResponse {
+            id: option.slug,
+            display_name: option.display_name,
+            description: option.description,
+            source: match option.source {
+                catalog::CatalogModelSource::Builtin => "builtin",
+                catalog::CatalogModelSource::Custom => "custom",
+                catalog::CatalogModelSource::Auto => "auto",
+            }
+            .to_string(),
+            context_window: option.context_window,
+            supports_image_input: option.supports_image_input,
+            providers: option.providers,
+            owner: option.owner,
+            owner_effective: option.owner_effective,
+        })
+        .collect();
+    Json(CodexModelCatalogResponse { models })
 }
 
 pub(super) async fn gateway(State(state): State<SharedState>) -> impl IntoResponse {
     let config = state.config.lock().await;
-    Json(gateway_snapshot(&config.ai_gateway))
+    let request_log_bytes = state.ai_gateway_request_logs.database_size_bytes();
+    Json(gateway_snapshot_with_size(
+        &config.ai_gateway,
+        request_log_bytes,
+    ))
 }
 
 pub(super) async fn update_gateway(
@@ -296,8 +383,23 @@ pub(super) async fn update_gateway(
     next.ai_gateway.enabled = request.enabled;
     next.ai_gateway.filter_image_generation_tool = request.filter_image_generation_tool;
     next.ai_gateway.request_logging_enabled = request.request_logging_enabled;
+    if let Some(days) = request.request_log_retention_days {
+        next.ai_gateway.request_log_retention_days = days.min(3650);
+    }
+    if let Some(max_mb) = request.request_log_max_mb {
+        next.ai_gateway.request_log_max_mb = max_mb.min(102_400);
+    }
     next.ai_gateway.request_log_details_enabled = request.request_log_details_enabled;
     next.ai_gateway.codex_visible_models = normalized_values(request.codex_visible_models);
+    if let Some(custom_models) = request.custom_models {
+        next.ai_gateway.custom_models = normalized_custom_models(custom_models);
+    }
+    if let Some(model_owners) = request.model_owners {
+        next.ai_gateway.model_owners = AiGatewayConfig::normalize_model_owners(model_owners);
+    }
+    if let Some(enabled) = request.provider_display_prefix {
+        next.ai_gateway.provider_display_prefix = enabled;
+    }
 
     if let Err(error) = next.save(&state.config_path) {
         return operation_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
@@ -387,6 +489,12 @@ pub(super) async fn upsert_provider(
     provider.base_url = base_url;
     provider.models_url = models_url;
     provider.models = normalized_values(request.models);
+    if !request.discovered_models.is_empty() {
+        provider.discovered_models =
+            ProviderConfig::normalize_discovered_models(request.discovered_models);
+    } else if existing_index.is_none() {
+        provider.discovered_models = Vec::new();
+    }
     provider.model_aliases = request
         .model_aliases
         .into_iter()
@@ -695,16 +803,25 @@ pub(super) async fn fetch_provider_models(
     )
     .await;
 
-    let (ok, models) = match outcome.models {
+    let (ok, details) = match outcome.models {
         Some(models) => (
             true,
             model_fetch::filter_fetched_models_for_provider(&request.provider_type, models),
         ),
         None => (false, Vec::new()),
     };
+    let models = details
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
     (
         StatusCode::OK,
-        Json(json!({ "ok": ok, "models": models, "attempts": outcome.attempts })),
+        Json(json!({
+            "ok": ok,
+            "models": models,
+            "modelDetails": details,
+            "attempts": outcome.attempts,
+        })),
     )
 }
 
@@ -968,13 +1085,30 @@ pub(super) async fn set_sub2api_account_schedulable(
     }
 }
 
-fn gateway_snapshot(config: &crate::ai_gateway::config::AiGatewayConfig) -> ManageGatewayResponse {
+fn gateway_snapshot(config: &AiGatewayConfig) -> ManageGatewayResponse {
+    gateway_snapshot_with_size(config, 0)
+}
+
+fn gateway_snapshot_with_size(
+    config: &AiGatewayConfig,
+    request_log_bytes: u64,
+) -> ManageGatewayResponse {
     ManageGatewayResponse {
         enabled: config.enabled,
         filter_image_generation_tool: config.filter_image_generation_tool,
         request_logging_enabled: config.request_logging_enabled,
         request_log_details_enabled: config.request_log_details_enabled,
+        request_log_retention_days: config.request_log_retention_days,
+        request_log_max_mb: config.request_log_max_mb,
+        request_log_database_bytes: request_log_bytes,
         codex_visible_models: config.codex_visible_models.clone(),
+        custom_models: config
+            .custom_models
+            .iter()
+            .filter_map(|entry| ManageCustomModelResponse::from_entry(config, entry))
+            .collect(),
+        model_owners: config.model_owners.clone(),
+        provider_display_prefix: config.provider_display_prefix,
         providers: config
             .providers
             .iter()
@@ -1020,6 +1154,30 @@ fn normalized_values(values: Vec<String>) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .filter(|value| seen.insert(value.clone()))
         .collect()
+}
+
+/// 自定义模型条目归一化：去掉空 slug、按 slug 去重（后写的覆盖先写的）、清理空字段。
+fn normalized_custom_models(entries: Vec<CustomModelConfig>) -> Vec<CustomModelConfig> {
+    let mut normalized: Vec<CustomModelConfig> = Vec::new();
+    for mut entry in entries {
+        let Some(slug) = entry.normalized_slug().map(str::to_string) else {
+            continue;
+        };
+        entry.slug = slug;
+        entry.provider_name = non_empty_owned(entry.provider_name);
+        entry.display_name = non_empty_owned(entry.display_name);
+        entry.description = non_empty_owned(entry.description);
+        entry.context_window = entry.context_window.filter(|value| *value > 0);
+        if let Some(existing) = normalized
+            .iter_mut()
+            .find(|existing| existing.slug.eq_ignore_ascii_case(&entry.slug))
+        {
+            *existing = entry;
+            continue;
+        }
+        normalized.push(entry);
+    }
+    normalized
 }
 
 fn normalized_theme(value: Option<String>) -> Result<Option<String>, ()> {

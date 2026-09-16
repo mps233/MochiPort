@@ -117,11 +117,11 @@ struct RootView: View {
                 }
             }
             .navigationTitle((model.selection ?? .overview).title)
-            // Let macOS 26 provide the title-bar material and scroll-edge
-            // treatment. A hand-painted background or gradient here prevents
-            // the toolbar from sampling the live content beneath it.
-            .toolbarBackgroundVisibility(.hidden, for: .automatic)
-            .scrollEdgeEffectStyle(.soft, for: .top)
+            // Show the native window-toolbar material so scrolling content
+            // blurs underneath it. A hand-painted background or gradient here
+            // prevents the material from sampling the live content beneath.
+            .toolbarBackground(.regularMaterial, for: .windowToolbar)
+            .toolbarBackgroundVisibility(.visible, for: .windowToolbar)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 GatewayQuotaDock()
@@ -327,8 +327,24 @@ private struct OverviewView: View {
                     store: menubar.store,
                     statsStore: menubar.statsStore,
                     providerUsage: model.gatewayProviderUsage,
-                    mascotAnimates: menubar.settings.mascotAnimates
+                    companionSignals: CompanionSignals(
+                        serviceAvailable: model.serviceStatus == .available,
+                        gatewayInFlight: model.companionWorkload.gatewayInFlight,
+                        pendingWork: model.companionWorkload.pendingWork,
+                        remoteControlUnhealthy: model.dashboard?.remoteControlConnected == true
+                            && model.dashboard?.remoteControlHealthy == false,
+                        latestFailureID: model.companionLatestFailure?.logID,
+                        latestFailureDate: model.companionLatestFailure?.date
+                    ),
+                    celebrationEventID: companionCelebrationEventID(in: menubar.eventLog),
+                    mascotAnimates: menubar.settings.mascotAnimates,
+                    idleStyle: CompanionIdleStyle(
+                        rawValue: menubar.settings.companionIdleStyleRaw
+                    ) ?? .classic
                 )
+                .task {
+                    await model.companionSignalWatchLoop()
+                }
                 .task {
                     while !Task.isCancelled {
                         await model.refreshGatewayProviderUsage()

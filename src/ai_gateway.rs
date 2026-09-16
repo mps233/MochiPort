@@ -8,6 +8,7 @@ pub mod error;
 pub mod handler;
 pub mod model;
 pub mod model_fetch;
+pub mod model_sync;
 pub mod provider_usage;
 pub mod providers;
 pub mod request_log;

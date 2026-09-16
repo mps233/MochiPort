@@ -1399,12 +1399,24 @@ struct GatewayView: View {
     @State private var filterImages = false
     @State private var requestLogging = false
     @State private var requestDetails = false
+    /// 请求日志保留天数；0 表示不自动清理。
+    @State private var requestLogRetentionDays = 30
+    /// 请求日志库体积上限（MB）；0 表示不限制。
+    @State private var requestLogMaxMb = 256
+    /// 请求日志库当前占用（字节）。
+    @State private var requestLogDatabaseBytes: UInt64 = 0
     @State private var visibleModels = ""
     @State private var settingsReady = false
     @State private var modelCatalog: [ManageCodexCatalogModel] = []
     @State private var selectedCatalogModels = Set<String>()
     @State private var customVisibleModelInput = ""
     @State private var manualVisibleModelsExpanded = false
+    @State private var customModels: [ManageCustomModel] = []
+    @State private var modelOwners: [String: String] = [:]
+    @State private var providerDisplayPrefix = false
+    @State private var catalogGroupFilter = ""
+    @State private var catalogQuery = ""
+    @State private var customModelEditor: CustomModelEditorState?
     @State private var editor: GatewayProviderEditorState?
     @State private var providerToDelete: ManageGatewayProvider?
     @State private var providerQuery = ""
@@ -1458,11 +1470,23 @@ struct GatewayView: View {
             await model.loadSection(.gateway)
             // The catalog endpoint may not exist on an older daemon; an empty
             // catalog keeps the plain text editor as the only input.
-            modelCatalog = await model.loadCodexModelCatalog() ?? []
+            await reloadModelCatalog()
             synchronizeGateway(model.gateway)
         }
         .onChange(of: model.gateway) { _, gateway in
             synchronizeGateway(gateway)
+            // 目录条目里的显示名（服务商前缀、发现到的元数据）是服务端按
+            // 当前配置实时算的：改了服务商名/模型列表后要重新拉一次，
+            // 否则这份列表会一直显示旧名字。
+            Task { await reloadModelCatalog() }
+        }
+        .sheet(item: $customModelEditor) { state in
+            CustomModelEditorSheet(
+                state: state,
+                providers: model.gateway?.providers ?? []
+            ) { entry, previousSlug in
+                upsertCustomModel(entry, previousSlug: previousSlug)
+            }
         }
         .sheet(item: $editor) { state in
             GatewayProviderEditor(state: state) { originalName, provider, apiKey, clearAPIKey in
@@ -1589,6 +1613,42 @@ struct GatewayView: View {
                         .toggleStyle(.switch)
                         .disabled(!requestLogging || preferencesSaving)
                 }
+                GatewayPreferenceRow(
+                    title: "自动清理",
+                    detail: "删除超过 \(requestLogRetentionDays) 天的记录"
+                        + (requestLogMaxMb > 0 ? "，并把总量控制在 \(requestLogMaxMb) MB 以内。" : "。")
+                        + " 当前占用 \(Self.byteLabel(requestLogDatabaseBytes))。"
+                ) {
+                    HStack(spacing: 10) {
+                        Stepper(value: $requestLogRetentionDays, in: 0...3650, step: 1) {
+                            Text(requestLogRetentionDays == 0
+                                ? "不按时间清理"
+                                : "\(requestLogRetentionDays) 天")
+                                .monospacedDigit()
+                        }
+                        .onChange(of: requestLogRetentionDays) { _, _ in saveGatewayPreferences() }
+                        Stepper(value: $requestLogMaxMb, in: 0...102_400, step: 64) {
+                            Text(requestLogMaxMb == 0
+                                ? "不限体积"
+                                : "\(requestLogMaxMb) MB")
+                                .monospacedDigit()
+                        }
+                        .onChange(of: requestLogMaxMb) { _, _ in saveGatewayPreferences() }
+                    }
+                    .disabled(preferencesSaving)
+                }
+                GatewayPreferenceRow(
+                    title: "立即清理",
+                    detail: "删除全部请求日志并回收空间；当前占用 \(Self.byteLabel(requestLogDatabaseBytes))。"
+                ) {
+                    Button("清空请求日志") {
+                        Task {
+                            _ = await model.clearRequestLogs()
+                            await model.loadSection(.gateway, force: true)
+                        }
+                    }
+                    .disabled(preferencesSaving || model.isLoading(.gateway))
+                }
             }
         }
         .formStyle(.grouped)
@@ -1657,14 +1717,19 @@ struct GatewayView: View {
             }
 
             Section {
+                catalogToolbar
                 if modelCatalog.isEmpty {
                     Text("暂时没有目录模型，可在下方添加自定义模型。")
                         .foregroundStyle(.secondary)
-                } else if filteredVisibleCatalogModels.isEmpty {
+                } else if catalogGroups.isEmpty {
                     Text("没有匹配的目录模型。")
                         .foregroundStyle(.secondary)
-                } else {
-                    ForEach(filteredVisibleCatalogModels) { entry in
+                }
+            }
+
+            ForEach(catalogGroups) { group in
+                Section {
+                    ForEach(group.models) { entry in
                         let selected = selectedCatalogModels.contains(entry.id)
                         Button {
                             catalogBinding(entry.id).wrappedValue.toggle()
@@ -1673,13 +1738,67 @@ struct GatewayView: View {
                                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                                     .foregroundStyle(selected ? Color.accentColor : .secondary)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(entry.displayName)
-                                        .font(.body.weight(.medium))
-                                    Text(entry.id)
-                                        .font(.caption2.monospaced())
-                                        .foregroundStyle(.secondary)
+                                    HStack(spacing: 6) {
+                                        Text(entry.displayName)
+                                            .font(.body.weight(.medium))
+                                        if entry.source != "builtin" {
+                                            Text(entry.source == "custom" ? "自定义" : "自动")
+                                                .font(.caption2)
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 1)
+                                                .background(
+                                                    Color.secondary.opacity(0.12),
+                                                    in: Capsule()
+                                                )
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    HStack(spacing: 6) {
+                                        Text(entry.id)
+                                            .font(.caption2.monospaced())
+                                        if let context = entry.contextWindow {
+                                            Text(contextLabel(context))
+                                                .font(.caption2.monospacedDigit())
+                                        }
+                                        if entry.supportsImageInput == true {
+                                            Image(systemName: "photo")
+                                                .font(.system(size: 10))
+                                        }
+                                    }
+                                    .foregroundStyle(.secondary)
                                 }
                                 Spacer(minLength: 0)
+                                if entry.declaringProviders.count > 1 || !(modelOwners[entry.id] ?? "").isEmpty {
+                                    Menu {
+                                        Button("自动（按权重与会话粘性）") {
+                                            modelOwners.removeValue(forKey: entry.id)
+                                            saveVisibleModels()
+                                        }
+                                        ForEach(entry.declaringProviders, id: \.self) { provider in
+                                            Button(provider) {
+                                                modelOwners[entry.id] = provider
+                                                saveVisibleModels()
+                                            }
+                                        }
+                                    } label: {
+                                        HStack(spacing: 3) {
+                                            Image(systemName: "arrow.triangle.branch")
+                                                .font(.system(size: 10))
+                                            Text(modelOwners[entry.id] ?? "自动")
+                                                .font(.caption2)
+                                        }
+                                        .foregroundStyle(
+                                            entry.ownerEffective == false ? Color.orange : Color.secondary
+                                        )
+                                    }
+                                    .menuStyle(.borderlessButton)
+                                    .fixedSize()
+                                    .help(
+                                        entry.ownerEffective == false
+                                            ? "归属的服务商已停用或不再声明该模型，已回落到自动选路"
+                                            : "指定这个模型名固定走哪家服务商"
+                                    )
+                                }
                             }
                             .contentShape(Rectangle())
                         }
@@ -1687,14 +1806,21 @@ struct GatewayView: View {
                         .accessibilityLabel("可见模型 \(entry.displayName)")
                         .accessibilityValue(selected ? "已选择" : "未选择")
                     }
-                }
-            } header: {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("Codex 可用模型")
-                    Spacer(minLength: 12)
-                    Text("已选 \(mergedVisibleModels.count) 个")
+                } header: {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(group.title)
+                        if let subtitle = group.subtitle {
+                            Text(subtitle)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer(minLength: 12)
+                        Text(
+                            "已选 \(group.models.filter { selectedCatalogModels.contains($0.id) }.count)/\(group.models.count)"
+                        )
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -1802,11 +1928,212 @@ struct GatewayView: View {
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
             }
+
+            Section {
+                if customModels.isEmpty {
+                    Text("没有自定义模型。目录里没有的模型在这里声明后即可被 Codex 选中。")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(customModels) { entry in
+                        customModelRow(entry)
+                    }
+                }
+                Button {
+                    customModelEditor = CustomModelEditorState()
+                } label: {
+                    Label("新建自定义模型…", systemImage: "plus")
+                }
+                .buttonStyle(.plain)
+            } header: {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("自定义模型")
+                    Spacer(minLength: 12)
+                    Text("服务商已声明的模型会按协议家族自动合成能力")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
         }
         .listStyle(.inset)
         .scrollContentBackground(.hidden)
         .managementPageInsets(topPadding: 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func customModelRow(_ entry: ManageCustomModel) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.displayName?.isEmpty == false ? entry.displayName! : entry.slug)
+                    .font(.body.weight(.medium))
+                Text(entry.slug)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            if let family = entry.resolvedFamily {
+                Text(gatewayModelFamilyDisplayName(family))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let context = entry.contextWindow {
+                Text(contextLabel(context))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            if entry.supportsImageInput == true {
+                Image(systemName: "photo")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .help("声明支持图片输入")
+            }
+            Button {
+                customModelEditor = CustomModelEditorState(entry: entry)
+            } label: {
+                Image(systemName: "pencil")
+            }
+            .buttonStyle(.plain)
+            .help("编辑自定义模型")
+            .accessibilityLabel("编辑自定义模型 \(entry.slug)")
+
+            Button {
+                deleteCustomModel(entry)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("删除自定义模型")
+            .accessibilityLabel("删除自定义模型 \(entry.slug)")
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func deleteCustomModel(_ entry: ManageCustomModel) {
+        customModels.removeAll { $0.slug == entry.slug }
+        removeVisibleModel(entry.slug)
+        saveCustomModels()
+    }
+
+    /// 自定义模型是独立于可见列表的改动，单独保存一次。
+    private func saveCustomModels() {
+        guard settingsReady, !model.isLoading(.gateway) else { return }
+        Task {
+            _ = await model.saveGatewaySettings(
+                enabled: enabled,
+                filterImageGenerationTool: filterImages,
+                requestLoggingEnabled: requestLogging,
+                requestLogDetailsEnabled: requestLogging && requestDetails,
+                codexVisibleModels: mergedVisibleModels,
+                customModels: customModels,
+                modelOwners: modelOwners,
+                providerDisplayPrefix: providerDisplayPrefix
+            )
+        }
+    }
+
+    private func upsertCustomModel(_ entry: ManageCustomModel, previousSlug: String?) {
+        let slug = entry.slug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !slug.isEmpty else { return }
+        var updated = entry
+        updated.slug = slug
+        updated.resolvedFamily = nil
+        if let previousSlug, let index = customModels.firstIndex(where: { $0.slug == previousSlug }) {
+            customModels[index] = updated
+            if previousSlug != slug {
+                removeVisibleModel(previousSlug)
+            }
+        } else if let index = customModels.firstIndex(where: { $0.slug == slug }) {
+            customModels[index] = updated
+        } else {
+            customModels.append(updated)
+        }
+        // 声明后自动纳入可见列表，省掉再一次勾选。
+        if let catalogEntry = modelCatalog.first(where: { $0.id == slug }) {
+            selectedCatalogModels.insert(catalogEntry.id)
+        } else {
+            visibleModels = mergedModelLines(existing: visibleModels, fetched: [slug])
+        }
+        saveCustomModels()
+        customModelEditor = nil
+    }
+
+    private func contextLabel(_ tokens: Int) -> String {
+        if tokens >= 1_000_000, tokens % 1_000_000 == 0 {
+            return "\(tokens / 1_000_000)M"
+        }
+        if tokens >= 1_000 {
+            return "\(tokens / 1_000)k"
+        }
+        return "\(tokens)"
+    }
+
+    /// 「Codex 可用模型」的筛选与批量操作条。
+    private var catalogToolbar: some View {
+        HStack(spacing: 8) {
+            Menu {
+                Button("全部来源") { catalogGroupFilter = "" }
+                Button("内置目录") { catalogGroupFilter = "builtin" }
+                Button("自定义模型") { catalogGroupFilter = "custom" }
+                Divider()
+                ForEach(model.gateway?.providers ?? []) { provider in
+                    Button(provider.name) { catalogGroupFilter = "provider:\(provider.name)" }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(catalogGroupFilterLabel)
+                        .font(.caption)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("只看某个来源的模型")
+
+            TextField("搜索模型", text: $catalogQuery)
+                .textFieldStyle(.plain)
+                .font(.caption)
+
+            Spacer(minLength: 4)
+
+            Toggle(isOn: $providerDisplayPrefix) {
+                Text("显示服务商前缀")
+                    .font(.caption)
+            }
+            .toggleStyle(.checkbox)
+            .help("在 Codex 的模型名前面加上服务商名称（跟随服务商名，改名会自动跟着变），例如 AutoClaw · GLM-5.3-Flash")
+            .onChange(of: providerDisplayPrefix) { _, _ in
+                saveVisibleModels()
+            }
+
+            Button("全部加入") {
+                setCatalogSelection(filteredCatalogModels, selected: true)
+                saveVisibleModels()
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+            .disabled(filteredCatalogModels.isEmpty)
+            .help("把当前筛选出的模型全部加入可见列表")
+
+            Button("全部移除") {
+                setCatalogSelection(filteredCatalogModels, selected: false)
+                saveVisibleModels()
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+            .disabled(filteredCatalogModels.isEmpty)
+            .help("把当前筛选出的模型移出可见列表")
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var catalogGroupFilterLabel: String {
+        switch catalogGroupFilter {
+        case "": return "全部来源"
+        case "builtin": return "内置目录"
+        case "custom": return "自定义模型"
+        default: return String(catalogGroupFilter.dropFirst("provider:".count))
+        }
     }
 
     private var providerTableHeader: some View {
@@ -1843,12 +2170,114 @@ struct GatewayView: View {
         )
     }
 
-    private var filteredVisibleCatalogModels: [ManageCodexCatalogModel] {
-        let query = providerQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !query.isEmpty else { return modelCatalog }
-        return modelCatalog.filter {
-            $0.id.lowercased().contains(query) || $0.displayName.lowercased().contains(query)
+    /// 目录分组：内置目录 / 自定义模型 / 每个服务商一组（自动条目归属到声明它的服务商）。
+    private struct CatalogGroup: Identifiable {
+        let id: String
+        let title: String
+        let subtitle: String?
+        let models: [ManageCodexCatalogModel]
+    }
+
+    private var catalogGroups: [CatalogGroup] {
+        let query = catalogQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let matched = modelCatalog.filter { entry in
+            projectFilterMatches(entry) && (query.isEmpty
+                || entry.id.lowercased().contains(query)
+                || entry.displayName.lowercased().contains(query))
         }
+        var groups: [CatalogGroup] = []
+
+        let builtin = matched.filter { $0.source == "builtin" }
+        if !builtin.isEmpty {
+            groups.append(CatalogGroup(id: "builtin", title: "内置目录", subtitle: nil, models: builtin))
+        }
+        let custom = matched.filter { $0.source == "custom" }
+        if !custom.isEmpty {
+            groups.append(
+                CatalogGroup(
+                    id: "custom",
+                    title: "自定义模型",
+                    subtitle: "在下方声明的目录条目",
+                    models: custom
+                )
+            )
+        }
+        // 自动条目按「第一个声明它的服务商」分组；没有服务商信息的旧 daemon 归到「服务商模型」。
+        var providerOrder: [String] = []
+        var providerModels: [String: [ManageCodexCatalogModel]] = [:]
+        for entry in matched where entry.source == "auto" || (entry.source != "builtin" && entry.source != "custom") {
+            let provider = entry.declaringProviders.first ?? "服务商模型"
+            if providerModels[provider] == nil {
+                providerOrder.append(provider)
+                providerModels[provider] = []
+            }
+            providerModels[provider]?.append(entry)
+        }
+        for provider in providerOrder {
+            let models = providerModels[provider] ?? []
+            let protocolName = gatewayProtocolDisplayName(
+                gatewayProviderType(provider),
+                compatibility: gatewayProviderCompatibility(provider)
+            )
+            groups.append(
+                CatalogGroup(
+                    id: "provider:\(provider)",
+                    title: provider,
+                    subtitle: protocolName,
+                    models: models
+                )
+            )
+        }
+        return groups
+    }
+
+    private func projectFilterMatches(_ entry: ManageCodexCatalogModel) -> Bool {
+        guard !catalogGroupFilter.isEmpty else { return true }
+        switch catalogGroupFilter {
+        case "builtin": return entry.source == "builtin"
+        case "custom": return entry.source == "custom"
+        default:
+            let provider = String(catalogGroupFilter.dropFirst("provider:".count))
+            return entry.source != "builtin" && entry.source != "custom"
+                && entry.declaringProviders.contains(provider)
+        }
+    }
+
+    private func gatewayProviderType(_ name: String) -> String {
+        model.gateway?.providers.first { $0.name == name }?.providerType ?? ""
+    }
+
+    private func gatewayProviderCompatibility(_ name: String) -> String? {
+        model.gateway?.providers.first { $0.name == name }?.compatibility
+    }
+
+    /// 当前筛选出的目录条目（批量操作、计数都基于它）。
+    private var filteredCatalogModels: [ManageCodexCatalogModel] {
+        catalogGroups.flatMap(\.models)
+    }
+
+    private func setCatalogSelection(_ entries: [ManageCodexCatalogModel], selected: Bool) {
+        for entry in entries {
+            if selected {
+                selectedCatalogModels.insert(entry.id)
+            } else {
+                selectedCatalogModels.remove(entry.id)
+            }
+        }
+    }
+
+    private func ownerBinding(_ modelID: String) -> Binding<String> {
+        Binding(
+            get: { modelOwners[modelID] ?? "" },
+            set: { newValue in
+                if newValue.isEmpty {
+                    modelOwners.removeValue(forKey: modelID)
+                } else {
+                    modelOwners[modelID] = newValue
+                }
+                saveVisibleModels()
+            }
+        )
     }
 
     private var customVisibleModels: [String] {
@@ -1896,6 +2325,13 @@ struct GatewayView: View {
         )
     }
 
+    /// 人类可读的容量写法（12.3 MB / 456 KB）。
+    static func byteLabel(_ bytes: UInt64) -> String {
+        let mb = Double(bytes) / 1_048_576
+        if mb >= 1 { return String(format: "%.1f MB", mb) }
+        return String(format: "%.0f KB", Double(bytes) / 1024)
+    }
+
     private var requestLoggingBinding: Binding<Bool> {
         Binding(
             get: { requestLogging },
@@ -1922,6 +2358,8 @@ struct GatewayView: View {
     private var modelsDirty: Bool {
         guard let gateway = model.gateway else { return false }
         return Set(mergedVisibleModels) != Set(gateway.codexVisibleModels)
+            || customModels != gateway.customModels
+            || modelOwners != gateway.modelOwners
     }
 
     private func saveGatewayPreferences() {
@@ -1932,6 +2370,8 @@ struct GatewayView: View {
             filterImages: filterImages,
             requestLogging: requestLogging,
             requestDetails: requestLogging && requestDetails,
+            retentionDays: requestLogRetentionDays,
+            maxMb: requestLogMaxMb,
             models: mergedVisibleModels
         )
         Task {
@@ -1940,7 +2380,9 @@ struct GatewayView: View {
                 filterImageGenerationTool: snapshot.filterImages,
                 requestLoggingEnabled: snapshot.requestLogging,
                 requestLogDetailsEnabled: snapshot.requestDetails,
-                codexVisibleModels: snapshot.models
+                codexVisibleModels: snapshot.models,
+                requestLogRetentionDays: snapshot.retentionDays,
+                requestLogMaxMb: snapshot.maxMb
             )
             if !saved {
                 synchronizeGateway(model.gateway)
@@ -1957,9 +2399,17 @@ struct GatewayView: View {
                 filterImageGenerationTool: filterImages,
                 requestLoggingEnabled: requestLogging,
                 requestLogDetailsEnabled: requestLogging && requestDetails,
-                codexVisibleModels: mergedVisibleModels
+                codexVisibleModels: mergedVisibleModels,
+                customModels: customModels,
+                modelOwners: modelOwners,
+                providerDisplayPrefix: providerDisplayPrefix
             )
         }
+    }
+
+    /// 重新拉取模型目录（显示名/上下文/图片标记都来自服务端实时计算）。
+    private func reloadModelCatalog() async {
+        modelCatalog = await model.loadCodexModelCatalog() ?? []
     }
 
     private func synchronizeGateway(_ gateway: ManageGateway?) {
@@ -1971,6 +2421,12 @@ struct GatewayView: View {
         filterImages = gateway.filterImageGenerationTool
         requestLogging = gateway.requestLoggingEnabled
         requestDetails = gateway.requestLogDetailsEnabled
+        requestLogRetentionDays = gateway.requestLogRetentionDays
+        requestLogMaxMb = gateway.requestLogMaxMb
+        requestLogDatabaseBytes = gateway.requestLogDatabaseBytes
+        customModels = gateway.customModels
+        modelOwners = gateway.modelOwners
+        providerDisplayPrefix = gateway.providerDisplayPrefix
         let visible = gateway.codexVisibleModels
         if modelCatalog.isEmpty {
             selectedCatalogModels = []
@@ -2004,6 +2460,37 @@ struct GatewayView: View {
 
 /// Maps stable provider-type identifiers to the display names used by the
 /// Matches the daemon's provider protocol display labels.
+/// 协议家族的展示名，用于自定义模型列表与编辑器。
+func gatewayModelFamilyDisplayName(_ family: String) -> String {
+    switch family {
+    case "open_ai_responses": return "OpenAI Responses"
+    case "deepseek_responses": return "DeepSeek Responses"
+    case "grok_responses": return "Grok Responses"
+    case "chat_completions": return "Chat Completions"
+    case "anthropic_messages": return "Anthropic Messages"
+    default: return family
+    }
+}
+
+/// 自动合成条目的保守默认上下文窗口，和 daemon 侧家族模板保持一致。
+func gatewayModelFamilyDefaultContext(_ family: String) -> Int {
+    switch family {
+    case "open_ai_responses": return 272_000
+    case "chat_completions": return 128_000
+    default: return 372_000
+    }
+}
+
+func gatewayProviderTypeFamily(_ providerType: String) -> String {
+    switch providerType {
+    case "open_ai_responses", "deepseek_responses", "grok_responses",
+        "chat_completions", "anthropic_messages":
+        return providerType
+    default:
+        return "chat_completions"
+    }
+}
+
 func gatewayProtocolDisplayName(_ providerType: String, compatibility: String?) -> String {
     switch providerType {
     case "open_ai_responses": return "OpenAI Responses"
@@ -2234,12 +2721,219 @@ private func updatedGatewayProvider(
         baseUrl: provider.baseUrl,
         modelsUrl: provider.modelsUrl,
         models: provider.models,
+        discoveredModels: provider.discoveredModels,
         modelAliases: provider.modelAliases,
         promptCacheRetention: provider.promptCacheRetention,
         weight: provider.weight,
         timeoutSecs: provider.timeoutSecs,
         secretSet: provider.secretSet
     )
+}
+
+/// 「自定义模型」编辑器状态。
+private struct CustomModelEditorState: Identifiable {
+    let id = UUID()
+    let previousSlug: String?
+    var slug: String
+    var providerName: String
+    var displayName: String
+    var summary: String
+    var family: String
+    var contextWindow: String
+    var supportsImageInput: Bool
+
+    init(entry: ManageCustomModel? = nil) {
+        previousSlug = entry?.slug
+        slug = entry?.slug ?? ""
+        providerName = entry?.providerName ?? ""
+        displayName = entry?.displayName ?? ""
+        summary = entry?.summary ?? ""
+        family = entry?.family ?? ""
+        contextWindow = entry?.contextWindow.map(String.init) ?? ""
+        supportsImageInput = entry?.supportsImageInput ?? false
+    }
+}
+
+/// 声明一个新的模型目录条目：目录之外的名字，只有在这里声明（或被服务商
+/// 的模型列表覆盖）才会进入 Codex 的模型清单。
+private struct CustomModelEditorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let state: CustomModelEditorState
+    let providers: [ManageGatewayProvider]
+    let onSave: (ManageCustomModel, String?) -> Void
+
+    @State private var slug: String
+    @State private var providerName: String
+    @State private var displayName: String
+    @State private var summary: String
+    @State private var family: String
+    @State private var contextWindow: String
+    @State private var supportsImageInput: Bool
+
+    init(
+        state: CustomModelEditorState,
+        providers: [ManageGatewayProvider],
+        onSave: @escaping (ManageCustomModel, String?) -> Void
+    ) {
+        self.state = state
+        self.providers = providers
+        self.onSave = onSave
+        _slug = State(initialValue: state.slug)
+        _providerName = State(initialValue: state.providerName)
+        _displayName = State(initialValue: state.displayName)
+        _summary = State(initialValue: state.summary)
+        _family = State(initialValue: state.family)
+        _contextWindow = State(initialValue: state.contextWindow)
+        _supportsImageInput = State(initialValue: state.supportsImageInput)
+    }
+
+    private var resolvedFamily: String {
+        if !family.isEmpty { return family }
+        if let provider = providers.first(where: { $0.name == providerName }) {
+            return gatewayProviderTypeFamily(provider.providerType)
+        }
+        return "chat_completions"
+    }
+
+    private var isEditing: Bool { state.previousSlug != nil }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "square.stack.3d.up")
+                    .foregroundStyle(.secondary)
+                Text(isEditing ? "编辑自定义模型" : "新建自定义模型")
+                    .font(.headline)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 14)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    editorField("模型名称") {
+                        TextField("例如 glm-5.3-flash", text: $slug)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospaced())
+                    }
+                    Text("这个名称就是 Codex 请求里用的 model，也是服务商路由的匹配名。")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+
+                    editorField("服务商") {
+                        Picker("", selection: $providerName) {
+                            Text("自动（按路由匹配）").tag("")
+                            ForEach(providers) { provider in
+                                Text(provider.name).tag(provider.name)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                    }
+
+                    editorField("显示名") {
+                        TextField("留空则使用模型名称", text: $displayName)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    editorField("说明") {
+                        TextField("可选", text: $summary)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    editorField("协议家族") {
+                        Picker("", selection: $family) {
+                            Text("自动（按服务商推断）").tag("")
+                            Text("OpenAI Responses").tag("open_ai_responses")
+                            Text("DeepSeek Responses").tag("deepseek_responses")
+                            Text("Grok Responses").tag("grok_responses")
+                            Text("Chat Completions").tag("chat_completions")
+                            Text("Anthropic Messages").tag("anthropic_messages")
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                    }
+                    Text("生效家族：\(gatewayModelFamilyDisplayName(resolvedFamily))；它决定 comp_hash、工具与压缩口径。")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+
+                    editorField("上下文窗口") {
+                        TextField(
+                            "默认 \(gatewayModelFamilyDefaultContext(resolvedFamily)) tokens",
+                            text: $contextWindow
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .font(.body.monospacedDigit())
+                    }
+
+                    Toggle(isOn: $supportsImageInput) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("支持图片输入")
+                            Text("默认关闭。只有确认该模型能识图时才打开，否则 Codex 发的图片会被上游拒绝。")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
+            }
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Spacer(minLength: 0)
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("保存") { save() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(slug.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+        }
+        .frame(width: 460, height: 560)
+    }
+
+    @ViewBuilder
+    private func editorField<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
+        }
+    }
+
+    private func save() {
+        let trimmedSlug = slug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSlug.isEmpty else { return }
+        let context = Int(contextWindow.trimmingCharacters(in: .whitespacesAndNewlines))
+        let entry = ManageCustomModel(
+            slug: trimmedSlug,
+            providerName: providerName.isEmpty ? nil : providerName,
+            displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? nil
+                : displayName.trimmingCharacters(in: .whitespacesAndNewlines),
+            summary: summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? nil
+                : summary.trimmingCharacters(in: .whitespacesAndNewlines),
+            family: family.isEmpty ? nil : family,
+            contextWindow: context,
+            supportsImageInput: supportsImageInput,
+            resolvedFamily: nil
+        )
+        onSave(entry, state.previousSlug)
+        dismiss()
+    }
 }
 
 private struct GatewayProviderEditorState: Identifiable {
@@ -2266,6 +2960,7 @@ private struct GatewayProviderEditor: View {
     @State private var baseURL: String
     @State private var modelsURL: String
     @State private var models: String
+    @State private var discoveredModels: [ManageDiscoveredModel]
     @State private var promptCacheRetention: String
     @State private var weight: Int
     @State private var timeoutSecs: Int
@@ -2318,6 +3013,7 @@ private struct GatewayProviderEditor: View {
         _baseURL = State(initialValue: provider?.baseUrl ?? "")
         _modelsURL = State(initialValue: provider?.modelsUrl ?? "")
         _models = State(initialValue: provider?.models.joined(separator: "\n") ?? "")
+        _discoveredModels = State(initialValue: provider?.discoveredModels ?? [])
         _promptCacheRetention = State(initialValue: provider?.promptCacheRetention ?? "")
         _weight = State(initialValue: provider?.weight ?? 100)
         _timeoutSecs = State(initialValue: provider?.timeoutSecs ?? 600)
@@ -2902,6 +3598,7 @@ private struct GatewayProviderEditor: View {
                     apiKey: nilIfEmpty(apiKey)
                 )
                 if response.ok {
+                    mergeDiscoveredModels(response.modelDetails ?? [])
                     let existingModels = Set(configuredModels)
                     models = mergedModelLines(existing: models, fetched: response.models)
                     let addedCount = splitValues(models).filter { !existingModels.contains($0) }.count
@@ -2992,8 +3689,52 @@ private struct GatewayProviderEditor: View {
         fetchingProviderUsage = false
     }
 
+    /// 合并上游返回的模型元数据：同 id 覆盖，保留上游声明的展示名/上下文/图片能力。
+    private func mergeDiscoveredModels(_ details: [ManageDiscoveredModel]) {
+        guard !details.isEmpty else { return }
+        for detail in details {
+            let id = detail.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !id.isEmpty else { continue }
+            var entry = detail
+            entry.id = id
+            if let index = discoveredModels.firstIndex(where: { $0.id == id }) {
+                discoveredModels[index] = entry
+            } else {
+                discoveredModels.append(entry)
+            }
+        }
+    }
+
+    /// 新建服务商且模型列表为空时，保存前自动向上游拉一次模型列表与元数据，
+    /// 让用户接着自己挑选要暴露给 Codex 的模型。
+    private func autoSyncModelsIfNeeded() async {
+        guard state.provider == nil, configuredModels.isEmpty, !fetchingModels else { return }
+        let trimmedBase = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBase.isEmpty,
+            let response = try? await model.fetchGatewayProviderModels(
+                providerName: nil,
+                baseUrl: trimmedBase,
+                modelsUrl: nilIfEmpty(modelsURL),
+                providerType: providerType,
+                apiKey: nilIfEmpty(apiKey)
+            ),
+            response.ok, !response.models.isEmpty
+        else { return }
+        mergeDiscoveredModels(response.modelDetails ?? [])
+        models = mergedModelLines(existing: models, fetched: response.models)
+        fetchModelsNotice = "已自动识别 \(response.models.count) 个模型，可在「Codex 可用模型」里挑选"
+        fetchModelsNoticeIsPositive = true
+    }
+
     private func save() {
         saving = true
+        Task {
+            await autoSyncModelsIfNeeded()
+            performSave()
+        }
+    }
+
+    private func performSave() {
         let modelList = configuredModels
         let provider = ManageGatewayProvider(
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -3003,6 +3744,7 @@ private struct GatewayProviderEditor: View {
             baseUrl: baseURL.trimmingCharacters(in: .whitespacesAndNewlines),
             modelsUrl: nilIfEmpty(modelsURL),
             models: modelList,
+            discoveredModels: discoveredModels,
             // Claude-series models gain their Codex aliases automatically;
             // explicit rows always win over inferred entries.
             modelAliases: mergedModelAliases(

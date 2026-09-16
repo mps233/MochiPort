@@ -2756,21 +2756,54 @@ mod tests {
         assert!(!models.is_empty());
         for model in models {
             let object = model.as_object().expect("catalog model object");
-            assert_exact_keys(object, &["displayName", "id"]);
+            assert_exact_keys(
+                object,
+                &[
+                    "contextWindow",
+                    "description",
+                    "displayName",
+                    "id",
+                    "ownerEffective",
+                    "providers",
+                    "source",
+                    "supportsImageInput",
+                ],
+            );
             assert!(model["id"].as_str().is_some_and(|id| !id.is_empty()));
             assert!(
                 model["displayName"]
                     .as_str()
                     .is_some_and(|name| !name.is_empty())
             );
+            assert!(matches!(
+                model["source"].as_str(),
+                Some("builtin" | "custom" | "auto")
+            ));
         }
         let ids = models
             .iter()
             .filter_map(|model| model["id"].as_str())
             .collect::<Vec<_>>();
-        assert!(ids.contains(&"gpt-5.5"), "catalog missing gpt-5.5: {ids:?}");
-        // catalog 是内置静态目录，用户配置的 canary 模型不能出现。
-        assert!(!payload.to_string().contains(CANARY_MODEL));
+        // 测试配置里唯一的服务商只声明了 CANARY_MODEL，因此内置目录里那些
+        // 「没有服务商提供」的条目（gpt-5.5 等）不再出现在列表里——它们勾选后
+        // 请求必然失败，属于纯噪音。
+        assert!(
+            !ids.contains(&"gpt-5.5"),
+            "builtin entries without a provider should be hidden: {ids:?}"
+        );
+        // 服务商声明过的模型以 auto 来源出现，供 GUI 直接勾选。
+        let canary = models
+            .iter()
+            .find(|model| model["id"] == CANARY_MODEL)
+            .expect("provider-declared model should be listed as an auto option");
+        assert_eq!(canary["source"], "auto");
+        // 目录接口只暴露模型名，不得泄漏服务商名称/地址/密钥。
+        // 目录接口只暴露模型名与「声明它的服务商名称」（GUI 归属下拉需要），
+        // 不得泄漏服务商地址或密钥。
+        let encoded = payload.to_string();
+        for secret in [CANARY_PROVIDER_KEY, CANARY_PROVIDER_URL] {
+            assert!(!encoded.contains(secret), "catalog leaked {secret}");
+        }
     }
 
     #[tokio::test]
