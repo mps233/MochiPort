@@ -454,7 +454,31 @@ async fn run_daemon_startup_tasks(
             .await;
     }
     tokio::spawn(run_official_catalog_sync(state.clone()));
-    tokio::spawn(run_request_log_retention(state));
+    tokio::spawn(run_request_log_retention(state.clone()));
+    load_model_library_overlay(&state).await;
+}
+
+/// 加载数据目录里的模型库覆盖文件（存在时优先于内置库）。
+///
+/// 模型库是纯数据（3700+ 模型的能力表），把它做成可覆盖后，更新模型能力只需把
+/// 新文件放进数据目录并重启 daemon，不必重建二进制。文件缺失或损坏时静默保留
+/// 内置库。
+async fn load_model_library_overlay(state: &crate::app_state::SharedState) {
+    let data_dir = crate::ai_gateway::model_sync::data_directory();
+    if crate::ai_gateway::catalog::load_library_overlay(&data_dir) {
+        state
+            .push_event(
+                "info",
+                "model_library_overlay_loaded",
+                format!(
+                    "已加载数据目录中的模型库覆盖：{}",
+                    data_dir
+                        .join(crate::ai_gateway::catalog::LIBRARY_OVERLAY_FILE_NAME)
+                        .display()
+                ),
+            )
+            .await;
+    }
 }
 
 /// 定期清理 AI Gateway 请求日志。
@@ -540,7 +564,7 @@ async fn run_request_log_retention(state: crate::app_state::SharedState) {
 async fn run_official_catalog_sync(state: crate::app_state::SharedState) {
     loop {
         // 先加载已有覆盖文件，让重启后立刻生效（不必等这次网络请求）。
-        let data_dir = crate::ai_gateway::model_sync::data_directory(&state.config_path);
+        let data_dir = crate::ai_gateway::model_sync::data_directory();
         let loaded = crate::ai_gateway::catalog::load_official_overlay(&data_dir);
         if loaded > 0 {
             tracing::info!(

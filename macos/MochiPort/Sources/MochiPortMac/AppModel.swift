@@ -2262,6 +2262,14 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
+    /// 重新加载模型库覆盖文件；返回是否成功。
+    func reloadModelLibrary() async -> Bool {
+        await performManagementAction(section: .gateway) {
+            let applied = try await self.apiClient.reloadModelLibrary()
+            return "已重新加载模型库：\(applied)"
+        }
+    }
+
     func clearRequestLogs() async -> Bool {
         await performManagementAction(section: .requestLogs) {
             let deleted = try await self.apiClient.clearRequestLogs()

@@ -1899,6 +1899,16 @@ struct APIClient: Sendable {
         return response.log
     }
 
+    /// 重新加载数据目录里的模型库覆盖文件（免重启 daemon 生效）。
+    func reloadModelLibrary() async throws -> String {
+        struct Response: Decodable { let applied: String }
+        let response: Response = try await performManagePOST(
+            path: "api/v1/manage/gateway/model-library/reload",
+            body: EmptyRequestBody()
+        )
+        return response.applied
+    }
+
     func clearRequestLogs() async throws -> Int {
         // Clearing a large log store runs DELETE + VACUUM in the daemon and
         // can take minutes; the default 10-second mutation timeout would

@@ -1638,6 +1638,15 @@ struct GatewayView: View {
                     .disabled(preferencesSaving)
                 }
                 GatewayPreferenceRow(
+                    title: "重新加载模型库",
+                    detail: "把数据目录里的 model_library.json 立即生效（不必重启后台服务）。"
+                ) {
+                    Button("重新加载模型库") {
+                        Task { _ = await model.reloadModelLibrary() }
+                    }
+                    .disabled(model.isLoading(.gateway))
+                }
+                GatewayPreferenceRow(
                     title: "立即清理",
                     detail: "删除全部请求日志并回收空间；当前占用 \(Self.byteLabel(requestLogDatabaseBytes))。"
                 ) {

@@ -140,6 +140,7 @@ codex --remote ws://127.0.0.1:3849
 - **会话**：从当前 Codex App 读取会话，创建或恢复 thread。
 - **请求日志自动清理**：请求日志默认保留 30 天、总量上限 256 MB，超出时自动删除最旧记录并回收空间（可在「网关 → 概览 → 使用记录」里调整或手动清空）。
 - **协议家族模板**：每个协议家族（OpenAI Responses / DeepSeek Responses / Grok Responses / Chat Completions / Anthropic Messages）的 Codex 私有协议字段单独存在 `src/ai_gateway/family_templates.json`，因此模型目录里只保留真实在用的模型，不再出现"只当模板用"的空条目。
+- **模型库可运行时更新**：把新的 `model_library.json` 放进数据目录后重启 daemon 即生效（`python3 scripts/generate-model-library.py --runtime` 一步完成），无需重建；运行中也可点「重新加载模型库」免重启应用。
 - **内置模型库**：仓库内嵌一张模型能力表（`src/ai_gateway/model_library.json`，3700+ 个模型，来源 [models.dev](https://models.dev)）。只要某个模型名出现在**已启用服务商的模型列表**里，目录就会自动按库里记录填好显示名、上下文窗口、图片输入等能力——你不用手工声明。自定义模型条目优先级更高，仍可覆盖库里的值。
 - **服务商前缀**：在 **AI 网关 → 概览 → Codex 可用模型** 打开「显示服务商前缀」，Codex 里的模型名前面就会加上**服务商的名字**（`Mac_Local · GPT-5.6-Terra`、`autoclaw · GLM-5.3-Flash`），一眼看出归属；在「模型服务」里改服务商名，前缀会自动跟着变（没有单独的覆盖字段）。Codex 的选择器是扁平列表、不支持分组标题，这是目前能做到的最接近分组的效果。
 - **模型归属**：同一个模型名被多个服务商声明时（例如两家网关都有 `glm-5.3`），在 **AI 网关 → 概览 → Codex 可用模型** 对应行右侧的「归属」下拉里指定固定走哪家；不指定就按权重与会话粘性自动选。归属的服务商被停用后会橙色提示并自动回落到默认选路。

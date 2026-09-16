@@ -365,6 +365,31 @@ pub(super) async fn codex_models_catalog(State(state): State<SharedState>) -> im
     Json(CodexModelCatalogResponse { models })
 }
 
+/// 重新加载数据目录里的模型库覆盖文件（免重启 daemon）。
+///
+/// 数据更新是纯数据操作：用户把新的 `model_library.json` 放进数据目录后调用此
+/// 端点即可生效。文件缺失或损坏时保留当前库并明确报错。
+pub(super) async fn reload_model_library() -> impl IntoResponse {
+    let data_dir = crate::ai_gateway::model_sync::data_directory();
+    let path = data_dir.join(crate::ai_gateway::catalog::LIBRARY_OVERLAY_FILE_NAME);
+    if !path.is_file() {
+        return operation_error(
+            StatusCode::NOT_FOUND,
+            format!("数据目录里没有模型库覆盖文件：{}", path.display()),
+        );
+    }
+    if !crate::ai_gateway::catalog::load_library_overlay(&data_dir) {
+        return operation_error(
+            StatusCode::BAD_REQUEST,
+            "模型库覆盖文件无法解析，或缺少非空的 models 对象；已保留当前模型库。",
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "applied": path.display().to_string() })),
+    )
+}
+
 pub(super) async fn gateway(State(state): State<SharedState>) -> impl IntoResponse {
     let config = state.config.lock().await;
     let request_log_bytes = state.ai_gateway_request_logs.database_size_bytes();

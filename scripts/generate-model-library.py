@@ -45,6 +45,7 @@ from collections import Counter
 import argparse
 import datetime
 import json
+import os
 import pathlib
 import sys
 import urllib.request
@@ -193,6 +194,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=pathlib.Path, help="本地 api.json（默认联网拉取）")
     parser.add_argument("--output", type=pathlib.Path, default=OUTPUT)
+    parser.add_argument(
+        "--runtime",
+        action="store_true",
+        help=(
+            "同时写入数据目录，让 daemon 重启后直接采用（不必重建二进制）："
+            "~/Library/Application Support/MochiPort/model_library.json"
+        ),
+    )
     args = parser.parse_args()
 
     if args.input:
@@ -204,13 +213,35 @@ def main() -> int:
             raw = json.loads(response.read().decode("utf-8"))
 
     library = build(raw)
-    args.output.write_text(json.dumps(library, ensure_ascii=False, indent=1) + "\n")
+    serialized = json.dumps(library, ensure_ascii=False, indent=1) + "\n"
+    args.output.write_text(serialized)
     size_kb = args.output.stat().st_size / 1024
     print(
         f"已生成 {args.output}：{len(library['models'])} 个模型，{size_kb:.0f} KB",
         file=sys.stderr,
     )
+
+    if args.runtime:
+        runtime_path = runtime_overlay_path()
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_path.write_text(serialized)
+        print(
+            f"已写入运行时覆盖 {runtime_path}；重启 daemon（或在界面里重新加载）后生效，"
+            "无需重建二进制。",
+            file=sys.stderr,
+        )
     return 0
+
+
+def runtime_overlay_path() -> pathlib.Path:
+    """daemon 的数据目录（与 config.toml 同级）。"""
+    override = os.environ.get("MOCHIPORT_HOME")
+    if override:
+        return pathlib.Path(override) / "model_library.json"
+    return (
+        pathlib.Path.home()
+        / "Library/Application Support/MochiPort/model_library.json"
+    )
 
 
 if __name__ == "__main__":

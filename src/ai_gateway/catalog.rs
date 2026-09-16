@@ -84,17 +84,69 @@ static MODEL_LIBRARY: LazyLock<Value> = LazyLock::new(|| {
         .expect("embedded AI Gateway model library")
 });
 
-/// 从内置模型库查一个模型的能力记录。
-fn library_model(model_id: &str) -> Option<&'static Value> {
-    let models = MODEL_LIBRARY.get("models")?.as_object()?;
-    // 先精确匹配，再忽略大小写兜底（上游大小写写法不统一）。
+/// 运行时可加载的模型库覆盖：数据目录里存在 `model_library.json` 时优先使用它。
+///
+/// 内置那份编译进二进制，因此更新它需要重建 daemon。把新版本放到数据目录后，
+/// 重启 daemon 即可生效，无需重建——这对"官方/社区新增模型"这类纯数据更新很实用。
+///
+/// 覆盖文件与内置文件同构，且必须是完整替换（不是增量合并）：模型库是一张
+/// 整表，部分合并会让新旧版本的能力数据混杂。
+static LIBRARY_OVERLAY: LazyLock<RwLock<Option<Value>>> = LazyLock::new(|| RwLock::new(None));
+
+/// 模型库覆盖文件的文件名。
+pub(crate) const LIBRARY_OVERLAY_FILE_NAME: &str = "model_library.json";
+
+/// 当前生效的模型库（覆盖层优先，否则内置）。
+fn active_library() -> Value {
+    LIBRARY_OVERLAY
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_else(|| MODEL_LIBRARY.clone())
+}
+
+/// 从数据目录加载模型库覆盖文件；返回是否采用了覆盖文件。
+///
+/// 校验失败（文件损坏、没有 models 对象）时保持内置库不变——绝不用坏数据覆盖。
+pub(crate) fn load_library_overlay(data_dir: &Path) -> bool {
+    let loaded = read_library_overlay_file(&data_dir.join(LIBRARY_OVERLAY_FILE_NAME));
+    let applied = loaded.is_some();
+    if let Ok(mut guard) = LIBRARY_OVERLAY.write() {
+        *guard = loaded;
+    }
+    applied
+}
+
+/// 读取并校验模型库覆盖文件；无效时返回 None。
+///
+/// 抽成纯函数便于测试，不触碰进程级全局状态。
+fn read_library_overlay_file(path: &Path) -> Option<Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .filter(|value| {
+            value
+                .get("models")
+                .and_then(Value::as_object)
+                .is_some_and(|models| !models.is_empty())
+        })
+}
+
+/// 在给定库上查一个模型（忽略大小写兜底）。纯函数，供测试直接使用。
+fn library_lookup(library: &Value, model_id: &str) -> Option<Value> {
+    let models = library.get("models")?.as_object()?;
     if let Some(entry) = models.get(model_id) {
-        return Some(entry);
+        return Some(entry.clone());
     }
     models
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case(model_id.trim()))
-        .map(|(_, entry)| entry)
+        .map(|(_, entry)| entry.clone())
+}
+
+/// 从模型库查一个模型的能力记录。
+fn library_model(model_id: &str) -> Option<Value> {
+    library_lookup(&active_library(), model_id)
 }
 
 /// 当前生效的官方覆盖层。
@@ -499,6 +551,7 @@ fn synthesize_catalog_model(config: &AiGatewayConfig, model_id: &str) -> Option<
     // 有什么能力"更权威；上游只声明自己提供的子集，且常把上下文写窄。
     let discovered = provider.and_then(|provider| provider.discovered_model(model_id));
     let library = library_model(model_id);
+    let library = library.as_ref();
     let vision = custom
         .and_then(|entry| entry.supports_image_input)
         .or_else(|| library_bool(library, "supportsImageInput"))
@@ -1070,6 +1123,55 @@ mod tests {
             .and_then(Value::as_array)
             .expect("embedded catalog")
             .clone()
+    }
+
+    #[test]
+    fn library_overlay_file_is_validated_before_use() {
+        // 纯函数测试：不触碰进程级全局库，避免与并行测试互相干扰。
+        let dir = std::env::temp_dir().join(format!("mp-lib-overlay-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(LIBRARY_OVERLAY_FILE_NAME);
+
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            read_library_overlay_file(&path).is_none(),
+            "缺文件应为 None"
+        );
+
+        std::fs::write(&path, "{ broken").unwrap();
+        assert!(
+            read_library_overlay_file(&path).is_none(),
+            "坏 JSON 应为 None"
+        );
+
+        std::fs::write(&path, json!({ "schemaVersion": 1 }).to_string()).unwrap();
+        assert!(
+            read_library_overlay_file(&path).is_none(),
+            "缺少 models 对象应为 None"
+        );
+
+        std::fs::write(&path, json!({ "models": {} }).to_string()).unwrap();
+        assert!(
+            read_library_overlay_file(&path).is_none(),
+            "空 models 应为 None"
+        );
+
+        let overlay = json!({
+            "models": { "kimi-k3": { "displayName": "覆盖后的 Kimi", "contextWindow": 4096 } }
+        });
+        std::fs::write(&path, overlay.to_string()).unwrap();
+        let loaded = read_library_overlay_file(&path).expect("有效覆盖文件");
+        // 整表替换：覆盖里有的可见，内置里其它的不再可见。
+        assert_eq!(
+            library_lookup(&loaded, "kimi-k3").unwrap()["displayName"],
+            "覆盖后的 Kimi"
+        );
+        assert!(library_lookup(&loaded, "glm-5.3-flash").is_none());
+
+        // 内置库本身仍然完整（覆盖没有污染它）。
+        assert!(library_model("glm-5.3-flash").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

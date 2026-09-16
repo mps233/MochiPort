@@ -226,7 +226,17 @@ GUI 的「Codex 可用模型」列表还会滤掉**没有任何启用服务商�
 
 - **边界**：库里**只有展示与能力字段**，不含 Codex 私有协议字段（`use_responses_lite` / `tool_mode` / `comp_hash` / `base_instructions`），后者永远来自本地协议家族模板或官方目录。
 
-更新方式：`python3 scripts/generate-model-library.py`（联网拉取后覆盖文件），然后重建 daemon。
+**运行时更新（推荐）**：把新的 `model_library.json` 放到数据目录（`~/Library/Application Support/MochiPort/`，也可用 `MOCHIPORT_HOME` 指定），daemon 启动时优先使用它——无需重建二进制。命令行一步到位：
+
+```sh
+python3 scripts/generate-model-library.py --runtime
+```
+
+已在运行时可点 GUI 的「重新加载模型库」，或调用 `POST /api/v1/manage/gateway/model-library/reload` **免重启**生效。
+
+覆盖文件是**整表替换**（不是增量合并）：模型库是一张完整的表，部分合并会让新旧版本的能力数据混杂。文件缺失、JSON 损坏或缺少非空 `models` 对象时一律保留内置库，绝不用坏数据覆盖。
+
+**注意**：数据目录由 `storage_migration::current_storage_home()` 决定（遵守 `MOCHIPORT_HOME`），不要用 `config.toml` 的父目录推导——两者在自定义部署下可能不同。
 
 > ⚠️ models.dev 是社区数据，可能与官方 API 不一致（例如把 1,048,576 取整为 1,000,000）。它的上下文值只作为**兜底**，服务商自己声明过的值仍然优先。
 

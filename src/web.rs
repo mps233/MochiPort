@@ -137,6 +137,10 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/sessions", get(codex_app::codex_app_sessions))
         .route("/gateway", get(manage_workspace::gateway))
+        .route(
+            "/gateway/model-library/reload",
+            post(|| async { manage_workspace::reload_model_library().await }),
+        )
         .route("/gateway/settings", post(manage_workspace::update_gateway))
         .route("/gateway/provider", post(manage_workspace::upsert_provider))
         .route(
