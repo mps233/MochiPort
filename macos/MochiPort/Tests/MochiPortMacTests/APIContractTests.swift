@@ -3721,6 +3721,7 @@ final class APIContractTests: XCTestCase {
             baseUrl: "https://provider.example/v1",
             modelsUrl: nil,
             models: ["model-a"],
+            discoveredModels: nil,
             modelAliases: [:],
             promptCacheRetention: nil,
             weight: 100,
@@ -3756,6 +3757,7 @@ final class APIContractTests: XCTestCase {
             baseUrl: "https://provider.example/v1",
             modelsUrl: nil,
             models: ["model-a"],
+            discoveredModels: nil,
             modelAliases: [:],
             promptCacheRetention: nil,
             weight: 100,
@@ -4593,7 +4595,7 @@ final class APIContractTests: XCTestCase {
             headers.record(request.value(forHTTPHeaderField: "Authorization") ?? "")
             return MockResponse(
                 statusCode: 200,
-                json: #"{"models":[{"id":"gpt-5.5","displayName":"GPT-5.5"},{"id":"gpt-5.5-codex","displayName":"GPT-5.5 Codex"}]}"#
+                json: #"{"models":[{"id":"gpt-5.5","displayName":"GPT-5.5","description":"","source":"builtin"},{"id":"gpt-5.5-codex","displayName":"GPT-5.5 Codex","description":"","source":"builtin"}]}"#
             )
         }
 
