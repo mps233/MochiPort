@@ -23,6 +23,12 @@ const TELEGRAM_COMMAND_PROGRESS_RETRY_ERROR_CHARS: usize = 600;
 /// 带项目符号一大段的 reasoning summary 会整段铺在卡片顶部，把「执行完成」气泡
 /// 撑得很高。需求是"截短放到顶部"，所以改成单行 + 省略号。
 const TELEGRAM_REASONING_RENDER_CHARS: usize = 80;
+/// 「最终回复」折叠块正文的字符预算。
+///
+/// 整个气泡另有 `TELEGRAM_COMMAND_PROGRESS_MAX_CHARS`（3600）兜底；这里先给最终
+/// 回复留一段确定的额度，避免它把工具步骤挤到完全看不见，也避免超长回复让
+/// 末尾的 `truncate_middle` 从中间截断正文。
+const TELEGRAM_FINAL_REPLY_MAX_CHARS: usize = 2_400;
 const TELEGRAM_PLAN_RENDER_STEPS: usize = 6;
 const TELEGRAM_PLAN_STEP_CHARS: usize = 180;
 const TELEGRAM_DIFF_RENDER_PATHS: usize = 8;
@@ -742,6 +748,26 @@ fn render_task_progress_blocks(
         ));
     }
 
+    // 「最终回复」内嵌在完成气泡里，而不是单独再发一条气泡。
+    //
+    // 用 `details(.., is_open = true)`：和上面的「思考过程」「工具摘要」同一套折叠
+    // 组件，读者可以随时收起；默认展开，因为这是整个 turn 最该先看到的内容。
+    if let Some(final_reply) = snapshot
+        .final_reply
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        blocks.push(rich_blocks::details(
+            rich_blocks::text(text.telegram_final_reply_heading()),
+            commentary_entry_blocks(&truncate_middle(
+                final_reply,
+                TELEGRAM_FINAL_REPLY_MAX_CHARS,
+            )),
+            true,
+        ));
+    }
+
     blocks.push(rich_blocks::footer(rich_blocks::rich_text(vec![
         rich_blocks::text("turn "),
         rich_blocks::code(short_identifier(&snapshot.turn_id)),
@@ -1348,6 +1374,19 @@ fn render_command_progress_with_limits(
     if let Some(supplemental) = render_supplemental_progress(snapshot, text) {
         sections.push(supplemental);
     }
+    // 富消息不可用时的回退：最终回复直接以原文附在末尾（无法折叠）。
+    if let Some(final_reply) = snapshot
+        .final_reply
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(format!(
+            "{}\n{}",
+            text.telegram_final_reply_heading(),
+            truncate_middle(final_reply, TELEGRAM_FINAL_REPLY_MAX_CHARS)
+        ));
+    }
     if snapshot.retry_count > 0
         && let Some(error) = snapshot.retry_error.as_deref()
         && retry_error_chars > 0
@@ -1373,7 +1412,7 @@ fn command_progress_title(snapshot: &TelegramCommandProgressSnapshot, text: ImTe
         || !snapshot.web_searches.is_empty()
         || snapshot.dropped_web_searches > 0
         || snapshot.collab.is_some();
-    if total == 0 && snapshot.retry_count > 0 {
+    let title = if total == 0 && snapshot.retry_count > 0 {
         text.telegram_retry_progress_title(
             snapshot.completed,
             snapshot.failed,
@@ -1384,6 +1423,17 @@ fn command_progress_title(snapshot: &TelegramCommandProgressSnapshot, text: ImTe
             .to_string()
     } else {
         command_execution_progress_title(snapshot, text)
+    };
+    // turn 结束后把耗时拼到标题（原来在单独的「✅ 已完成」气泡头上）。
+    // 只在**已结束**时拼：进行中的气泡显示一个还在涨的耗时没有意义。
+    match snapshot
+        .completed
+        .then_some(snapshot.elapsed_ms)
+        .flatten()
+        .filter(|ms| *ms >= 1_000)
+    {
+        Some(ms) => format!("{title} · {}", text.telegram_turn_elapsed(ms)),
+        None => title,
     }
 }
 
@@ -2098,6 +2148,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: false,
                 failed: false,
             },
@@ -2147,6 +2199,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: false,
                 failed: false,
             },
@@ -2212,6 +2266,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: true,
                 failed: false,
             },
@@ -2283,6 +2339,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: false,
                 failed: false,
             },
@@ -2329,6 +2387,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: true,
                 failed: false,
             },
@@ -2376,6 +2436,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: true,
                 failed: true,
             },
@@ -2414,6 +2476,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: true,
                 failed: false,
             },
@@ -2448,6 +2512,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: true,
                 failed: true,
             },
@@ -2477,6 +2543,8 @@ mod tests {
             commentary: Vec::new(),
             commentary_dropped_entries: 0,
             collab: None,
+            final_reply: None,
+            elapsed_ms: None,
             completed: false,
             failed: false,
         };
@@ -2514,6 +2582,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: false,
                 failed: false,
             },
@@ -2711,6 +2781,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: true,
                 failed: false,
             },
@@ -2759,6 +2831,8 @@ mod tests {
             commentary: Vec::new(),
             commentary_dropped_entries: 0,
             collab: None,
+            final_reply: None,
+            elapsed_ms: None,
             completed: true,
             failed: false,
         };
@@ -2801,7 +2875,7 @@ mod tests {
     /// 没有表格与标题分支，于是这些行被并进普通段落原样输出。旧路径由 Telegram
     /// 原生渲染 markdown，所以这是内嵌改造引入的回退。
     #[test]
-    fn commentary_markdown_renders_tables_and_headings() {
+    fn final_reply_markdown_renders_tables_and_headings() {
         let reply = "研究完了——原因找到了。直接说结论：\n## 结论\n四个时间点全部对得上：\n| 时间 | 最后那条消息 | 记录显示 |\n|---|---|---|\n|11:29:38|好，继续找战双|正常完成|\n|11:58:42|好，找《终末地》|同上|\n证据链都来自本机日志。";
         let blocks = commentary_entry_blocks(reply);
         let encoded = serde_json::to_string(&serde_json::Value::Array(blocks.clone())).unwrap();
@@ -2893,7 +2967,7 @@ mod tests {
     /// 旧路径用的是 `TelegramInputRichMessage::markdown(..)`，由 Telegram 原生渲染，
     /// 所以这是内嵌改造引入的回退。
     #[test]
-    fn commentary_markdown_does_not_leak_raw_syntax() {
+    fn final_reply_markdown_does_not_leak_raw_syntax() {
         let reply = "找到了，已整理到 [Logo 合集/战双 logo](/Users/miaopasi/Downloads/Logo 合集/战双 logo)（Finder 已打开）。\n核心的几张：\n- [01 游戏 LOGO](/Users/miaopasi/a.png) —— 早期 LOGO\n- [02 Steam 头图](/Users/miaopasi/b.jpg)\n_更多_ 里还有一张维基版图标。来源都写在 [README.md](https://example.com/r.md) 里。";
         let blocks = commentary_entry_blocks(reply);
         let encoded = serde_json::to_string(&serde_json::Value::Array(blocks.clone())).unwrap();
@@ -2949,6 +3023,8 @@ mod tests {
             commentary: Vec::new(),
             commentary_dropped_entries: 0,
             collab: None,
+            final_reply: None,
+            elapsed_ms: None,
             completed: false,
             failed: false,
         };
@@ -2979,6 +3055,104 @@ mod tests {
         assert!(rendered.contains("Check"));
     }
 
+    /// 回归：「最终回复」必须内嵌在完成气泡里，且是**默认展开**的折叠块。
+    ///
+    /// 需求：最终回复不再单独发一条气泡，改在「执行完成」气泡内做成可折叠板块，
+    /// 默认不折叠。
+    #[test]
+    fn final_reply_is_embedded_as_an_open_details_block() {
+        let snapshot = TelegramCommandProgressSnapshot {
+            turn_id: "turn".to_string(),
+            revision: 1,
+            message_id: None,
+            entries: Vec::new(),
+            dropped_entries: 0,
+            retry_count: 0,
+            retry_error: None,
+            reasoning_summary: None,
+            plan_explanation: None,
+            plan: Vec::new(),
+            diff_summary: None,
+            web_searches: Vec::new(),
+            dropped_web_searches: 0,
+            commentary: Vec::new(),
+            commentary_dropped_entries: 0,
+            collab: None,
+            final_reply: Some("搞定了，已把 6 个文件夹归到总文件夹。".to_string()),
+            elapsed_ms: Some(25_000),
+            completed: true,
+            failed: false,
+        };
+        let rendered = render_task_progress(&snapshot, ImText::zh_cn());
+        let blocks = serde_json::Value::Array(rendered.blocks.clone());
+
+        let details = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|block| block["type"] == "details" && block["summary"] == "最终回复")
+            .expect("应有「最终回复」折叠块");
+        // 默认展开：`is_open` 必须为 true。
+        assert_eq!(
+            details["is_open"],
+            serde_json::Value::Bool(true),
+            "「最终回复」折叠块必须默认展开"
+        );
+        let inner = serde_json::to_string(&details["blocks"]).expect("serialize");
+        assert!(inner.contains("6 个文件夹"), "折叠块内应包含正文: {inner}");
+
+        // 耗时拼到顶部标题（原来在单独的「✅ 已完成」气泡上）。
+        assert!(
+            rendered.fallback_markdown.contains("25秒"),
+            "标题应带耗时，实际: {}",
+            rendered
+                .fallback_markdown
+                .lines()
+                .next()
+                .unwrap_or_default()
+        );
+        // 回退文本里也要有最终回复，否则富消息不可用时会丢内容。
+        assert!(rendered.fallback_markdown.contains("最终回复"));
+        assert!(rendered.fallback_markdown.contains("6 个文件夹"));
+    }
+
+    /// 没有最终回复时，不应出现空的「最终回复」折叠块。
+    #[test]
+    fn absent_final_reply_renders_no_details_block() {
+        let snapshot = TelegramCommandProgressSnapshot {
+            turn_id: "turn".to_string(),
+            revision: 1,
+            message_id: None,
+            entries: Vec::new(),
+            dropped_entries: 0,
+            retry_count: 0,
+            retry_error: None,
+            reasoning_summary: None,
+            plan_explanation: None,
+            plan: Vec::new(),
+            diff_summary: None,
+            web_searches: Vec::new(),
+            dropped_web_searches: 0,
+            commentary: Vec::new(),
+            commentary_dropped_entries: 0,
+            collab: None,
+            final_reply: None,
+            elapsed_ms: None,
+            completed: true,
+            failed: false,
+        };
+        let blocks =
+            serde_json::Value::Array(render_task_progress(&snapshot, ImText::zh_cn()).blocks);
+        assert!(
+            !blocks
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| block["type"] == "details" && block["summary"] == "最终回复"),
+            "无最终回复时不应渲染该折叠块"
+        );
+    }
+
     /// 短思考摘要不截断、不加省略号。
     #[test]
     fn short_reasoning_summary_is_not_ellipsized() {
@@ -2999,6 +3173,8 @@ mod tests {
             commentary: Vec::new(),
             commentary_dropped_entries: 0,
             collab: None,
+            final_reply: None,
+            elapsed_ms: None,
             completed: true,
             failed: false,
         };
@@ -3068,6 +3244,8 @@ mod tests {
                     .collect(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: false,
                 failed: false,
             };
@@ -3130,6 +3308,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: false,
                 failed: false,
             };
@@ -3184,6 +3364,8 @@ mod tests {
                 ],
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: false,
                 failed: false,
             },
@@ -3292,6 +3474,8 @@ mod tests {
                     dropped_entries: 0,
                     completed: false,
                 }),
+                final_reply: None,
+                elapsed_ms: None,
                 completed: false,
                 failed: false,
             },
@@ -3448,6 +3632,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: false,
                 failed: false,
             },
@@ -3530,6 +3716,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: true,
                 failed: false,
             },
@@ -3598,6 +3786,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: true,
                 failed: true,
             },
@@ -3669,6 +3859,8 @@ mod tests {
                 commentary: Vec::new(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: false,
                 failed: false,
             },
@@ -3739,6 +3931,8 @@ mod tests {
                 ],
                 commentary_dropped_entries: 2,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: false,
                 failed: false,
             },
@@ -3828,6 +4022,8 @@ mod tests {
                     .collect(),
                 commentary_dropped_entries: 0,
                 collab: None,
+                final_reply: None,
+                elapsed_ms: None,
                 completed: false,
                 failed: false,
             },

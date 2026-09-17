@@ -411,6 +411,10 @@ pub(crate) struct TelegramCommandProgressSnapshot {
     pub commentary: Vec<TelegramCommentaryEntry>,
     pub commentary_dropped_entries: usize,
     pub collab: Option<TelegramCollabProgressSnapshot>,
+    /// turn 的最终回复正文；渲染成气泡内默认展开的折叠块。
+    pub final_reply: Option<String>,
+    /// turn 总耗时（毫秒），用于拼到顶部标题。
+    pub elapsed_ms: Option<u128>,
     pub completed: bool,
     pub failed: bool,
 }
@@ -473,6 +477,13 @@ struct TelegramCommandProgressState {
     reserved_commentary_sequences: HashMap<String, u64>,
     collab_entries: Vec<TelegramCollabProgressEntry>,
     collab_dropped_entries: usize,
+    /// turn 结束时才写入的最终回复正文；渲染成气泡内默认展开的折叠块。
+    ///
+    /// 放在聚合气泡里而不是单独发一条，是为了避免"一条过程气泡 + 一条完成气泡"
+    /// 的重复观感；`None` 表示本 turn 没有最终回复。
+    final_reply: Option<String>,
+    /// turn 总耗时，拼到气泡顶部标题。
+    elapsed_ms: Option<u128>,
     completed: bool,
     failed: bool,
     dirty: bool,
@@ -1846,6 +1857,33 @@ impl RuntimeState {
         self.finish_telegram_command_progress_with_outcome(thread_id, turn_id, false)
     }
 
+    /// 把 turn 的最终回复写进聚合气泡，并记录耗时。
+    ///
+    /// 返回 `false` 表示本 turn 还没有聚合气泡（既没有工具也没有过程文案），
+    /// 此时没有"执行完成"卡片可以内嵌，调用方应回退到单独发送。
+    ///
+    /// 必须在 `finish_telegram_command_progress*` **之前**调用：`finish` 会就地
+    /// 认领并投递这一版快照，先写入才能让最终回复和完成状态一次发出。
+    pub(crate) fn set_telegram_command_progress_final_reply(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        text: &str,
+        elapsed_ms: Option<u128>,
+    ) -> bool {
+        let Some(progress) = self.telegram_command_progress_by_thread.get_mut(thread_id) else {
+            return false;
+        };
+        if progress.turn_id != turn_id {
+            return false;
+        }
+        progress.final_reply = Some(text.to_string());
+        progress.elapsed_ms = elapsed_ms;
+        progress.revision = progress.revision.saturating_add(1);
+        progress.dirty = true;
+        true
+    }
+
     pub(crate) fn finish_telegram_command_progress_with_outcome(
         &mut self,
         thread_id: &str,
@@ -2778,6 +2816,11 @@ fn telegram_command_progress_snapshot(
             dropped_entries: progress.collab_dropped_entries,
             completed: progress.completed,
         }),
+        final_reply: progress
+            .final_reply
+            .clone()
+            .filter(|value| !value.trim().is_empty()),
+        elapsed_ms: progress.elapsed_ms,
         completed: progress.completed,
         failed: progress.failed,
     }
@@ -2810,6 +2853,8 @@ fn telegram_command_progress_state(turn_id: &str) -> TelegramCommandProgressStat
         reserved_commentary_sequences: HashMap::new(),
         collab_entries: Vec::new(),
         collab_dropped_entries: 0,
+        final_reply: None,
+        elapsed_ms: None,
         completed: false,
         failed: false,
         dirty: false,
@@ -2839,6 +2884,10 @@ fn telegram_command_progress_has_content(progress: &TelegramCommandProgressState
         || progress.diff_summary.is_some()
         || !progress.web_searches.is_empty()
         || !progress.commentary_entries.is_empty()
+        || progress
+            .final_reply
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
         || !progress.collab_entries.is_empty()
 }
 

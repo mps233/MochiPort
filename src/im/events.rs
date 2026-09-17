@@ -2931,12 +2931,19 @@ pub(crate) async fn handle_codex_notification_for_generation(
                     .mark_turn_completed(thread_id, effective_turn_id.as_deref());
                 return;
             };
+            // 最终回复是否已经内嵌进「执行完成」聚合气泡。
+            //
+            // 内嵌成功时就不再单独发一条「✅ 已完成」气泡——那正是"同一段内容
+            // 出现两条气泡"的来源。只有本 turn 压根没有聚合气泡（既没工具也没
+            // 过程文案，`set_...` 返回 false）时才回退到单独发送。
+            let mut telegram_final_embedded = false;
             if route.platform == ImPlatformKind::Telegram {
-                // 先把"即将单独发成完成卡片"的文案从聚合气泡里移除，**再** finish。
+                // 先把"即将作为最终回复呈现"的文案从聚合气泡的**思考过程**里移除，
+                // 再把它作为「最终回复」折叠块写回去。
                 //
-                // 顺序很重要：`finish` 会认领并投递气泡，若移除发生在它之后，那条
+                // 顺序很重要：`finish` 会认领并投递气泡，若改动发生在它之后，那条
                 // 更正后的气泡要等下一轮投递才发出，界面上会先看到一段重复内容。
-                // 先移除则气泡一次性就是正确的。
+                // 先改则气泡一次性就是正确的。
                 if let Some(turn_id) = effective_turn_id.as_deref()
                     && let Some(text) = extract_turn_reply_text(params)
                 {
@@ -2947,20 +2954,65 @@ pub(crate) async fn handle_codex_notification_for_generation(
                     // 而函数体里又要调用同样需要 runtime 锁的 `deliver_telegram_command_progress`，
                     // 于是构成自我死锁。edition 2024 下已实测复现：daemon 永久卡死该请求，
                     // 并连带拖垮 `/api/v1/manage/lifecycle`、租约续期与版本交接。
-                    // 待判定记录只用于判定，这里消费掉并改为按内容移除。
-                    let _ = state
+                    //
+                    // 取回待判定记录：既要知道它是否**已经**作为独立卡片发过，也要把它
+                    // 从这里消费掉（避免下一轮重复判定）。
+                    let pending = state
                         .runtime
                         .lock()
                         .await
                         .take_turn_last_agent_message(turn_id);
-                    // 按**内容**匹配而不是 `item_id`：`item/completed` 的 `turnId`
-                    // 可能缺失，那条链路上记录会被整段跳过，而写入气泡却回退到了
-                    // "当前 turn"。按内容匹配才能保证"同一段内容不出现两遍"。
-                    let _ = state
-                        .runtime
-                        .lock()
-                        .await
-                        .remove_commentary_matching_text(thread_id, turn_id, &text);
+                    // 显式 `phase = final_answer` 的答复在 `item/completed` 就已经单独
+                    // 发过一张完成卡片（`send_turn_reply(is_final_answer = true)`）。
+                    // 这里再内嵌一次会让同一段内容出现两遍，所以内嵌只针对
+                    // **没有**单独发过的那条。
+                    let already_sent_standalone =
+                        pending
+                            .as_ref()
+                            .is_some_and(|(_, pending_text, was_explicit_final)| {
+                                *was_explicit_final && pending_text.trim() == text.trim()
+                            });
+                    if !already_sent_standalone {
+                        // 按**内容**匹配而不是 `item_id`：`item/completed` 的 `turnId`
+                        // 可能缺失，那条链路上记录会被整段跳过，而写入气泡却回退到了
+                        // "当前 turn"。按内容匹配才能保证"同一段内容不出现两遍"。
+                        let _ = state
+                            .runtime
+                            .lock()
+                            .await
+                            .remove_commentary_matching_text(thread_id, turn_id, &text);
+                        // 最终回复里若带本地图片，图片必须照旧发出——内嵌气泡只承载
+                        // 文本，不承载附件。
+                        //
+                        // 写进聚合气泡：渲染成默认展开的「最终回复」折叠块。
+                        let elapsed_ms = state.runtime.lock().await.turn_elapsed_ms(thread_id);
+                        telegram_final_embedded = state
+                            .runtime
+                            .lock()
+                            .await
+                            .set_telegram_command_progress_final_reply(
+                                thread_id, turn_id, &text, elapsed_ms,
+                            );
+                        // 只有确认内嵌成功才补发图片：否则下面会走 `send_turn_reply`，
+                        // 它自己就会把图片排进队列，这里再排一次就重复了。
+                        if telegram_final_embedded
+                            && let Err(err) = queue_agent_message_images(
+                                &outbound_tx,
+                                thread_id,
+                                &route,
+                                None,
+                                &text,
+                            )
+                        {
+                            state
+                                .push_event(
+                                    "error",
+                                    "telegram_agent_message_images_enqueue_failed",
+                                    format!("thread={thread_id} chat={} err={err}", route.chat_id),
+                                )
+                                .await;
+                        }
+                    }
                 }
                 if let Some(api) = api_registry.telegram_for_route(&route) {
                     telegram_typing::finish_thread(&state, api, thread_id, &route).await;
@@ -3003,7 +3055,14 @@ pub(crate) async fn handle_codex_notification_for_generation(
             } else {
                 false
             };
-            if !wecom_stream_finished && let Some(text) = extract_turn_reply_text(params) {
+            if !wecom_stream_finished
+                && !telegram_final_embedded
+                && let Some(text) = extract_turn_reply_text(params)
+            {
+                // Telegram 已在上面把它内嵌进「执行完成」气泡，这里只处理：
+                //   - 其它平台（飞书等）的常规独立发送；
+                //   - Telegram 本 turn 没有聚合气泡（无工具/无过程文案）时的回退。
+                //
                 // 这段文本此前可能已经作为「过程文案」并入聚合气泡：`phase` 缺失的
                 // 最终答复在 `item/completed` 时无法与过程说明区分，会先被并进气泡。
                 // 既然现在要把它当成独立的完成卡片发出，就必须**从气泡里移除**，
@@ -3020,7 +3079,7 @@ pub(crate) async fn handle_codex_notification_for_generation(
                     true,
                 )
                 .await;
-            } else if let Some(turn_id) = effective_turn_id.as_deref() {
+            } else if !telegram_final_embedded && let Some(turn_id) = effective_turn_id.as_deref() {
                 // turn 结束时没有可用的最终答复文本：若该 turn 的最后一条
                 // agentMessage 尚未作为最终答复发出（缺 `phase` 的场景），
                 // 就在这里把它升级为最终答复——这样"过程说明"不会各自变成
@@ -4396,6 +4455,206 @@ mod tests {
                 ..Default::default()
             },
         );
+    }
+
+    /// 回归：最终回复必须内嵌进「执行完成」气泡，**不再单独发**完成气泡。
+    ///
+    /// 需求：最终回复不要单独占一条气泡，改为「执行完成」气泡里一个默认展开的
+    /// 折叠块。这里断言 `turn/completed` 之后**没有** `TurnReply` 出队，且聚合
+    /// 快照里带着 `final_reply`。
+    #[tokio::test]
+    async fn telegram_turn_completed_embeds_final_reply_instead_of_a_separate_bubble() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let registry = telegram_registry_with_mock_api(&route.account_id).await;
+        let (outbound_tx, mut outbound_rx) = outbound_channel();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.bind_route("thread", route.clone());
+            runtime.mark_turn_started("thread", "turn");
+        }
+
+        // 先制造一个工具步骤，让「执行完成」气泡确实存在。
+        handle_codex_notification(
+            state.clone(),
+            registry.clone(),
+            outbound_tx.clone(),
+            &crate::codex::CodexNotification {
+                method: "item/started".to_string(),
+                params: Some(json!({
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "item": { "id": "tool-x", "type": "commandExecution" }
+                })),
+                request_id: None,
+                remote_client_key: None,
+                remote_connection_epoch: None,
+            },
+        )
+        .await;
+        // 排空进度投递产生的出队消息。
+        while try_recv_for_test(&mut outbound_rx).is_some() {}
+
+        handle_codex_notification(
+            state.clone(),
+            registry.clone(),
+            outbound_tx.clone(),
+            &crate::codex::CodexNotification {
+                method: "turn/completed".to_string(),
+                params: Some(json!({
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "turn": { "items": [
+                        { "id": "answer", "type": "agentMessage", "text": "最终答复内容" }
+                    ]}
+                })),
+                request_id: None,
+                remote_client_key: None,
+                remote_connection_epoch: None,
+            },
+        )
+        .await;
+
+        let mut turn_replies = 0;
+        while let Some(message) = try_recv_for_test(&mut outbound_rx) {
+            if message.kind == ImOutboundKind::TurnReply {
+                turn_replies += 1;
+            }
+        }
+        assert_eq!(
+            turn_replies, 0,
+            "最终回复已内嵌进完成气泡，不应再单独发 TurnReply 气泡"
+        );
+
+        let snapshot = state
+            .runtime
+            .lock()
+            .await
+            .telegram_command_progress_snapshot_for_test("thread", "turn")
+            .expect("snapshot");
+        assert_eq!(
+            snapshot.final_reply.as_deref(),
+            Some("最终答复内容"),
+            "最终回复应写进聚合气泡快照"
+        );
+    }
+
+    /// 回归：**显式** `phase = final_answer` 的答复已在 `item/completed` 单独发过，
+    /// `turn/completed` 不能再把它内嵌一次，否则同一段内容出现两遍。
+    #[tokio::test]
+    async fn explicit_final_answer_is_not_embedded_twice() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let registry = telegram_registry_with_mock_api(&route.account_id).await;
+        let (outbound_tx, mut outbound_rx) = outbound_channel();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.bind_route("thread", route.clone());
+            runtime.mark_turn_started("thread", "turn");
+        }
+
+        // 必须先有工具步骤，聚合气泡（progress state）才会存在——否则
+        // `set_telegram_command_progress_final_reply` 直接返回 false，守卫根本
+        // 走不到，测试会变成"永远通过"的空断言。
+        handle_codex_notification(
+            state.clone(),
+            registry.clone(),
+            outbound_tx.clone(),
+            &crate::codex::CodexNotification {
+                method: "item/started".to_string(),
+                params: Some(json!({
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "item": { "id": "tool-x", "type": "commandExecution" }
+                })),
+                request_id: None,
+                remote_client_key: None,
+                remote_connection_epoch: None,
+            },
+        )
+        .await;
+        while try_recv_for_test(&mut outbound_rx).is_some() {}
+
+        // 显式 final_answer：`item/completed` 当场当作最终答复发出。
+        handle_codex_notification(
+            state.clone(),
+            registry.clone(),
+            outbound_tx.clone(),
+            &crate::codex::CodexNotification {
+                method: "item/completed".to_string(),
+                params: Some(json!({
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "item": {
+                        "id": "answer",
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": "显式最终答复"
+                    }
+                })),
+                request_id: None,
+                remote_client_key: None,
+                remote_connection_epoch: None,
+            },
+        )
+        .await;
+
+        // `item/completed` 的显式 final_answer 会**当场**发一条完成卡片，这是既有
+        // 且正确的行为。先把它排空，再看 `turn/completed` 是否又发了一条——那才是重复。
+        let mut replies_after_item = 0;
+        while let Some(message) = try_recv_for_test(&mut outbound_rx) {
+            if message.kind == ImOutboundKind::TurnReply {
+                replies_after_item += 1;
+            }
+        }
+        assert_eq!(
+            replies_after_item, 1,
+            "显式 final_answer 应在 item/completed 当场发出恰好一条完成卡片"
+        );
+
+        handle_codex_notification(
+            state.clone(),
+            registry.clone(),
+            outbound_tx.clone(),
+            &crate::codex::CodexNotification {
+                method: "turn/completed".to_string(),
+                params: Some(json!({
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "turn": { "items": [
+                        { "id": "answer", "type": "agentMessage",
+                          "phase": "final_answer", "text": "显式最终答复" }
+                    ]}
+                })),
+                request_id: None,
+                remote_client_key: None,
+                remote_connection_epoch: None,
+            },
+        )
+        .await;
+
+        let snapshot = state
+            .runtime
+            .lock()
+            .await
+            .telegram_command_progress_snapshot_for_test("thread", "turn");
+        // 快照可能已被 cleanup 移除；关键是**不能**再内嵌同一段文本。
+        if let Some(snapshot) = snapshot {
+            assert!(
+                snapshot.final_reply.is_none(),
+                "显式 final_answer 已经单独发过，不应再内嵌：{:?}",
+                snapshot.final_reply
+            );
+        }
+
+        // 也不能因此又发一条 TurnReply（那条在 item/completed 已经发过）。
+        let mut turn_replies = 0;
+        while let Some(message) = try_recv_for_test(&mut outbound_rx) {
+            if message.kind == ImOutboundKind::TurnReply {
+                turn_replies += 1;
+            }
+        }
+        assert_eq!(turn_replies, 0, "不应重复发送最终答复");
     }
 
     #[test]

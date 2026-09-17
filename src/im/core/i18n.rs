@@ -322,6 +322,41 @@ impl ImText {
         }
     }
 
+    /// 聚合气泡里「最终回复」折叠块的标题。
+    pub(crate) fn telegram_final_reply_heading(self) -> &'static str {
+        self.choose("最终回复", "Final reply")
+    }
+
+    /// 把 turn 耗时格式化成人类可读文案（`25秒` / `1分30秒` / `1小时5分`）。
+    ///
+    /// 单独气泡去掉后，耗时改为拼在聚合气泡的顶部标题里。
+    pub(crate) fn telegram_turn_elapsed(self, elapsed_ms: u128) -> String {
+        let total_seconds = (elapsed_ms / 1_000) as u64;
+        let hours = total_seconds / 3_600;
+        let minutes = (total_seconds % 3_600) / 60;
+        let seconds = total_seconds % 60;
+        match self.locale {
+            ImLocale::ZhCn => {
+                if hours > 0 {
+                    format!("{hours}小时{minutes}分")
+                } else if minutes > 0 {
+                    format!("{minutes}分{seconds}秒")
+                } else {
+                    format!("{seconds}秒")
+                }
+            }
+            ImLocale::EnUs => {
+                if hours > 0 {
+                    format!("{hours}h{minutes:02}m")
+                } else if minutes > 0 {
+                    format!("{minutes}m{seconds:02}s")
+                } else {
+                    format!("{seconds}s")
+                }
+            }
+        }
+    }
+
     /// 聚合气泡里「思考过程（N）」折叠块的标题。
     pub(crate) fn telegram_commentary_heading(self, count: usize) -> String {
         match self.locale {
