@@ -279,12 +279,7 @@ impl TelegramAdapter {
         caption = caption.chars().take(980).collect();
         let send_result = self
             .api
-            .send_document_file(
-                &target,
-                &path,
-                Some(&caption),
-                Some(TelegramParseMode::Html),
-            )
+            .send_document_file(target, &path, Some(&caption), Some(TelegramParseMode::Html))
             .await;
         let _ = std::fs::remove_file(&path);
         let message_id = send_result?;
@@ -950,20 +945,6 @@ impl TelegramAdapter {
         }
         let _ = self.clear_reply_markup(target, message_id).await;
         self.send_text(target, &text).await
-    }
-
-    pub async fn send_or_update_rich_markdown_with_fallback(
-        &self,
-        target: &str,
-        message_id: Option<&str>,
-        markdown: &str,
-        fallback_markdown: &str,
-    ) -> Result<String> {
-        let markdown = telegram_cleanup_text(markdown);
-        let fallback_markdown = telegram_cleanup_text(fallback_markdown);
-        let rich_message = TelegramInputRichMessage::markdown(markdown);
-        self.send_or_update_rich_message(target, message_id, &rich_message, &fallback_markdown)
-            .await
     }
 
     pub async fn send_or_update_rich_blocks(

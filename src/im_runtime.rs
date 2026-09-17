@@ -35,30 +35,8 @@ static TELEGRAM_MODEL_SWITCH_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub(crate) struct TelegramCommentaryEntry {
     pub item_id: String,
     pub text: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TelegramCommentarySnapshot {
-    pub turn_id: String,
-    pub segment: u64,
-    pub message_id: Option<String>,
-    pub entries: Vec<TelegramCommentaryEntry>,
-    pub dropped_entries: usize,
-}
-
-#[derive(Debug, Clone)]
-struct TelegramCommentaryState {
-    turn_id: String,
-    active_segment: u64,
-    segments: HashMap<u64, TelegramCommentarySegmentState>,
-    completed: bool,
-}
-
-#[derive(Debug, Clone, Default)]
-struct TelegramCommentarySegmentState {
-    message_id: Option<String>,
-    entries: Vec<TelegramCommentaryEntry>,
-    dropped_entries: usize,
+    /// 到达序号：用于把思考文案与工具步骤按实际发生顺序交错渲染。
+    pub sequence: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -334,6 +312,12 @@ pub struct RuntimeState {
     terminal_status_fallback_by_thread: HashMap<String, TerminalStatusFallbackState>,
     next_terminal_status_fallback_token: u64,
     pub last_sent_text_by_route: HashMap<String, String>,
+    /// 每个 turn 最近一条 agentMessage 的 (item_id, 文本, 是否已显式声明为最终答复)。
+    ///
+    /// Codex 的 `agentMessage` 并不总带 `phase` 字段，缺省时无法判断它是过程
+    /// 说明还是最终答复。因此改为"延迟判定"：收到时先按过程文案处理，turn 结束
+    /// 时若最后一条不是显式最终答复，才把它升级为最终答复。
+    turn_last_agent_message: HashMap<String, (String, String, bool)>,
     pub route_by_thread: HashMap<String, RouteTarget>,
     pub last_route: Option<RouteTarget>,
     pub pending_approvals_by_conversation: HashMap<String, Vec<PendingApproval>>,
@@ -344,7 +328,6 @@ pub struct RuntimeState {
     telegram_completed_typing_keys: HashSet<String>,
     telegram_completed_typing_order: VecDeque<String>,
     telegram_command_progress_by_thread: HashMap<String, TelegramCommandProgressState>,
-    telegram_commentary_by_thread: HashMap<String, TelegramCommentaryState>,
     next_telegram_typing_generation: i64,
     pub wecom_streams_by_thread: HashMap<String, WecomStreamState>,
     pub thread_routing_requests: HashMap<String, ThreadRoutingRequestState>,
@@ -398,6 +381,8 @@ pub(crate) struct TelegramCommandProgressEntry {
     pub exit_code: Option<i64>,
     pub duration_ms: Option<u64>,
     pub failure_output: Option<String>,
+    /// 到达序号：用于把思考文案与工具步骤按实际发生顺序交错渲染。
+    pub sequence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -423,6 +408,8 @@ pub(crate) struct TelegramCommandProgressSnapshot {
     pub diff_summary: Option<TelegramDiffSummary>,
     pub web_searches: Vec<TelegramWebSearchProgressEntry>,
     pub dropped_web_searches: usize,
+    pub commentary: Vec<TelegramCommentaryEntry>,
+    pub commentary_dropped_entries: usize,
     pub collab: Option<TelegramCollabProgressSnapshot>,
     pub completed: bool,
     pub failed: bool,
@@ -476,6 +463,14 @@ struct TelegramCommandProgressState {
     diff_summary: Option<TelegramDiffSummary>,
     web_searches: Vec<TelegramWebSearchProgressEntry>,
     dropped_web_searches: usize,
+    commentary_entries: Vec<TelegramCommentaryEntry>,
+    commentary_dropped_entries: usize,
+    /// 下一个要分配的到达序号；思考与工具共用同一条递增序列。
+    next_sequence: u64,
+    /// 已占位但还没产生文案的思考（item_id → 序号）。
+    ///
+    /// 见 `reserve_commentary_sequence`：序号要取"开始说话"的时刻。
+    reserved_commentary_sequences: HashMap<String, u64>,
     collab_entries: Vec<TelegramCollabProgressEntry>,
     collab_dropped_entries: usize,
     completed: bool,
@@ -580,7 +575,6 @@ impl RuntimeState {
         self.feishu_streaming_cards_by_item.clear();
         self.clear_all_telegram_typing();
         self.telegram_command_progress_by_thread.clear();
-        self.telegram_commentary_by_thread.clear();
         self.terminal_notice_failed_by_turn.clear();
         self.terminal_notice_turn_order.clear();
         self.terminal_status_fallback_by_thread.clear();
@@ -598,7 +592,6 @@ impl RuntimeState {
         self.feishu_streaming_cards_by_item.clear();
         self.clear_all_telegram_typing();
         self.telegram_command_progress_by_thread.clear();
-        self.telegram_commentary_by_thread.clear();
         self.terminal_notice_failed_by_turn.clear();
         self.terminal_notice_turn_order.clear();
         self.terminal_status_fallback_by_thread.clear();
@@ -654,7 +647,6 @@ impl RuntimeState {
             self.turn_finished_at_by_thread.remove(thread_id);
             self.clear_telegram_typing_for_thread(thread_id);
             self.telegram_command_progress_by_thread.remove(thread_id);
-            self.telegram_commentary_by_thread.remove(thread_id);
             self.terminal_status_fallback_by_thread.remove(thread_id);
             self.thread_settings_by_thread.remove(thread_id);
             self.pending_telegram_turns_by_conversation
@@ -677,13 +669,6 @@ impl RuntimeState {
             .is_some_and(|progress| progress.turn_id != turn_id)
         {
             self.telegram_command_progress_by_thread.remove(thread_id);
-        }
-        if self
-            .telegram_commentary_by_thread
-            .get(thread_id)
-            .is_some_and(|commentary| commentary.turn_id != turn_id)
-        {
-            self.telegram_commentary_by_thread.remove(thread_id);
         }
         self.current_turn_by_thread
             .insert(thread_id.to_string(), turn_id.to_string());
@@ -909,6 +894,97 @@ impl RuntimeState {
         true
     }
 
+    /// 记录该 turn 最近一条 agentMessage（用于 turn 结束时的最终答复判定）。
+    pub fn remember_turn_agent_message(
+        &mut self,
+        turn_id: &str,
+        item_id: &str,
+        text: &str,
+        is_explicit_final: bool,
+    ) {
+        self.turn_last_agent_message.insert(
+            turn_id.to_string(),
+            (item_id.to_string(), text.to_string(), is_explicit_final),
+        );
+    }
+
+    /// 从聚合气泡里移除**文本相同**的思考条目，并返回更新后的快照。
+    ///
+    /// 用于"这段文案即将作为独立完成卡片单独发送"的场景。
+    ///
+    /// 刻意按**内容**而不是 `item_id` 匹配：这条链路上 id 并不可靠——
+    /// `item/completed` 的 `turnId` 可能缺失（此时记录最终答复会被整段跳过，
+    /// 而写入气泡会回退到"当前 turn"），`item_id` 也可能退化成文本本身。
+    /// 按内容匹配直接把"同一段内容不能出现两遍"这个不变量落到代码里。
+    pub(crate) fn remove_commentary_matching_text(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        text: &str,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        let progress = self
+            .telegram_command_progress_by_thread
+            .get_mut(thread_id)?;
+        // 与 `remove_telegram_commentary_progress` 同理：不能因为 `completed`
+        // 提前返回，否则 turn 结束时的移除会静默失效。
+        if progress.turn_id != turn_id {
+            return None;
+        }
+        let target = text.trim();
+        let before = progress.commentary_entries.len();
+        progress
+            .commentary_entries
+            .retain(|entry| entry.text.trim() != target);
+        if progress.commentary_entries.len() == before {
+            return None;
+        }
+        progress.revision = progress.revision.saturating_add(1);
+        progress.dirty = true;
+        Some(telegram_command_progress_snapshot(progress))
+    }
+
+    /// 取出并清除该 turn 最后一条 agentMessage。
+    ///
+    /// 返回 `(item_id, text, is_explicit_final)`。调用方据此决定 turn 结束时
+    /// 是否需要把它升级为最终答复。
+    pub fn take_turn_last_agent_message(
+        &mut self,
+        turn_id: &str,
+    ) -> Option<(String, String, bool)> {
+        self.turn_last_agent_message.remove(turn_id)
+    }
+
+    /// 把某条过程文案从聚合气泡里移除（它被升级为最终答复时调用）。
+    ///
+    /// 返回更新后的快照（供原地刷新那条气泡）；条目不存在时返回 None。
+    pub(crate) fn remove_telegram_commentary_progress(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        item_id: &str,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        let progress = self
+            .telegram_command_progress_by_thread
+            .get_mut(thread_id)?;
+        // 刻意**不**因为 `completed` 而提前返回：turn 结束时
+        // `finish_telegram_command_progress` 会先把状态标成 completed，此后才轮到
+        // "把最终答复从气泡里移除"。若这里用 completed 做守卫，移除会静默失效，
+        // 同一段内容就会既留在思考气泡、又发一张完成卡片。
+        if progress.turn_id != turn_id {
+            return None;
+        }
+        let before = progress.commentary_entries.len();
+        progress
+            .commentary_entries
+            .retain(|entry| entry.item_id != item_id);
+        if progress.commentary_entries.len() == before {
+            return None;
+        }
+        progress.revision = progress.revision.saturating_add(1);
+        progress.dirty = true;
+        Some(telegram_command_progress_snapshot(progress))
+    }
+
     pub fn should_skip_duplicate_text(&self, route_key: &str, text: &str) -> bool {
         self.last_sent_text_by_route
             .get(route_key)
@@ -921,115 +997,105 @@ impl RuntimeState {
             .insert(route_key.to_string(), text.to_string());
     }
 
-    pub(crate) fn append_telegram_commentary(
+    /// 为一条**尚未产生文案**的思考占位，返回它的到达序号。
+    ///
+    /// 思考文案的序号必须取"开始说话"的时刻，而不是"说完"的时刻：Codex 的
+    /// `agentMessage` 是先后台推理、再一次性 `item/completed`，而工具在
+    /// `item/started` 就占号了。若等到完成才分配，期间开始的工具会排到它前面，
+    /// 表现为"本该属于这条思考的工具被并进了上一个工具摘要"。
+    ///
+    /// 重复占位（同 item_id）沿用首次的序号。
+    pub(crate) fn reserve_commentary_sequence(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        item_id: &str,
+    ) -> u64 {
+        // 注意：这张表的键是 **thread_id**，不是 turn_id。
+        //
+        // 用 `entry().or_insert_with` 而不是 `get_mut`：若本 turn 的第一条事件就是
+        // 思考 delta（还没有任何工具），状态尚未建立；此时必须就地建好再占位，
+        // 否则占位静默失败，序号又会退化成"完成时才分配"。
+        let progress = self
+            .telegram_command_progress_by_thread
+            .entry(thread_id.to_string())
+            .or_insert_with(|| telegram_command_progress_state(turn_id));
+        if progress.turn_id != turn_id {
+            *progress = telegram_command_progress_state(turn_id);
+        }
+        if let Some(existing) = progress
+            .commentary_entries
+            .iter()
+            .find(|entry| entry.item_id == item_id)
+        {
+            return existing.sequence;
+        }
+        if let Some(reserved) = progress.reserved_commentary_sequences.get(item_id) {
+            return *reserved;
+        }
+        let sequence = progress.allocate_sequence();
+        progress
+            .reserved_commentary_sequences
+            .insert(item_id.to_string(), sequence);
+        sequence
+    }
+    /// 过程文案（Codex 的说明文字）并入同一条聚合气泡：与协作进度一样，
+    /// 只负责更新聚合状态并标脏，由聚合投递驱动统一渲染。
+    pub(crate) fn upsert_telegram_commentary_progress(
         &mut self,
         thread_id: &str,
         turn_id: &str,
         item_id: &str,
         text: String,
-    ) -> Option<TelegramCommentarySnapshot> {
+    ) -> Option<TelegramCommandProgressSnapshot> {
         if self.current_turn_id(thread_id) != Some(turn_id) {
             return None;
         }
-        let commentary = self
-            .telegram_commentary_by_thread
+        let progress = self
+            .telegram_command_progress_by_thread
             .entry(thread_id.to_string())
-            .or_insert_with(|| TelegramCommentaryState {
-                turn_id: turn_id.to_string(),
-                active_segment: 0,
-                segments: HashMap::new(),
-                completed: false,
-            });
-        if commentary.turn_id != turn_id {
-            *commentary = TelegramCommentaryState {
-                turn_id: turn_id.to_string(),
-                active_segment: 0,
-                segments: HashMap::new(),
-                completed: false,
-            };
+            .or_insert_with(|| telegram_command_progress_state(turn_id));
+        if progress.turn_id != turn_id {
+            *progress = telegram_command_progress_state(turn_id);
         }
-        if commentary.completed {
+        if progress.completed {
             return None;
         }
-        let active_segment = commentary.active_segment;
-        let segment = commentary.segments.entry(active_segment).or_default();
-
-        match segment
-            .entries
+        // 序号优先用 item/started 时的占位值（见 reserve_commentary_sequence），
+        // 否则此刻分配——这样"思考"与"工具"的先后关系与真实发生顺序一致。
+        let sequence = match progress
+            .commentary_entries
+            .iter()
+            .find(|entry| entry.item_id == item_id)
+        {
+            Some(existing) => existing.sequence,
+            None => progress
+                .reserved_commentary_sequences
+                .remove(item_id)
+                .unwrap_or_else(|| progress.allocate_sequence()),
+        };
+        match progress
+            .commentary_entries
             .iter_mut()
             .find(|entry| entry.item_id == item_id)
         {
             Some(entry) if entry.text == text => return None,
             Some(entry) => entry.text = text,
-            None => segment.entries.push(TelegramCommentaryEntry {
+            None => progress.commentary_entries.push(TelegramCommentaryEntry {
                 item_id: item_id.to_string(),
                 text,
+                sequence,
             }),
         }
-        if segment.entries.len() > TELEGRAM_COMMENTARY_MAX_ENTRIES {
-            let excess = segment.entries.len() - TELEGRAM_COMMENTARY_MAX_ENTRIES;
-            segment.entries.drain(..excess);
-            segment.dropped_entries = segment.dropped_entries.saturating_add(excess);
+        if progress.commentary_entries.len() > TELEGRAM_COMMENTARY_MAX_ENTRIES {
+            let excess = progress.commentary_entries.len() - TELEGRAM_COMMENTARY_MAX_ENTRIES;
+            progress.commentary_entries.drain(..excess);
+            progress.commentary_dropped_entries =
+                progress.commentary_dropped_entries.saturating_add(excess);
         }
-        Some(telegram_commentary_snapshot(
-            &commentary.turn_id,
-            active_segment,
-            segment,
-        ))
-    }
-
-    pub(crate) fn remember_telegram_commentary_delivery(
-        &mut self,
-        thread_id: &str,
-        turn_id: &str,
-        segment: u64,
-        message_id: String,
-    ) {
-        let Some(commentary) = self.telegram_commentary_by_thread.get_mut(thread_id) else {
-            return;
-        };
-        if commentary.turn_id == turn_id
-            && let Some(commentary_segment) = commentary.segments.get_mut(&segment)
-        {
-            commentary_segment.message_id = Some(message_id);
-        }
-    }
-
-    pub(crate) fn telegram_commentary_delivery_target(
-        &self,
-        thread_id: &str,
-        turn_id: &str,
-        segment: u64,
-    ) -> Option<Option<String>> {
-        let commentary = self.telegram_commentary_by_thread.get(thread_id)?;
-        if commentary.turn_id != turn_id {
-            return None;
-        }
-        commentary
-            .segments
-            .get(&segment)
-            .map(|commentary_segment| commentary_segment.message_id.clone())
-    }
-
-    pub(crate) fn start_new_telegram_commentary_segment(
-        &mut self,
-        thread_id: &str,
-        turn_id: &str,
-    ) -> bool {
-        let commentary = self
-            .telegram_commentary_by_thread
-            .entry(thread_id.to_string())
-            .or_insert_with(|| TelegramCommentaryState {
-                turn_id: turn_id.to_string(),
-                active_segment: 0,
-                segments: HashMap::new(),
-                completed: false,
-            });
-        if commentary.turn_id != turn_id || commentary.completed {
-            return false;
-        }
-        commentary.active_segment = commentary.active_segment.saturating_add(1);
-        true
+        progress.revision = progress.revision.saturating_add(1);
+        progress.dirty = true;
+        Some(telegram_command_progress_snapshot(progress))
     }
 
     pub fn start_telegram_typing(&mut self, thread_id: &str, item_id: &str) -> Option<i64> {
@@ -1457,15 +1523,38 @@ impl RuntimeState {
             return None;
         }
 
+        // 新增条目才分配序号：同一条目从 running 变成 completed 时必须沿用
+        // 原序号，否则它在交错列表里会跳到末尾。
+        let mut entry = entry;
+        let is_new = !progress
+            .entries
+            .iter()
+            .any(|current| current.item_id == entry.item_id);
+        if is_new {
+            entry.sequence = progress.allocate_sequence();
+        }
         let (changed, new_entry) = match progress
             .entries
             .iter_mut()
             .find(|current| current.item_id == entry.item_id)
         {
-            Some(current) if *current == entry => (false, false),
             Some(current) => {
-                *current = entry;
-                (true, false)
+                // 必须**先**沿用旧序号，再比较内容：
+                //
+                // `entry` 来自构造函数，其 `sequence` 是占位值 0。若直接整体覆盖，
+                // 会把新增时分配的正确序号抹成 0——所有工具于是都变成 seq=0，
+                // 排序后与思考的先后关系错乱，表现为"本条思考下面的工具被并进
+                // 上一个工具摘要"。
+                //
+                // 先归一化再比较，是为了让"内容相同"仍能被识别为空操作：否则
+                // 同一个条目的重复上报会因为占位序号不同而被误判成有变化。
+                entry.sequence = current.sequence;
+                if *current == entry {
+                    (false, false)
+                } else {
+                    *current = entry;
+                    (true, false)
+                }
             }
             None => {
                 progress.entries.push(entry);
@@ -1932,6 +2021,38 @@ impl RuntimeState {
         }
     }
 
+    /// 该 turn 的聚合气泡里是否还留着指定文本的思考条目。
+    ///
+    /// 与 `telegram_command_progress_snapshot_for_test` 不同：后者在
+    /// `turn/completed` 清理进度后会返回 None，用它断言会**空洞通过**。
+    #[cfg(test)]
+    pub(crate) fn state_has_commentary_for_test(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        text: &str,
+    ) -> bool {
+        self.telegram_command_progress_by_thread
+            .get(thread_id)
+            .filter(|progress| progress.turn_id == turn_id)
+            .is_some_and(|progress| {
+                progress
+                    .commentary_entries
+                    .iter()
+                    .any(|entry| entry.text.contains(text))
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn telegram_command_progress_snapshot_for_test(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        let progress = self.telegram_command_progress_by_thread.get(thread_id)?;
+        (progress.turn_id == turn_id).then(|| telegram_command_progress_snapshot(progress))
+    }
+
     pub(crate) fn clear_telegram_command_progress_for_thread(&mut self, thread_id: &str) {
         self.telegram_command_progress_by_thread.remove(thread_id);
     }
@@ -2111,12 +2232,6 @@ impl RuntimeState {
             };
         if !retain_command_progress {
             self.clear_telegram_command_progress_for_thread(thread_id);
-        }
-        if let Some(turn_id) = turn_id.or(completed_turn_id.as_deref())
-            && let Some(commentary) = self.telegram_commentary_by_thread.get_mut(thread_id)
-            && commentary.turn_id == turn_id
-        {
-            commentary.completed = true;
         }
         self.turn_finished_at_by_thread
             .insert(thread_id.to_string(), crate::types::now_ms());
@@ -2656,6 +2771,8 @@ fn telegram_command_progress_snapshot(
         diff_summary: progress.diff_summary.clone(),
         web_searches: progress.web_searches.clone(),
         dropped_web_searches: progress.dropped_web_searches,
+        commentary: progress.commentary_entries.clone(),
+        commentary_dropped_entries: progress.commentary_dropped_entries,
         collab: (!progress.collab_entries.is_empty()).then(|| TelegramCollabProgressSnapshot {
             entries: progress.collab_entries.clone(),
             dropped_entries: progress.collab_dropped_entries,
@@ -2684,6 +2801,13 @@ fn telegram_command_progress_state(turn_id: &str) -> TelegramCommandProgressStat
         diff_summary: None,
         web_searches: Vec::new(),
         dropped_web_searches: 0,
+        commentary_entries: Vec::new(),
+        commentary_dropped_entries: 0,
+        // 从 1 开始：条目的构造函数把 `sequence` 初始化为 0，0 因此可以明确表示
+        // "尚未分配"。若这里也从 0 开始，一个合法分配到的 0 与占位值无法区分，
+        // 序号被覆盖这类 bug 就会悄无声息地藏住。
+        next_sequence: 1,
+        reserved_commentary_sequences: HashMap::new(),
         collab_entries: Vec::new(),
         collab_dropped_entries: 0,
         completed: false,
@@ -2695,6 +2819,17 @@ fn telegram_command_progress_state(turn_id: &str) -> TelegramCommandProgressStat
     }
 }
 
+impl TelegramCommandProgressState {
+    /// 分配下一个到达序号（思考与工具共用同一条序列，因此可交错排序）。
+    ///
+    /// 序列从 1 开始，使 0 明确表示"尚未分配"（见 `next_sequence` 初始化）。
+    fn allocate_sequence(&mut self) -> u64 {
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        sequence
+    }
+}
+
 fn telegram_command_progress_has_content(progress: &TelegramCommandProgressState) -> bool {
     !progress.entries.is_empty()
         || progress.retry_count > 0
@@ -2703,6 +2838,7 @@ fn telegram_command_progress_has_content(progress: &TelegramCommandProgressState
         || !progress.plan.is_empty()
         || progress.diff_summary.is_some()
         || !progress.web_searches.is_empty()
+        || !progress.commentary_entries.is_empty()
         || !progress.collab_entries.is_empty()
 }
 
@@ -2715,20 +2851,6 @@ fn claim_next_telegram_command_progress_snapshot(
     progress.dirty = false;
     progress.in_flight_revision = Some(progress.revision);
     Some(telegram_command_progress_snapshot(progress))
-}
-
-fn telegram_commentary_snapshot(
-    turn_id: &str,
-    segment: u64,
-    commentary: &TelegramCommentarySegmentState,
-) -> TelegramCommentarySnapshot {
-    TelegramCommentarySnapshot {
-        turn_id: turn_id.to_string(),
-        segment,
-        message_id: commentary.message_id.clone(),
-        entries: commentary.entries.clone(),
-        dropped_entries: commentary.dropped_entries,
-    }
 }
 
 fn append_bounded_text(target: &mut String, delta: &str, max_chars: usize) {
@@ -2879,6 +3001,163 @@ pub fn route_from_conversation_key(conversation_key: &str) -> Option<RouteTarget
 mod tests {
     use serde_json::json;
 
+    /// 回归：按内容移除必须不依赖 `item_id`，且 `completed` 之后仍生效。
+    ///
+    /// 症状（用户实测）：最终回复仍被当作最后一个思考过程，同一段内容出现两遍。
+    ///
+    /// 原因：`item/completed` 的 `turnId` 可能缺失——那条链路上"记录最终答复"
+    /// 会被整段跳过，而写入气泡却回退到了"当前 turn"。原先的移除依赖记录 +
+    /// `item_id` 匹配，于是静默失效。
+    #[test]
+    fn commentary_is_removed_by_content_regardless_of_item_id() {
+        let mut runtime = RuntimeState::default();
+        runtime.bind_route(
+            "thread",
+            RouteTarget {
+                platform: ImPlatformKind::Telegram,
+                conversation_key: "chat".to_string(),
+                account_id: "account".to_string(),
+                chat_id: "chat".to_string(),
+                remote_client_key: String::new(),
+            },
+        );
+        runtime.mark_turn_started("thread", "turn");
+
+        // 写入气泡时 item_id 可能退化成文本本身，且**没有**待判定记录。
+        runtime
+            .upsert_telegram_commentary_progress(
+                "thread",
+                "turn",
+                "原神的LOGO 已整理好",
+                "原神的LOGO 已整理好".to_string(),
+            )
+            .expect("应并入气泡");
+
+        // 模拟 finish 先把状态标成 completed。
+        runtime
+            .finish_telegram_command_progress_with_outcome("thread", "turn", false)
+            .expect("finish 应产出快照");
+
+        assert!(
+            runtime
+                .remove_commentary_matching_text("thread", "turn", "原神的LOGO 已整理好")
+                .is_some(),
+            "即使没有待判定记录、且状态已 completed，也必须能按内容移除"
+        );
+        assert!(
+            !runtime.state_has_commentary_for_test("thread", "turn", "原神的LOGO 已整理好"),
+            "同内容文案不应仍留在气泡里"
+        );
+    }
+
+    /// 按内容移除不得误删不相关的过程文案。
+    #[test]
+    fn content_removal_leaves_other_commentary_intact() {
+        let mut runtime = RuntimeState::default();
+        runtime.bind_route(
+            "thread",
+            RouteTarget {
+                platform: ImPlatformKind::Telegram,
+                conversation_key: "chat".to_string(),
+                account_id: "account".to_string(),
+                chat_id: "chat".to_string(),
+                remote_client_key: String::new(),
+            },
+        );
+        runtime.mark_turn_started("thread", "turn");
+        for (id, text) in [("a", "先查一下资料"), ("b", "最终答复内容")] {
+            runtime
+                .upsert_telegram_commentary_progress("thread", "turn", id, text.to_string())
+                .expect("应并入气泡");
+        }
+
+        runtime
+            .remove_commentary_matching_text("thread", "turn", "最终答复内容")
+            .expect("应移除目标文案");
+        assert!(
+            runtime.state_has_commentary_for_test("thread", "turn", "先查一下资料"),
+            "不相关的过程文案不应被删除"
+        );
+        assert!(
+            !runtime.state_has_commentary_for_test("thread", "turn", "最终答复内容"),
+            "目标文案应已移除"
+        );
+    }
+
+    /// 回归：工具条目从 running 变成 completed 时，**序号必须沿用**。
+    ///
+    /// 曾经在更新分支里写 `*current = entry`，而 `entry` 来自构造函数、其
+    /// `sequence` 是占位值 0。于是所有工具在完成后序号全被抹成 0，与思考的
+    /// 先后关系错乱，表现为"本条思考下面的工具被并进上一个工具摘要"。
+    ///
+    /// 构造函数注释里写的"更新条目会沿用原值"是意图，这里断言它真的成立。
+    #[test]
+    fn updating_a_tool_entry_keeps_its_sequence() {
+        let mut runtime = RuntimeState::default();
+        runtime.bind_route(
+            "thread",
+            RouteTarget {
+                platform: ImPlatformKind::Telegram,
+                conversation_key: "chat".to_string(),
+                account_id: "account".to_string(),
+                chat_id: "chat".to_string(),
+                remote_client_key: String::new(),
+            },
+        );
+        runtime.mark_turn_started("thread", "turn");
+
+        let running = crate::im::telegram::progress::running_entry(
+            "call_1",
+            &json!({"command": "cargo test"}),
+        );
+        runtime
+            .upsert_telegram_command_progress("thread", "turn", running, false)
+            .expect("首次新增应返回快照");
+        let assigned = runtime
+            .telegram_command_progress_snapshot_for_test("thread", "turn")
+            .expect("snapshot")
+            .entries
+            .iter()
+            .find(|entry| entry.item_id == "call_1")
+            .expect("call_1")
+            .sequence;
+        assert_ne!(assigned, 0, "新增时应分配到非 0 序号");
+
+        // 完成事件：构造函数给的 sequence 是 0，不能覆盖掉已分配的序号。
+        let completed = crate::im::telegram::progress::completed_entry(
+            "call_1",
+            &json!({"command": "cargo test", "exitCode": 0}),
+        );
+        runtime
+            .upsert_telegram_command_progress("thread", "turn", completed, true)
+            .expect("更新应返回快照");
+
+        let after = runtime
+            .telegram_command_progress_snapshot_for_test("thread", "turn")
+            .expect("snapshot")
+            .entries
+            .iter()
+            .find(|entry| entry.item_id == "call_1")
+            .expect("call_1")
+            .sequence;
+        assert_eq!(
+            after, assigned,
+            "完成后序号必须保持不变，否则工具会被错误地排到思考前面"
+        );
+        assert_eq!(
+            runtime
+                .telegram_command_progress_snapshot_for_test("thread", "turn")
+                .expect("snapshot")
+                .entries
+                .iter()
+                .find(|entry| entry.item_id == "call_1")
+                .expect("call_1")
+                .status,
+            TelegramCommandProgressStatus::Succeeded,
+            "状态应已更新为 succeeded"
+        );
+    }
+
     use crate::types::{ImPlatformKind, InboundAttachment};
 
     use super::{
@@ -2937,6 +3216,7 @@ mod tests {
             exit_code: None,
             duration_ms: None,
             failure_output: None,
+            sequence: 0,
         }
     }
 
@@ -3403,198 +3683,132 @@ mod tests {
     }
 
     #[test]
-    fn telegram_commentary_reuses_delivery_and_deduplicates_items() {
+    fn telegram_commentary_shares_the_command_aggregate_message() {
         let mut runtime = RuntimeState::default();
         runtime.mark_turn_started("thread", "turn");
 
         let first = runtime
-            .append_telegram_commentary("thread", "turn", "item-1", "first update".to_string())
-            .expect("first commentary");
-        assert_eq!(first.message_id, None);
-        assert_eq!(first.entries.len(), 1);
-
-        runtime.remember_telegram_commentary_delivery("thread", "turn", 0, "42".to_string());
-        assert!(
-            runtime
-                .append_telegram_commentary("thread", "turn", "item-1", "first update".to_string(),)
-                .is_none()
-        );
-
-        let second = runtime
-            .append_telegram_commentary("thread", "turn", "item-2", "second update".to_string())
-            .expect("second commentary");
-        assert_eq!(second.message_id.as_deref(), Some("42"));
-        assert_eq!(second.entries.len(), 2);
-        assert_eq!(
-            runtime.telegram_commentary_delivery_target("thread", "turn", 0),
-            Some(Some("42".to_string()))
-        );
-    }
-
-    #[test]
-    fn telegram_commentary_compaction_starts_a_new_delivery_segment() {
-        let mut runtime = RuntimeState::default();
-        runtime.mark_turn_started("thread", "turn");
-        let before = runtime
-            .append_telegram_commentary("thread", "turn", "item-1", "before".to_string())
-            .expect("commentary before compaction");
-        runtime.remember_telegram_commentary_delivery(
-            "thread",
-            "turn",
-            before.segment,
-            "42".to_string(),
-        );
-
-        assert!(runtime.start_new_telegram_commentary_segment("thread", "turn"));
-        assert_eq!(
-            runtime.telegram_commentary_delivery_target("thread", "turn", before.segment),
-            Some(Some("42".to_string()))
-        );
-
-        let after = runtime
-            .append_telegram_commentary("thread", "turn", "item-2", "after".to_string())
-            .expect("commentary after compaction");
-        assert_eq!(after.segment, before.segment + 1);
-        assert_eq!(after.message_id, None);
-        assert_eq!(after.entries.len(), 1);
-        assert_eq!(after.entries[0].text, "after");
-
-        runtime.remember_telegram_commentary_delivery(
-            "thread",
-            "turn",
-            before.segment,
-            "stale".to_string(),
-        );
-        assert_eq!(
-            runtime.telegram_commentary_delivery_target("thread", "turn", before.segment),
-            Some(Some("stale".to_string()))
-        );
-        assert_eq!(
-            runtime.telegram_commentary_delivery_target("thread", "turn", after.segment),
-            Some(None)
-        );
-    }
-
-    #[test]
-    fn telegram_commentary_supports_repeated_compaction_without_crossing_deliveries() {
-        let mut runtime = RuntimeState::default();
-        runtime.mark_turn_started("thread", "turn");
-
-        let first = runtime
-            .append_telegram_commentary("thread", "turn", "first", "first".to_string())
-            .expect("first segment");
-        assert!(runtime.start_new_telegram_commentary_segment("thread", "turn"));
-        let second = runtime
-            .append_telegram_commentary("thread", "turn", "second", "second".to_string())
-            .expect("second segment");
-        assert!(runtime.start_new_telegram_commentary_segment("thread", "turn"));
-        let third = runtime
-            .append_telegram_commentary("thread", "turn", "third", "third".to_string())
-            .expect("third segment");
-
-        for (segment, message_id) in [
-            (first.segment, "10"),
-            (second.segment, "20"),
-            (third.segment, "30"),
-        ] {
-            runtime.remember_telegram_commentary_delivery(
+            .upsert_telegram_commentary_progress(
                 "thread",
                 "turn",
-                segment,
-                message_id.to_string(),
-            );
-        }
+                "item-1",
+                "first update".to_string(),
+            )
+            .expect("first commentary should create the aggregate");
+        assert_eq!(first.message_id, None);
+        assert_eq!(first.commentary.len(), 1);
 
-        assert_eq!(
-            runtime.telegram_commentary_delivery_target("thread", "turn", first.segment),
-            Some(Some("10".to_string()))
-        );
-        assert_eq!(
-            runtime.telegram_commentary_delivery_target("thread", "turn", second.segment),
-            Some(Some("20".to_string()))
-        );
-        assert_eq!(
-            runtime.telegram_commentary_delivery_target("thread", "turn", third.segment),
-            Some(Some("30".to_string()))
-        );
-    }
-
-    #[test]
-    fn telegram_commentary_compaction_before_first_update_starts_segment_one() {
-        let mut runtime = RuntimeState::default();
-        runtime.mark_turn_started("thread", "turn");
-
-        assert!(runtime.start_new_telegram_commentary_segment("thread", "turn"));
-        let after = runtime
-            .append_telegram_commentary("thread", "turn", "item", "after".to_string())
-            .expect("commentary after compaction");
-
-        assert_eq!(after.segment, 1);
-        assert_eq!(after.entries[0].text, "after");
-        assert_eq!(
-            runtime.telegram_commentary_delivery_target("thread", "turn", 0),
-            None
-        );
-    }
-
-    #[test]
-    fn telegram_commentary_rejects_stale_turn_and_clears_on_replacement() {
-        let mut runtime = RuntimeState::default();
-        runtime.mark_turn_started("thread", "old-turn");
-        runtime
-            .append_telegram_commentary("thread", "old-turn", "item-1", "old update".to_string())
-            .expect("old commentary");
-
-        runtime.mark_turn_started("thread", "new-turn");
-        assert_eq!(
-            runtime.telegram_commentary_delivery_target("thread", "old-turn", 0),
-            None
-        );
+        let claimed = runtime
+            .claim_telegram_command_progress_delivery("thread", "turn")
+            .expect("first aggregate revision should be claimable");
+        assert_eq!(claimed.revision, first.revision);
         assert!(
             runtime
-                .append_telegram_commentary(
+                .complete_telegram_command_progress_delivery(
                     "thread",
-                    "old-turn",
-                    "late-item",
-                    "late update".to_string(),
+                    "turn",
+                    first.revision,
+                    "42".to_string(),
                 )
                 .is_none()
         );
+
         assert!(
             runtime
-                .append_telegram_commentary(
+                .upsert_telegram_commentary_progress(
                     "thread",
-                    "new-turn",
-                    "item-2",
-                    "new update".to_string(),
+                    "turn",
+                    "item-1",
+                    "first update".to_string(),
                 )
-                .is_some()
+                .is_none()
         );
+
+        let second = runtime
+            .upsert_telegram_commentary_progress(
+                "thread",
+                "turn",
+                "item-2",
+                "second update".to_string(),
+            )
+            .expect("second commentary should dirty the same aggregate");
+        assert!(second.revision > first.revision);
+        assert_eq!(second.message_id.as_deref(), Some("42"));
+        assert_eq!(second.commentary.len(), 2);
+        assert_eq!(second.commentary[1].text, "second update");
     }
 
     #[test]
-    fn telegram_commentary_is_frozen_when_the_turn_completes() {
+    fn telegram_commentary_and_tools_share_one_aggregate_snapshot() {
         let mut runtime = RuntimeState::default();
         runtime.mark_turn_started("thread", "turn");
         runtime
-            .append_telegram_commentary("thread", "turn", "item-1", "update".to_string())
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn",
+                command_progress_entry(
+                    "cmd-1",
+                    "cargo check",
+                    TelegramCommandProgressStatus::Running,
+                ),
+                false,
+            )
+            .expect("command should create the aggregate");
+
+        let snapshot = runtime
+            .upsert_telegram_commentary_progress(
+                "thread",
+                "turn",
+                "item-1",
+                "checking the crate".to_string(),
+            )
+            .expect("commentary should dirty the same aggregate");
+
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.commentary.len(), 1);
+        assert_eq!(snapshot.commentary[0].text, "checking the crate");
+    }
+
+    #[test]
+    fn telegram_commentary_stops_after_turn_completion_and_replacement() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        runtime
+            .upsert_telegram_commentary_progress("thread", "turn", "item-1", "update".to_string())
             .expect("commentary");
-        runtime.remember_telegram_commentary_delivery("thread", "turn", 0, "42".to_string());
 
         assert!(runtime.mark_turn_completed("thread", Some("turn")));
-        assert_eq!(
-            runtime.telegram_commentary_delivery_target("thread", "turn", 0),
-            Some(Some("42".to_string()))
-        );
         assert!(
             runtime
-                .append_telegram_commentary(
+                .upsert_telegram_commentary_progress(
                     "thread",
                     "turn",
                     "late-item",
                     "late update".to_string(),
                 )
                 .is_none()
+        );
+
+        runtime.mark_turn_started("thread", "new-turn");
+        assert!(
+            runtime
+                .upsert_telegram_commentary_progress(
+                    "thread",
+                    "turn",
+                    "late-item",
+                    "late update".to_string(),
+                )
+                .is_none()
+        );
+        assert!(
+            runtime
+                .upsert_telegram_commentary_progress(
+                    "thread",
+                    "new-turn",
+                    "item-2",
+                    "new update".to_string(),
+                )
+                .is_some()
         );
     }
 

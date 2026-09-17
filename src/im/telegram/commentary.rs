@@ -1,40 +1,50 @@
-use crate::im::core::i18n::ImText;
+use crate::{im::core::i18n::ImText, im_runtime::TelegramCommentaryEntry};
 
+/// 过程文案与工具摘要共用同一条聚合气泡，这里只挑选预算内的可见条目。
 pub(crate) const TELEGRAM_COMMENTARY_MAX_CHARS: usize = 3_600;
-const VISIBLE_COMMENTARY_COUNT: usize = 2;
-const RICH_SECTION_SEPARATOR: &str = "\n\n---\n\n";
-const FALLBACK_SECTION_SEPARATOR: &str = "\n\n";
+const SECTION_SEPARATOR: &str = "\n\n";
+
+/// 一条可见的过程文案（携带到达序号，供与工具步骤交错排序）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TelegramCommentaryRenderedEntry {
+    pub text: String,
+    pub sequence: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TelegramCommentaryRender {
-    /// Rich Markdown accepted by Telegram's `sendRichMessage` and
-    /// `editMessageText` endpoints.
-    pub rich_markdown: String,
-    /// Markdown fallback for Bot API servers without rich-message support.
-    pub fallback_markdown: String,
-    /// Entries discarded from the head, including entries discarded earlier.
+    /// 保留下来、需要在气泡里直接显示的条目，按发生顺序排列。
+    pub entries: Vec<TelegramCommentaryRenderedEntry>,
+    /// 为满足字符预算被丢弃的较早条目总数（含此前已丢弃的条目）。
     pub dropped: usize,
 }
 
-/// Render commentary entries into one message while keeping the latest updates
-/// immediately visible. Rich Markdown is used instead of hand-built blocks so
-/// formatting inside each entry remains intact inside `<details>`.
+/// 过程文案保持可见（不折叠成 `<details>`），超预算时从最早的条目开始丢弃，
+/// 只保留一条时改为截断中段，并在气泡顶部标注省略数量。
 pub(crate) fn render_commentary(
-    entries: &[String],
+    entries: &[TelegramCommentaryEntry],
     dropped: usize,
     text: ImText,
 ) -> TelegramCommentaryRender {
-    let mut entries = entries
+    // 先按到达序号排序，保证「丢弃最早的条目」与真实发生顺序一致。
+    let mut ordered = entries.to_vec();
+    ordered.sort_by_key(|entry| entry.sequence);
+    let mut entries = ordered
         .iter()
-        .map(|entry| entry.trim())
-        .filter(|entry| !entry.is_empty())
-        .map(str::to_string)
+        .map(|entry| TelegramCommentaryRenderedEntry {
+            text: entry.text.trim().to_string(),
+            sequence: entry.sequence,
+        })
+        .filter(|entry| !entry.text.is_empty())
         .collect::<Vec<_>>();
     let mut dropped = dropped;
 
     loop {
-        let rendered = render_with_entries(&entries, dropped, text);
-        if render_char_count(&rendered) <= TELEGRAM_COMMENTARY_MAX_CHARS {
+        let rendered = TelegramCommentaryRender {
+            entries: entries.clone(),
+            dropped,
+        };
+        if rendered_char_count(&rendered, text) <= TELEGRAM_COMMENTARY_MAX_CHARS {
             return rendered;
         }
 
@@ -45,11 +55,24 @@ pub(crate) fn render_commentary(
         }
 
         if let Some(entry) = entries.first_mut() {
-            let entry_budget = largest_entry_budget(entry, dropped, text);
-            *entry = truncate_middle(entry, entry_budget);
+            let entry_budget = largest_entry_budget(&entry.text, dropped, text);
+            entry.text = truncate_middle(&entry.text, entry_budget);
         }
-        return render_with_entries(&entries, dropped, text);
+        return TelegramCommentaryRender { entries, dropped };
     }
+}
+
+/// 可见条目的 Markdown 回退文本：无富消息支持时按同样顺序直出。
+pub(crate) fn render_commentary_fallback(
+    rendered: &TelegramCommentaryRender,
+    text: ImText,
+) -> String {
+    let mut sections = Vec::new();
+    if rendered.dropped > 0 {
+        sections.push(text.telegram_commentary_omitted(rendered.dropped));
+    }
+    sections.extend(rendered.entries.iter().map(|entry| entry.text.clone()));
+    sections.join(SECTION_SEPARATOR)
 }
 
 fn largest_entry_budget(entry: &str, dropped: usize, text: ImText) -> usize {
@@ -57,8 +80,14 @@ fn largest_entry_budget(entry: &str, dropped: usize, text: ImText) -> usize {
     let mut upper = entry.chars().count();
     while lower < upper {
         let candidate = lower + (upper - lower).div_ceil(2);
-        let rendered = render_with_entries(&[truncate_middle(entry, candidate)], dropped, text);
-        if render_char_count(&rendered) <= TELEGRAM_COMMENTARY_MAX_CHARS {
+        let rendered = TelegramCommentaryRender {
+            entries: vec![TelegramCommentaryRenderedEntry {
+                text: truncate_middle(entry, candidate),
+                sequence: 0,
+            }],
+            dropped,
+        };
+        if rendered_char_count(&rendered, text) <= TELEGRAM_COMMENTARY_MAX_CHARS {
             lower = candidate;
         } else {
             upper = candidate - 1;
@@ -67,76 +96,20 @@ fn largest_entry_budget(entry: &str, dropped: usize, text: ImText) -> usize {
     lower
 }
 
-fn render_with_entries(
-    entries: &[String],
-    dropped: usize,
-    text: ImText,
-) -> TelegramCommentaryRender {
-    render_with_labels(
-        entries,
-        dropped,
-        |count| text.telegram_commentary_earlier(count),
-        |count| text.telegram_commentary_omitted(count),
-    )
-}
-
-fn render_with_labels(
-    entries: &[String],
-    dropped: usize,
-    earlier_label: impl Fn(usize) -> String,
-    omitted_label: impl Fn(usize) -> String,
-) -> TelegramCommentaryRender {
-    let visible_start = entries.len().saturating_sub(VISIBLE_COMMENTARY_COUNT);
-    let hidden = &entries[..visible_start];
-    let visible = &entries[visible_start..];
-    let earlier_count = dropped.saturating_add(hidden.len());
-
-    let mut earlier_rich = None;
-    if earlier_count > 0 {
-        let mut details_body = Vec::new();
-        if dropped > 0 {
-            details_body.push(omitted_label(dropped));
-        }
-        details_body.extend(hidden.iter().cloned());
-        earlier_rich = Some(format!(
-            "<details><summary>{}</summary>\n\n{}\n\n</details>",
-            escape_summary(&earlier_label(earlier_count)),
-            details_body.join(RICH_SECTION_SEPARATOR)
-        ));
+fn rendered_char_count(rendered: &TelegramCommentaryRender, text: ImText) -> usize {
+    let mut total = rendered
+        .entries
+        .iter()
+        .map(|entry| entry.text.chars().count() + SECTION_SEPARATOR.chars().count())
+        .sum::<usize>();
+    if rendered.dropped > 0 {
+        total = total.saturating_add(
+            text.telegram_commentary_omitted(rendered.dropped)
+                .chars()
+                .count(),
+        );
     }
-    let visible_rich = visible.join(RICH_SECTION_SEPARATOR);
-    let rich_markdown = match (earlier_rich, visible_rich.is_empty()) {
-        (Some(earlier), false) => format!("{earlier}\n\n{visible_rich}"),
-        (Some(earlier), true) => earlier,
-        (None, _) => visible_rich,
-    };
-
-    let mut fallback_sections = Vec::new();
-    if earlier_count > 0 {
-        fallback_sections.push(earlier_label(earlier_count));
-    }
-    fallback_sections.extend(visible.iter().cloned());
-
-    TelegramCommentaryRender {
-        rich_markdown,
-        fallback_markdown: fallback_sections.join(FALLBACK_SECTION_SEPARATOR),
-        dropped,
-    }
-}
-
-fn escape_summary(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-fn render_char_count(rendered: &TelegramCommentaryRender) -> usize {
-    rendered
-        .rich_markdown
-        .chars()
-        .count()
-        .max(rendered.fallback_markdown.chars().count())
+    total
 }
 
 fn truncate_middle(value: &str, max_chars: usize) -> String {
@@ -167,189 +140,146 @@ fn truncate_middle(value: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
-    fn entries(count: usize) -> Vec<String> {
-        (1..=count).map(|index| format!("update {index}")).collect()
+    /// 测试辅助：把渲染结果抽成纯文本列表。
+    fn entry_texts(rendered: &TelegramCommentaryRender) -> Vec<String> {
+        rendered
+            .entries
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect()
+    }
+
+    fn entries(count: usize) -> Vec<TelegramCommentaryEntry> {
+        (1..=count)
+            .map(|index| TelegramCommentaryEntry {
+                item_id: format!("item-{index}"),
+                text: format!("update {index}"),
+                sequence: 0,
+            })
+            .collect()
     }
 
     #[test]
-    fn one_entry_is_visible_without_details() {
+    fn one_entry_is_visible_without_omission() {
         let rendered = render_commentary(&entries(1), 0, ImText::zh_cn());
 
-        assert_eq!(rendered.rich_markdown, "update 1");
-        assert_eq!(rendered.fallback_markdown, "update 1");
+        assert_eq!(entry_texts(&rendered), vec!["update 1".to_string()]);
+        assert_eq!(rendered.dropped, 0);
+        assert_eq!(
+            render_commentary_fallback(&rendered, ImText::zh_cn()),
+            "update 1"
+        );
+    }
+
+    #[test]
+    fn every_entry_stays_visible_while_within_budget() {
+        let rendered = render_commentary(&entries(8), 0, ImText::zh_cn());
+
+        assert_eq!(rendered.entries.len(), 8);
         assert_eq!(rendered.dropped, 0);
     }
 
     #[test]
-    fn dropped_history_is_summarized_even_when_no_retained_entries_remain() {
-        let rendered = render_commentary(&[], 3, ImText::zh_cn());
+    fn dropped_history_is_reported_without_hiding_fresh_entries() {
+        let rendered = render_commentary(&entries(3), 4, ImText::zh_cn());
 
-        assert!(
-            rendered
-                .rich_markdown
-                .starts_with("<details><summary>较早进展 · 3 条</summary>")
-        );
-        assert!(rendered.rich_markdown.contains("另外 3 条较早进展已省略"));
-        assert_eq!(rendered.fallback_markdown, "较早进展 · 3 条");
-    }
-
-    #[test]
-    fn two_entries_are_both_visible_without_details() {
-        let rendered = render_commentary(&entries(2), 0, ImText::zh_cn());
-
-        assert_eq!(rendered.rich_markdown, "update 1\n\n---\n\nupdate 2");
-        assert!(!rendered.rich_markdown.contains("<details>"));
-        assert_eq!(rendered.fallback_markdown, "update 1\n\nupdate 2");
-    }
-
-    #[test]
-    fn eight_entries_fold_the_first_six_and_leave_the_latest_two_visible() {
-        let rendered = render_commentary(&entries(8), 0, ImText::zh_cn());
-
-        assert!(
-            rendered
-                .rich_markdown
-                .starts_with("<details><summary>较早进展 · 6 条</summary>")
-        );
-        assert!(rendered.rich_markdown.contains("update 1"));
-        assert!(rendered.rich_markdown.contains("update 6"));
-        assert!(
-            rendered
-                .rich_markdown
-                .contains("update 1\n\n---\n\nupdate 2")
-        );
-        assert!(
-            rendered
-                .rich_markdown
-                .ends_with("update 7\n\n---\n\nupdate 8")
-        );
-        assert!(rendered.rich_markdown.contains("</details>\n\nupdate 7"));
-        assert!(
-            !rendered
-                .rich_markdown
-                .contains("</details>\n\n---\n\nupdate 7")
-        );
-        assert!(!rendered.rich_markdown.contains("<details open>"));
+        assert_eq!(rendered.entries.len(), 3);
+        assert_eq!(rendered.dropped, 4);
         assert_eq!(
-            rendered.fallback_markdown,
-            "较早进展 · 6 条\n\nupdate 7\n\nupdate 8"
+            render_commentary_fallback(&rendered, ImText::zh_cn()),
+            "… 另外 4 条较早进展已省略\n\nupdate 1\n\nupdate 2\n\nupdate 3"
         );
-    }
-
-    #[test]
-    fn rich_markdown_preserves_entry_formatting() {
-        let entries = vec![
-            "**bold** and [link](https://example.com)".to_string(),
-            "```rust\nfn main() {}\n```".to_string(),
-            "latest `code`".to_string(),
-        ];
-        let rendered = render_commentary(&entries, 0, ImText::zh_cn());
-
-        for marker in [
-            "**bold**",
-            "[link](https://example.com)",
-            "```rust\nfn main() {}\n```",
-            "latest `code`",
-        ] {
-            assert!(rendered.rich_markdown.contains(marker));
-        }
-        assert!(!rendered.fallback_markdown.contains("**bold**"));
-        assert!(rendered.fallback_markdown.contains("latest `code`"));
     }
 
     #[test]
     fn strips_blank_entries_without_changing_order() {
         let rendered = render_commentary(
             &[
-                "  ".to_string(),
-                " first ".to_string(),
-                "second".to_string(),
+                TelegramCommentaryEntry {
+                    item_id: "blank".to_string(),
+                    text: "  ".to_string(),
+                    sequence: 0,
+                },
+                TelegramCommentaryEntry {
+                    item_id: "first".to_string(),
+                    text: " first ".to_string(),
+                    sequence: 0,
+                },
+                TelegramCommentaryEntry {
+                    item_id: "second".to_string(),
+                    text: "second".to_string(),
+                    sequence: 0,
+                },
             ],
             0,
             ImText::zh_cn(),
         );
 
-        assert_eq!(rendered.rich_markdown, "first\n\n---\n\nsecond");
-        assert_eq!(rendered.fallback_markdown, "first\n\nsecond");
+        assert_eq!(
+            entry_texts(&rendered),
+            vec!["first".to_string(), "second".to_string()]
+        );
         assert_eq!(rendered.dropped, 0);
     }
 
     #[test]
-    fn discards_oldest_entries_to_fit_the_safe_limit_and_accumulates_dropped() {
-        let entries = (1..=8)
-            .map(|index| format!("entry-{index}:{}", "x".repeat(900)))
+    fn discards_oldest_entries_to_fit_the_budget_and_accumulates_dropped() {
+        let long = (1..=8)
+            .map(|index| TelegramCommentaryEntry {
+                item_id: format!("item-{index}"),
+                text: format!("entry-{index}:{}", "x".repeat(900)),
+                sequence: 0,
+            })
             .collect::<Vec<_>>();
-        let rendered = render_commentary(&entries, 3, ImText::zh_cn());
+        let rendered = render_commentary(&long, 3, ImText::zh_cn());
 
-        assert!(rendered.rich_markdown.chars().count() <= TELEGRAM_COMMENTARY_MAX_CHARS);
-        assert!(rendered.fallback_markdown.chars().count() <= TELEGRAM_COMMENTARY_MAX_CHARS);
+        assert!(rendered_char_count(&rendered, ImText::zh_cn()) <= TELEGRAM_COMMENTARY_MAX_CHARS);
         assert!(rendered.dropped > 3);
-        assert!(!rendered.rich_markdown.contains("entry-1:"));
-        assert!(rendered.rich_markdown.contains("entry-8:"));
+        assert!(
+            !rendered
+                .entries
+                .iter()
+                .any(|entry| entry.text.starts_with("entry-1:"))
+        );
         assert!(
             rendered
-                .rich_markdown
-                .contains(&text_omitted_zh(rendered.dropped))
+                .entries
+                .iter()
+                .any(|entry| entry.text.starts_with("entry-8:"))
+        );
+        assert!(
+            render_commentary_fallback(&rendered, ImText::zh_cn())
+                .contains(&format!("另外 {} 条较早进展已省略", rendered.dropped))
         );
     }
 
     #[test]
-    fn truncates_one_oversized_visible_entry_without_breaking_details_markup() {
+    fn truncates_one_oversized_entry_instead_of_dropping_it() {
         let rendered = render_commentary(
-            &[format!("latest:{}", "界".repeat(5_000))],
+            &[TelegramCommentaryEntry {
+                item_id: "latest".to_string(),
+                text: format!("latest:{}", "界".repeat(5_000)),
+                sequence: 0,
+            }],
             4,
             ImText::zh_cn(),
         );
 
-        assert!(rendered.rich_markdown.chars().count() <= TELEGRAM_COMMENTARY_MAX_CHARS);
-        assert!(rendered.fallback_markdown.chars().count() <= TELEGRAM_COMMENTARY_MAX_CHARS);
-        assert!(rendered.rich_markdown.contains("</details>"));
-        assert!(rendered.rich_markdown.contains("latest:"));
+        assert!(rendered_char_count(&rendered, ImText::zh_cn()) <= TELEGRAM_COMMENTARY_MAX_CHARS);
+        assert_eq!(rendered.entries.len(), 1);
+        assert!(rendered.entries[0].text.contains('…'));
+        assert!(rendered.entries[0].text.starts_with("latest:"));
         assert_eq!(rendered.dropped, 4);
     }
 
     #[test]
-    fn chinese_labels_are_localized() {
-        let rendered = render_commentary(&entries(4), 2, ImText::zh_cn());
+    fn english_labels_are_used_for_the_omitted_summary() {
+        let en = ImText::for_locale(crate::im::core::i18n::ImLocale::EnUs);
+        let rendered = render_commentary(&entries(2), 5, en);
 
+        assert_eq!(rendered.dropped, 5);
         assert!(
-            rendered
-                .rich_markdown
-                .contains("<summary>较早进展 · 4 条</summary>")
+            render_commentary_fallback(&rendered, en).starts_with("… 5 earlier updates omitted")
         );
-        assert!(rendered.rich_markdown.contains("… 另外 2 条较早进展已省略"));
-        assert_eq!(
-            rendered.fallback_markdown,
-            "较早进展 · 4 条\n\nupdate 3\n\nupdate 4"
-        );
-    }
-
-    #[test]
-    fn accepts_english_localized_labels() {
-        let rendered = render_with_labels(
-            &entries(4),
-            2,
-            |count| format!("Earlier updates · {count}"),
-            |count| format!("… {count} earlier updates omitted"),
-        );
-
-        assert!(
-            rendered
-                .rich_markdown
-                .contains("<summary>Earlier updates · 4</summary>")
-        );
-        assert!(
-            rendered
-                .rich_markdown
-                .contains("… 2 earlier updates omitted")
-        );
-        assert_eq!(
-            rendered.fallback_markdown,
-            "Earlier updates · 4\n\nupdate 3\n\nupdate 4"
-        );
-    }
-
-    fn text_omitted_zh(count: usize) -> String {
-        format!("… 另外 {count} 条较早进展已省略")
     }
 }

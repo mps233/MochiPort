@@ -6,7 +6,10 @@ use base64::{Engine as _, engine::general_purpose};
 use crate::{
     app_state::SharedState,
     chain_log,
-    codex::{agent_message_is_final_answer, extract_agent_message_text, extract_turn_reply_text},
+    codex::{
+        agent_message_is_explicit_final_answer, agent_message_is_final_answer,
+        extract_agent_message_text, extract_turn_reply_text,
+    },
     config::TelegramReplyGranularity,
     im::{
         core::{
@@ -29,9 +32,9 @@ use crate::{
         telegram::{
             adapter::TelegramAdapter,
             api::{TelegramApiError, TelegramForumTopicEditOutcome},
-            collab_progress as telegram_collab_progress, commentary as telegram_commentary,
-            flow as telegram_flow, polling as telegram_polling, progress as telegram_progress,
-            search as telegram_search, typing as telegram_typing,
+            collab_progress as telegram_collab_progress, flow as telegram_flow,
+            polling as telegram_polling, progress as telegram_progress, search as telegram_search,
+            typing as telegram_typing,
         },
         wechat::adapter::WechatAdapter,
     },
@@ -454,6 +457,31 @@ async fn finish_telegram_command_progress_with_api_and_outcome(
     }
 }
 
+/// 把一条文案从 Telegram 聚合气泡里移除，并原地刷新那条气泡。
+///
+/// 用于"文案升级为独立完成卡片"的场景：它原先作为过程文案并入气泡，现在要单独
+/// 发一条，就必须先从气泡里删掉，否则同一段内容会出现两遍。
+async fn remove_commentary_and_refresh(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    turn_id: &str,
+    route: &RouteTarget,
+    item_id: &str,
+) {
+    if route.platform != ImPlatformKind::Telegram {
+        return;
+    }
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .remove_telegram_commentary_progress(thread_id, turn_id, item_id);
+    if let Some(snapshot) = snapshot {
+        deliver_telegram_command_progress(state, api_registry, thread_id, route, snapshot).await;
+    }
+}
+
 async fn deliver_telegram_command_progress(
     state: &SharedState,
     api_registry: &ImApiRegistry,
@@ -843,7 +871,7 @@ pub(crate) async fn send_turn_reply(
                     &rendered,
                 );
                 let payload = if !is_final_answer {
-                    // 完整颗粒度：过程文本逐条独立发送，不折叠进评论聚合气泡。
+                    // 完整颗粒度：过程文本逐条独立发送，不并入聚合气泡。
                     if telegram_granularity(state, route).await == TelegramReplyGranularity::Full {
                         send_telegram_standalone_item(
                             state,
@@ -856,34 +884,33 @@ pub(crate) async fn send_turn_reply(
                         .await;
                         return;
                     }
+                    // 标准颗粒度：过程文案并入工具摘要所在的同一条聚合气泡，
+                    // 文案保持可见、工具步骤折叠，不再单独发一条气泡。
                     let Some(turn_id) = effective_turn_id.as_deref() else {
                         return;
                     };
-                    let item_id = item_id.unwrap_or(text);
-                    let snapshot = state.runtime.lock().await.append_telegram_commentary(
-                        thread_id,
-                        turn_id,
-                        item_id,
-                        rendered.clone(),
-                    );
-                    let Some(snapshot) = snapshot else {
-                        return;
-                    };
-                    let entries = snapshot
-                        .entries
-                        .iter()
-                        .map(|entry| entry.text.clone())
-                        .collect::<Vec<_>>();
-                    let rendered = telegram_commentary::render_commentary(
-                        &entries,
-                        snapshot.dropped_entries,
-                        im_text_for_state(state),
-                    );
-                    Some(ImOutboundPayload::TelegramCommentary {
-                        segment: snapshot.segment,
-                        rich_markdown: rendered.rich_markdown,
-                        fallback_text: rendered.fallback_markdown,
-                    })
+                    let commentary_item_id = item_id.unwrap_or(text);
+                    let snapshot = state
+                        .runtime
+                        .lock()
+                        .await
+                        .upsert_telegram_commentary_progress(
+                            thread_id,
+                            turn_id,
+                            commentary_item_id,
+                            rendered.clone(),
+                        );
+                    if let Some(snapshot) = snapshot {
+                        deliver_telegram_command_progress(
+                            state,
+                            api_registry,
+                            thread_id,
+                            route,
+                            snapshot,
+                        )
+                        .await;
+                    }
+                    return;
                 } else {
                     Some(ImOutboundPayload::Text(rendered))
                 };
@@ -916,7 +943,7 @@ pub(crate) async fn send_turn_reply(
                     log_missing_api(state, route, "turn_reply").await;
                     return;
                 };
-                let adapter = TelegramAdapter::with_locale(api, im_locale_for_state(&state).await);
+                let adapter = TelegramAdapter::with_locale(api, im_locale_for_state(state).await);
                 let (sent_event, failed_event) = if is_final_answer {
                     (
                         "telegram_turn_completed_sent",
@@ -931,7 +958,7 @@ pub(crate) async fn send_turn_reply(
                             &route.chat_id,
                             &rendered,
                             im_text_for_state(state).telegram_turn_completed_footer(),
-                            state.runtime.lock().await.turn_elapsed_ms(&thread_id),
+                            state.runtime.lock().await.turn_elapsed_ms(thread_id),
                         )
                         .await
                 } else {
@@ -2018,21 +2045,39 @@ pub(crate) async fn handle_codex_notification_for_generation(
                 return;
             };
             if route.platform == ImPlatformKind::Telegram {
-                if matches!(item_type, "commandExecution" | "mcpToolCall")
-                    && telegram_granularity(&state, &route).await
-                        == TelegramReplyGranularity::Standard
+                if telegram_granularity(&state, &route).await == TelegramReplyGranularity::Standard
                 {
-                    let _ = update_telegram_task_progress(
-                        &state,
-                        &api_registry,
-                        thread_id,
-                        &route,
-                        params,
-                        item_id,
-                        item,
-                        false,
-                    )
-                    .await;
+                    if matches!(item_type, "commandExecution" | "mcpToolCall") {
+                        let _ = update_telegram_task_progress(
+                            &state,
+                            &api_registry,
+                            thread_id,
+                            &route,
+                            params,
+                            item_id,
+                            item,
+                            false,
+                        )
+                        .await;
+                    } else if item_type == "agentMessage" {
+                        // 思考文案要在这里**占位**：它的序号必须取"开始说话"的时刻。
+                        // 若等到 item/completed 才分配，期间开始的工具会拿到更小的
+                        // 序号，于是本属于这条思考的工具被并进上一个工具摘要。
+                        //
+                        // 用 `telegram_command_turn` 而不是直接读 `turnId`：真实负载
+                        // 里 `turnId` 可能缺失，那种情况下要回落到"当前 turn"，
+                        // 否则这里会静默跳过、占位失效（症状就是本条思考的工具被
+                        // 并进上一个工具摘要）。
+                        if let TelegramCommandTurn::Active(turn_id) =
+                            telegram_command_turn(&state, thread_id, params).await
+                        {
+                            let _ = state
+                                .runtime
+                                .lock()
+                                .await
+                                .reserve_commentary_sequence(thread_id, &turn_id, item_id);
+                        }
+                    }
                 }
                 return;
             }
@@ -2089,6 +2134,27 @@ pub(crate) async fn handle_codex_notification_for_generation(
                 return;
             }
             if route.platform == ImPlatformKind::Telegram {
+                // 思考的序号在**第一次 delta** 就占位。
+                //
+                // 这是交错顺序的关键。`item/started` 对 agentMessage 并不可靠：
+                // 实测里 `commandExecution` 出现 68 次、`reasoning` 26 次，而
+                // `agentMessage` 只有 4 次。一旦某条思考缺了 `item/started`，序号
+                // 就只能等 `item/completed` 才分配；那时本轮工具早已拿到更小的
+                // 序号，本属于这条思考的工具会被并进上一个工具摘要。
+                //
+                // `delta` 则一定会到达（实测 367 次）且必带 `itemId`，是更可靠的
+                // 信源。重复调用无副作用（已占位则沿用原序号）。
+                if telegram_granularity(&state, &route).await == TelegramReplyGranularity::Standard
+                    && let Some(item_id) = params.get("itemId").and_then(|value| value.as_str())
+                    && let TelegramCommandTurn::Active(turn_id) =
+                        telegram_command_turn(&state, thread_id, params).await
+                {
+                    let _ = state
+                        .runtime
+                        .lock()
+                        .await
+                        .reserve_commentary_sequence(thread_id, &turn_id, item_id);
+                }
                 start_telegram_agent_typing(
                     &state,
                     &api_registry,
@@ -2467,9 +2533,8 @@ pub(crate) async fn handle_codex_notification_for_generation(
                             if let Some(summary) =
                                 telegram_progress::reasoning_summary_from_item(item)
                             {
-                                let text = im_text_for_state(&state);
-                                let rendered =
-                                    format!("{}\n{}", text.telegram_reasoning_heading(), summary);
+                                // 只发那一行文案，不加「思考摘要」标题。
+                                let rendered = telegram_progress::reasoning_render_line(&summary);
                                 send_telegram_standalone_item(
                                     &state,
                                     &outbound_tx,
@@ -2649,7 +2714,18 @@ pub(crate) async fn handle_codex_notification_for_generation(
                 if item_type == "agentMessage"
                     && let Some(text) = extract_agent_message_text(item)
                 {
-                    let is_final_answer = agent_message_is_final_answer(item);
+                    // 只有显式声明 `phase = final_answer` 才当场当最终答复；缺 `phase`
+                    // 的无法当场判断，先记为"该 turn 最后一条 agentMessage"并按过程
+                    // 文案处理，turn 结束时若它仍是最后一条，才升级为最终答复。
+                    let is_final_answer = agent_message_is_explicit_final_answer(item);
+                    if let Some(turn_id) = turn_id {
+                        state.runtime.lock().await.remember_turn_agent_message(
+                            turn_id,
+                            item_id,
+                            &text,
+                            is_final_answer,
+                        );
+                    }
                     send_turn_reply(
                         &state,
                         &api_registry,
@@ -2856,6 +2932,36 @@ pub(crate) async fn handle_codex_notification_for_generation(
                 return;
             };
             if route.platform == ImPlatformKind::Telegram {
+                // 先把"即将单独发成完成卡片"的文案从聚合气泡里移除，**再** finish。
+                //
+                // 顺序很重要：`finish` 会认领并投递气泡，若移除发生在它之后，那条
+                // 更正后的气泡要等下一轮投递才发出，界面上会先看到一段重复内容。
+                // 先移除则气泡一次性就是正确的。
+                if let Some(turn_id) = effective_turn_id.as_deref()
+                    && let Some(text) = extract_turn_reply_text(params)
+                {
+                    // ⚠️ 这里的锁必须写成**独立语句**（`let _ = state.runtime.lock().await.xxx();`）。
+                    //
+                    // 曾经写成 `if let Some(snapshot) = state.runtime.lock().await.remove(..) { ... }`：
+                    // `if let` 的临时值（MutexGuard）会存活到整个语句结束、**包括函数体**，
+                    // 而函数体里又要调用同样需要 runtime 锁的 `deliver_telegram_command_progress`，
+                    // 于是构成自我死锁。edition 2024 下已实测复现：daemon 永久卡死该请求，
+                    // 并连带拖垮 `/api/v1/manage/lifecycle`、租约续期与版本交接。
+                    // 待判定记录只用于判定，这里消费掉并改为按内容移除。
+                    let _ = state
+                        .runtime
+                        .lock()
+                        .await
+                        .take_turn_last_agent_message(turn_id);
+                    // 按**内容**匹配而不是 `item_id`：`item/completed` 的 `turnId`
+                    // 可能缺失，那条链路上记录会被整段跳过，而写入气泡却回退到了
+                    // "当前 turn"。按内容匹配才能保证"同一段内容不出现两遍"。
+                    let _ = state
+                        .runtime
+                        .lock()
+                        .await
+                        .remove_commentary_matching_text(thread_id, turn_id, &text);
+                }
                 if let Some(api) = api_registry.telegram_for_route(&route) {
                     telegram_typing::finish_thread(&state, api, thread_id, &route).await;
                 } else {
@@ -2898,6 +3004,10 @@ pub(crate) async fn handle_codex_notification_for_generation(
                 false
             };
             if !wecom_stream_finished && let Some(text) = extract_turn_reply_text(params) {
+                // 这段文本此前可能已经作为「过程文案」并入聚合气泡：`phase` 缺失的
+                // 最终答复在 `item/completed` 时无法与过程说明区分，会先被并进气泡。
+                // 既然现在要把它当成独立的完成卡片发出，就必须**从气泡里移除**，
+                // 否则同一段内容会出现两遍（一遍思考过程、一遍已完成）。
                 send_turn_reply(
                     &state,
                     &api_registry,
@@ -2910,6 +3020,43 @@ pub(crate) async fn handle_codex_notification_for_generation(
                     true,
                 )
                 .await;
+            } else if let Some(turn_id) = effective_turn_id.as_deref() {
+                // turn 结束时没有可用的最终答复文本：若该 turn 的最后一条
+                // agentMessage 尚未作为最终答复发出（缺 `phase` 的场景），
+                // 就在这里把它升级为最终答复——这样"过程说明"不会各自变成
+                // 一张「已完成」卡片，而真正的最终答复也不会丢失。
+                let pending = state
+                    .runtime
+                    .lock()
+                    .await
+                    .take_turn_last_agent_message(turn_id);
+                if let Some((item_id, text, was_explicit_final)) = pending
+                    && !was_explicit_final
+                    && !failed
+                {
+                    // 从聚合气泡里移除这条（它要改成独立的完成卡片）。
+                    remove_commentary_and_refresh(
+                        &state,
+                        &api_registry,
+                        thread_id,
+                        turn_id,
+                        &route,
+                        &item_id,
+                    )
+                    .await;
+                    send_turn_reply(
+                        &state,
+                        &api_registry,
+                        Some(&outbound_tx),
+                        thread_id,
+                        Some(turn_id),
+                        &route,
+                        Some(&item_id),
+                        &text,
+                        true,
+                    )
+                    .await;
+                }
             }
             let turn_completed = state
                 .runtime
@@ -3741,16 +3888,6 @@ async fn send_text_im_codex_item(
         kind: ImOutboundKind::Item,
         payload: ImOutboundPayload::Text(text.clone()),
     })?;
-    if route.platform == ImPlatformKind::Telegram
-        && item_type == "contextCompaction"
-        && let Some(turn_id) = outbound_turn_id.as_deref()
-    {
-        state
-            .runtime
-            .lock()
-            .await
-            .start_new_telegram_commentary_segment(thread_id, turn_id);
-    }
     let mcp_tool_image_count =
         queue_mcp_tool_images(outbound_tx, thread_id, route, item_id, mcp_tool_image_paths)?;
     let event_kind = format!("{platform}_item_queued");
@@ -4149,6 +4286,7 @@ mod tests {
         config::AppConfig,
         im::{
             core::outbound::{channel as outbound_channel, try_recv_for_test},
+            telegram::{api::TelegramApi, types::TelegramSettings},
             wecom::{WecomApi, WecomSettings},
         },
         im_runtime::{RouteTarget, WecomStreamState},
@@ -4194,6 +4332,44 @@ mod tests {
             chat_id: "chat".to_string(),
             remote_client_key: "remote".to_string(),
         }
+    }
+
+    /// 带一个**真实** Telegram API 的注册表，让投递路径真正执行到 `runtime` 锁。
+    ///
+    /// 这一点是死锁回归测试的关键：只用 `ImApiRegistry::default()` 时，
+    /// `deliver_telegram_command_progress` 会因取不到 API 而提前返回、根本碰不到锁，
+    /// 于是"锁被 if-let 临时值持有"这种死锁无法被测试发现。
+    async fn telegram_registry_with_mock_api(account_id: &str) -> ImApiRegistry {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Telegram server");
+        let address = listener.local_addr().expect("mock address");
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = vec![0_u8; 4_096];
+                let _ = stream.read(&mut request).await;
+                let body = r#"{"ok":true,"result":{"message_id":1}}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let api = TelegramApi::new(TelegramSettings {
+            account_id: account_id.to_string(),
+            bot_token: "test-token".to_string(),
+            ..Default::default()
+        })
+        .with_test_api_base(format!("http://{address}"));
+
+        let mut registry = ImApiRegistry::default();
+        registry.telegram.insert(account_id.to_string(), api);
+        registry
     }
 
     async fn bind_active_telegram_topic(
@@ -4835,8 +5011,7 @@ mod tests {
                 assert!(text.starts_with("result"));
                 assert!(!text.contains("🤖 Codex"));
             }
-            ImOutboundPayload::TelegramCommentary { .. }
-            | ImOutboundPayload::Approval(_)
+            ImOutboundPayload::Approval(_)
             | ImOutboundPayload::Image { .. }
             | ImOutboundPayload::ImageGroup { .. } => {
                 panic!("Telegram final reply must be queued as text")
@@ -4884,7 +5059,6 @@ mod tests {
                 assert_eq!(images[2].caption.as_deref(), Some("third"));
             }
             ImOutboundPayload::Text(_)
-            | ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_)
             | ImOutboundPayload::Image { .. } => {
                 panic!("multiple Telegram images should use one album payload")
@@ -4918,7 +5092,6 @@ mod tests {
                 assert_eq!(caption.as_deref(), Some("single"));
             }
             ImOutboundPayload::Text(_)
-            | ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_)
             | ImOutboundPayload::ImageGroup { .. } => {
                 panic!("a single Telegram image should use the single-image payload")
@@ -4960,7 +5133,6 @@ mod tests {
                     assert_eq!(caption.as_deref(), Some(format!("image {index}").as_str()));
                 }
                 ImOutboundPayload::Text(_)
-                | ImOutboundPayload::TelegramCommentary { .. }
                 | ImOutboundPayload::Approval(_)
                 | ImOutboundPayload::ImageGroup { .. } => {
                     panic!("non-Telegram images should remain individual payloads")
@@ -5108,6 +5280,605 @@ mod tests {
         })));
     }
 
+    /// 缺 `phase` 的过程说明不能各自变成「已完成」卡片。
+    ///
+    /// 回归背景：`agent_message_is_final_answer` 把"缺少 phase"当作最终答复，
+    /// 于是一次 turn 里多条过程说明（"我先查一下…"）会被各发一张 ✅ 已完成。
+    /// 现在改为延迟判定：只有该 turn 的最后一条才升级为最终答复。
+    #[tokio::test]
+    async fn phase_less_commentary_is_not_sent_as_completed_until_the_turn_ends() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let (outbound_tx, mut outbound_rx) = outbound_channel();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.bind_route("thread", route);
+            runtime.mark_turn_started("thread", "turn");
+        }
+
+        // 两条没有 phase 的过程说明。
+        for (item_id, text) in [
+            ("step-1", "我先查一下记忆里关于这个问题的既有结论"),
+            ("step-2", "刚拿到一个关键线索，我再核对一下"),
+        ] {
+            let notification = crate::codex::CodexNotification {
+                method: "item/completed".to_string(),
+                params: Some(json!({
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "item": { "id": item_id, "type": "agentMessage", "text": text }
+                })),
+                request_id: None,
+                remote_client_key: None,
+                remote_connection_epoch: None,
+            };
+            handle_codex_notification(
+                state.clone(),
+                ImApiRegistry::default(),
+                outbound_tx.clone(),
+                &notification,
+            )
+            .await;
+        }
+
+        // 此刻不能有任何「已完成」卡片（它们都是过程说明）。
+        let mut completed = 0;
+        while let Some(message) = try_recv_for_test(&mut outbound_rx) {
+            if message.kind == ImOutboundKind::TurnReply {
+                completed += 1;
+            }
+        }
+        assert_eq!(completed, 0, "过程说明不应立即变成已完成卡片");
+
+        // 两条都进了聚合气泡。
+        let snapshot = state
+            .runtime
+            .lock()
+            .await
+            .telegram_command_progress_snapshot_for_test("thread", "turn")
+            .expect("aggregate snapshot");
+        assert_eq!(snapshot.commentary.len(), 2);
+    }
+
+    /// 回归：`turn/completed` 的 Telegram 分支**不能自我死锁**。
+    ///
+    /// 曾经的写法把 `runtime.lock()` 作为 `if let` 的临时值：
+    ///
+    /// ```ignore
+    /// if let Some(snapshot) = state.runtime.lock().await.remove_commentary(..) {
+    ///     deliver_telegram_command_progress(..).await;   // 内部又 lock() → 死锁
+    /// }
+    /// ```
+    ///
+    /// `if let` 的临时值（MutexGuard）存活到整个语句结束、**包括函数体**（edition
+    /// 2024 已实测），于是 daemon 永久卡死该请求，并连带拖垮
+    /// `/api/v1/manage/lifecycle`、租约续期和版本交接。
+    ///
+    /// 这里用带超时的 `tokio::time::timeout` 兜底：一旦回归，测试会失败而不是挂住。
+    #[tokio::test]
+    async fn telegram_turn_completion_does_not_deadlock_on_the_runtime_lock() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let registry = telegram_registry_with_mock_api(&route.account_id).await;
+        let (outbound_tx, mut _rx) = outbound_channel();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.bind_route("thread", route.clone());
+            runtime.mark_turn_started("thread", "turn");
+        }
+
+        // 先让最终答复并入聚合气泡（缺 phase → 按过程文案处理）。
+        let item_completed = crate::codex::CodexNotification {
+            method: "item/completed".to_string(),
+            params: Some(json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "item": { "id": "answer", "type": "agentMessage", "text": "最终答复内容" }
+            })),
+            request_id: None,
+            remote_client_key: None,
+            remote_connection_epoch: None,
+        };
+        handle_codex_notification(
+            state.clone(),
+            registry.clone(),
+            outbound_tx.clone(),
+            &item_completed,
+        )
+        .await;
+
+        // turn 结束：这条路径会移除文案并投递气泡（内部需要同一把 runtime 锁）。
+        let turn_completed = crate::codex::CodexNotification {
+            method: "turn/completed".to_string(),
+            params: Some(json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "turn": { "items": [
+                    { "id": "answer", "type": "agentMessage", "text": "最终答复内容" }
+                ]}
+            })),
+            request_id: None,
+            remote_client_key: None,
+            remote_connection_epoch: None,
+        };
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            handle_codex_notification(state.clone(), registry, outbound_tx, &turn_completed),
+        )
+        .await;
+        assert!(
+            outcome.is_ok(),
+            "turn/completed 在 10 秒内未返回：很可能又出现了 runtime 锁自我死锁"
+        );
+
+        // 处理结束后 runtime 锁必须仍然可用。
+        let probe =
+            tokio::time::timeout(std::time::Duration::from_secs(5), state.runtime.lock()).await;
+        assert!(probe.is_ok(), "runtime 锁未被释放（死锁残留）");
+    }
+
+    /// 回归：思考与工具必须按**开始时刻**交错。
+    ///
+    /// 症状：本该显示在第二条思考下面的工具摘要，被合并进了上面那个工具摘要。
+    /// 原因：思考的序号原先在 `item/completed` 才分配，而工具在 `item/started`
+    /// 就占号；于是"思考A → 工具X → 思考B(开始) → 工具Y" 被排成
+    /// "思考A → 工具X → 工具Y → 思考B"，工具 Y 被并进上一个批次。
+    /// 修法：`item/started` 时先为思考占位。
+    #[tokio::test]
+    async fn commentary_sequence_is_reserved_at_item_started() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let (outbound_tx, mut _outbound_rx) = outbound_channel();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.bind_route("thread", route);
+            runtime.mark_turn_started("thread", "turn");
+        }
+
+        let started = |item_id: &str, item_type: &str| crate::codex::CodexNotification {
+            method: "item/started".to_string(),
+            params: Some(json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "item": { "id": item_id, "type": item_type }
+            })),
+            request_id: None,
+            remote_client_key: None,
+            remote_connection_epoch: None,
+        };
+        let completed =
+            |item_id: &str, item_type: &str, text: &str| crate::codex::CodexNotification {
+                method: "item/completed".to_string(),
+                params: Some(json!({
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "item": { "id": item_id, "type": item_type, "text": text }
+                })),
+                request_id: None,
+                remote_client_key: None,
+                remote_connection_epoch: None,
+            };
+
+        // 思考A 开始 → 完成
+        handle_codex_notification(
+            state.clone(),
+            ImApiRegistry::default(),
+            outbound_tx.clone(),
+            &started("think-a", "agentMessage"),
+        )
+        .await;
+        handle_codex_notification(
+            state.clone(),
+            ImApiRegistry::default(),
+            outbound_tx.clone(),
+            &completed("think-a", "agentMessage", "思考A"),
+        )
+        .await;
+
+        // 工具X 开始
+        handle_codex_notification(
+            state.clone(),
+            ImApiRegistry::default(),
+            outbound_tx.clone(),
+            &started("tool-x", "commandExecution"),
+        )
+        .await;
+
+        // 思考B **开始**（此时还没完成）
+        handle_codex_notification(
+            state.clone(),
+            ImApiRegistry::default(),
+            outbound_tx.clone(),
+            &started("think-b", "agentMessage"),
+        )
+        .await;
+
+        // 工具Y 开始（在思考B开始之后）
+        handle_codex_notification(
+            state.clone(),
+            ImApiRegistry::default(),
+            outbound_tx.clone(),
+            &started("tool-y", "commandExecution"),
+        )
+        .await;
+
+        // 思考B 完成
+        handle_codex_notification(
+            state.clone(),
+            ImApiRegistry::default(),
+            outbound_tx.clone(),
+            &completed("think-b", "agentMessage", "思考B"),
+        )
+        .await;
+
+        let snapshot = state
+            .runtime
+            .lock()
+            .await
+            .telegram_command_progress_snapshot_for_test("thread", "turn")
+            .expect("snapshot");
+
+        let think_a = snapshot
+            .commentary
+            .iter()
+            .find(|entry| entry.item_id == "think-a")
+            .expect("think-a");
+        let think_b = snapshot
+            .commentary
+            .iter()
+            .find(|entry| entry.item_id == "think-b")
+            .expect("think-b");
+        let tool_x = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.item_id == "tool-x")
+            .expect("tool-x");
+        let tool_y = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.item_id == "tool-y")
+            .expect("tool-y");
+
+        // 期望顺序：思考A < 工具X < 思考B < 工具Y
+        assert!(think_a.sequence < tool_x.sequence, "思考A 应在工具X之前");
+        assert!(
+            tool_x.sequence < think_b.sequence,
+            "工具X 应在思考B之前：think_b={} tool_x={}",
+            think_b.sequence,
+            tool_x.sequence
+        );
+        assert!(
+            think_b.sequence < tool_y.sequence,
+            "思考B 应在工具Y之前（否则工具Y会被并进上一个工具摘要）：\
+             think_b={} tool_y={}",
+            think_b.sequence,
+            tool_y.sequence
+        );
+    }
+
+    /// 回归：真实负载里 `item/started` **可能不带 turnId**，占位必须回落到当前 turn。
+    ///
+    /// 若占位依赖 `turnId` 存在，它会在真实链路上静默跳过，于是思考的序号又变成
+    /// "完成时才分配"，本条思考之后开始的工具会被并进上一个工具摘要。
+    #[tokio::test]
+    async fn commentary_reservation_falls_back_when_turn_id_is_absent() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let (outbound_tx, mut _rx) = outbound_channel();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.bind_route("thread", route);
+            runtime.mark_turn_started("thread", "turn");
+        }
+
+        // 注意：这里刻意 **不带 turnId**，模拟真实负载。
+        let started_without_turn =
+            |item_id: &str, item_type: &str| crate::codex::CodexNotification {
+                method: "item/started".to_string(),
+                params: Some(json!({
+                    "threadId": "thread",
+                    "item": { "id": item_id, "type": item_type }
+                })),
+                request_id: None,
+                remote_client_key: None,
+                remote_connection_epoch: None,
+            };
+        let completed_without_turn =
+            |item_id: &str, item_type: &str, text: &str| crate::codex::CodexNotification {
+                method: "item/completed".to_string(),
+                params: Some(json!({
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "item": { "id": item_id, "type": item_type, "text": text }
+                })),
+                request_id: None,
+                remote_client_key: None,
+                remote_connection_epoch: None,
+            };
+
+        for notification in [
+            started_without_turn("tool-x", "commandExecution"),
+            started_without_turn("think-b", "agentMessage"),
+            started_without_turn("tool-y", "commandExecution"),
+        ] {
+            handle_codex_notification(
+                state.clone(),
+                ImApiRegistry::default(),
+                outbound_tx.clone(),
+                &notification,
+            )
+            .await;
+        }
+        handle_codex_notification(
+            state.clone(),
+            ImApiRegistry::default(),
+            outbound_tx.clone(),
+            &completed_without_turn("think-b", "agentMessage", "思考B"),
+        )
+        .await;
+
+        let snapshot = state
+            .runtime
+            .lock()
+            .await
+            .telegram_command_progress_snapshot_for_test("thread", "turn")
+            .expect("snapshot");
+        let think_b = snapshot
+            .commentary
+            .iter()
+            .find(|entry| entry.item_id == "think-b")
+            .expect("think-b");
+        let tool_x = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.item_id == "tool-x")
+            .expect("tool-x");
+        let tool_y = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.item_id == "tool-y")
+            .expect("tool-y");
+
+        assert!(
+            tool_x.sequence < think_b.sequence,
+            "工具X 应在思考B之前：tool_x={} think_b={}",
+            tool_x.sequence,
+            think_b.sequence
+        );
+        assert!(
+            think_b.sequence < tool_y.sequence,
+            "思考B 应在工具Y之前（缺 turnId 时占位也必须生效）：\
+             think_b={} tool_y={}",
+            think_b.sequence,
+            tool_y.sequence
+        );
+    }
+
+    /// 回归：思考的序号必须在**第一次 delta** 就占位，而不能依赖 `item/started`。
+    ///
+    /// 实测发现 `agentMessage` 的 `item/started` 很不可靠（某轮 68 个
+    /// commandExecution started vs 仅 4 个 agentMessage started），而 delta
+    /// 一定会到达且必带 itemId。若占位只挂在 started 上，缺 started 的思考
+    /// 只能等 completed 才拿序号，本轮工具就会排到它前面，表现为"本属于这条
+    /// 思考的工具被并进上一个工具摘要"。
+    #[tokio::test]
+    async fn commentary_sequence_is_reserved_on_first_delta() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let (outbound_tx, mut _rx) = outbound_channel();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.bind_route("thread", route);
+            runtime.mark_turn_started("thread", "turn");
+        }
+
+        // 工具X 先开始（拿到小序号）。
+        let tool_started = crate::codex::CodexNotification {
+            method: "item/started".to_string(),
+            params: Some(json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "item": { "id": "tool-x", "type": "commandExecution" }
+            })),
+            request_id: None,
+            remote_client_key: None,
+            remote_connection_epoch: None,
+        };
+        handle_codex_notification(
+            state.clone(),
+            ImApiRegistry::default(),
+            outbound_tx.clone(),
+            &tool_started,
+        )
+        .await;
+
+        // 思考B 只发 delta（**刻意不发 item/started**），模拟真实链路。
+        let delta = crate::codex::CodexNotification {
+            method: "item/agentMessage/delta".to_string(),
+            params: Some(json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "itemId": "think-b",
+                "delta": "思考中"
+            })),
+            request_id: None,
+            remote_client_key: None,
+            remote_connection_epoch: None,
+        };
+        handle_codex_notification(
+            state.clone(),
+            ImApiRegistry::default(),
+            outbound_tx.clone(),
+            &delta,
+        )
+        .await;
+
+        // 工具Y 在思考B 开始之后。
+        let tool_y = crate::codex::CodexNotification {
+            method: "item/started".to_string(),
+            params: Some(json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "item": { "id": "tool-y", "type": "commandExecution" }
+            })),
+            request_id: None,
+            remote_client_key: None,
+            remote_connection_epoch: None,
+        };
+        handle_codex_notification(
+            state.clone(),
+            ImApiRegistry::default(),
+            outbound_tx.clone(),
+            &tool_y,
+        )
+        .await;
+
+        // 思考B 完成并写入。
+        let completed = crate::codex::CodexNotification {
+            method: "item/completed".to_string(),
+            params: Some(json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "item": { "id": "think-b", "type": "agentMessage", "text": "思考B" }
+            })),
+            request_id: None,
+            remote_client_key: None,
+            remote_connection_epoch: None,
+        };
+        handle_codex_notification(
+            state.clone(),
+            ImApiRegistry::default(),
+            outbound_tx.clone(),
+            &completed,
+        )
+        .await;
+
+        let snapshot = state
+            .runtime
+            .lock()
+            .await
+            .telegram_command_progress_snapshot_for_test("thread", "turn")
+            .expect("snapshot");
+        let think_b = snapshot
+            .commentary
+            .iter()
+            .find(|entry| entry.item_id == "think-b")
+            .expect("think-b 应已写入");
+        let tool_x = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.item_id == "tool-x")
+            .expect("tool-x");
+        let tool_y = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.item_id == "tool-y")
+            .expect("tool-y");
+
+        assert!(
+            tool_x.sequence < think_b.sequence,
+            "工具X 在思考B之前：tool_x={} think_b={}",
+            tool_x.sequence,
+            think_b.sequence
+        );
+        assert!(
+            think_b.sequence < tool_y.sequence,
+            "思考B 必须在工具Y之前（否则工具Y会被并进上一个工具摘要）：\
+             think_b={} tool_y={}",
+            think_b.sequence,
+            tool_y.sequence
+        );
+    }
+
+    /// turn 结束时，最后一条（缺 phase 的）agentMessage 应升级为最终答复。
+    #[tokio::test]
+    async fn last_phase_less_agent_message_is_promoted_to_the_final_answer() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let (outbound_tx, mut outbound_rx) = outbound_channel();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.bind_route("thread", route);
+            runtime.mark_turn_started("thread", "turn");
+        }
+
+        let notification = crate::codex::CodexNotification {
+            method: "item/completed".to_string(),
+            params: Some(json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "item": {
+                    "id": "answer",
+                    "type": "agentMessage",
+                    "text": "这是最终答复"
+                }
+            })),
+            request_id: None,
+            remote_client_key: None,
+            remote_connection_epoch: None,
+        };
+        handle_codex_notification(
+            state.clone(),
+            ImApiRegistry::default(),
+            outbound_tx.clone(),
+            &notification,
+        )
+        .await;
+
+        // 先当作过程文案并入聚合气泡。
+        assert_eq!(
+            state
+                .runtime
+                .lock()
+                .await
+                .telegram_command_progress_snapshot_for_test("thread", "turn")
+                .expect("snapshot")
+                .commentary
+                .len(),
+            1
+        );
+
+        // turn 结束：应升级为最终答复，并从聚合气泡移除。
+        let completed_notification = crate::codex::CodexNotification {
+            method: "turn/completed".to_string(),
+            params: Some(json!({ "threadId": "thread", "turnId": "turn" })),
+            request_id: None,
+            remote_client_key: None,
+            remote_connection_epoch: None,
+        };
+        handle_codex_notification(
+            state.clone(),
+            ImApiRegistry::default(),
+            outbound_tx.clone(),
+            &completed_notification,
+        )
+        .await;
+
+        let mut reply_text = None;
+        while let Some(message) = try_recv_for_test(&mut outbound_rx) {
+            if message.kind == ImOutboundKind::TurnReply
+                && let ImOutboundPayload::Text(text) = &message.payload
+            {
+                reply_text = Some(text.clone());
+            }
+        }
+        assert_eq!(
+            reply_text.as_deref(),
+            Some("这是最终答复"),
+            "最后一条 agentMessage 应作为最终答复发出"
+        );
+        // 聚合气泡里不应再留着这条（它已变成独立的完成卡片）。
+        let snapshot = state
+            .runtime
+            .lock()
+            .await
+            .telegram_command_progress_snapshot_for_test("thread", "turn");
+        assert!(
+            snapshot.map(|s| s.commentary.is_empty()).unwrap_or(true),
+            "升级后不应再留在聚合气泡里"
+        );
+    }
+
     #[tokio::test]
     async fn telegram_commentary_does_not_hide_an_identical_final_answer() {
         let state = test_state();
@@ -5148,6 +5919,16 @@ mod tests {
             .await;
         }
 
+        // 过程文案并入聚合气泡，不再单独发一条消息；turn 结束后状态才清理。
+        let snapshot = state
+            .runtime
+            .lock()
+            .await
+            .telegram_command_progress_snapshot_for_test("thread", "turn")
+            .expect("commentary should be kept in the aggregate");
+        assert_eq!(snapshot.commentary.len(), 1);
+        assert_eq!(snapshot.commentary[0].text, "same text");
+
         let completed = crate::codex::CodexNotification {
             method: "turn/completed".to_string(),
             params: Some(json!({
@@ -5184,35 +5965,19 @@ mod tests {
         )
         .await;
 
-        let commentary = try_recv_for_test(&mut outbound_rx).expect("queued commentary");
-        assert_eq!(commentary.kind, ImOutboundKind::Item);
+        let commentary = try_recv_for_test(&mut outbound_rx).expect("queued final answer only");
+        assert_eq!(commentary.kind, ImOutboundKind::TurnReply);
         assert_eq!(commentary.item_type.as_deref(), Some("agentMessage"));
         assert_eq!(commentary.turn_id.as_deref(), Some("turn"));
-        match &commentary.payload {
-            ImOutboundPayload::TelegramCommentary {
-                rich_markdown,
-                fallback_text,
-                ..
-            } => {
-                assert_eq!(rich_markdown, "same text");
-                assert_eq!(fallback_text, "same text");
-            }
-            _ => panic!("commentary should use the aggregated Telegram payload"),
-        }
-
-        let final_answer = try_recv_for_test(&mut outbound_rx).expect("queued final answer");
-        assert_eq!(final_answer.kind, ImOutboundKind::TurnReply);
-        assert_eq!(final_answer.item_type.as_deref(), Some("agentMessage"));
-        assert_eq!(final_answer.turn_id.as_deref(), Some("turn"));
         assert!(matches!(
-            &final_answer.payload,
+            &commentary.payload,
             ImOutboundPayload::Text(text) if text == "same text"
         ));
         assert!(try_recv_for_test(&mut outbound_rx).is_none());
     }
 
     #[tokio::test]
-    async fn telegram_commentary_folds_eight_updates_and_deduplicates_item_replays() {
+    async fn telegram_commentary_updates_the_aggregate_and_deduplicates_item_replays() {
         let state = test_state();
         let route = test_telegram_route();
         let (outbound_tx, mut outbound_rx) = outbound_channel();
@@ -5257,6 +6022,29 @@ mod tests {
             }
         }
 
+        let snapshot = state
+            .runtime
+            .lock()
+            .await
+            .telegram_command_progress_snapshot_for_test("thread", "turn")
+            .expect("commentary should open the aggregate");
+        assert_eq!(
+            snapshot.commentary.len(),
+            8,
+            "the replayed item must not duplicate a commentary entry"
+        );
+        assert_eq!(snapshot.commentary[0].text, "update 1");
+        assert_eq!(snapshot.commentary[7].text, "update 8");
+
+        // 单条气泡里文案可见，且不出现折叠标记。
+        let rendered =
+            telegram_progress::render_task_progress(&snapshot, im_text_for_state(&state));
+        let rich = serde_json::to_string(&rendered.blocks).expect("blocks serialize");
+        for index in 1..=8 {
+            assert!(rich.contains(&format!("update {index}")));
+        }
+        assert!(!rich.contains("<details>"));
+
         send_turn_reply(
             &state,
             &ImApiRegistry::default(),
@@ -5269,37 +6057,6 @@ mod tests {
             true,
         )
         .await;
-
-        let mut queued = 0;
-        let mut last_rich = String::new();
-        let mut last_fallback = String::new();
-        for _ in 0..8 {
-            let message = try_recv_for_test(&mut outbound_rx).expect("commentary snapshot");
-            queued += 1;
-            assert_eq!(message.kind, ImOutboundKind::Item);
-            match message.payload {
-                ImOutboundPayload::TelegramCommentary {
-                    rich_markdown,
-                    fallback_text,
-                    ..
-                } => {
-                    last_rich = rich_markdown;
-                    last_fallback = fallback_text;
-                }
-                _ => panic!("commentary should use the aggregated Telegram payload"),
-            }
-        }
-
-        assert_eq!(
-            queued, 8,
-            "the replayed item must not enqueue a ninth update"
-        );
-        assert!(last_rich.contains("<summary>较早进展 · 6 条</summary>"));
-        assert!(last_rich.contains("update 1"));
-        assert!(last_rich.contains("update 6"));
-        assert!(last_rich.contains("update 1\n\n---\n\nupdate 2"));
-        assert!(last_rich.ends_with("update 7\n\n---\n\nupdate 8"));
-        assert_eq!(last_fallback, "较早进展 · 6 条\n\nupdate 7\n\nupdate 8");
 
         let final_answer = try_recv_for_test(&mut outbound_rx).expect("final answer");
         assert_eq!(final_answer.kind, ImOutboundKind::TurnReply);
@@ -5337,24 +6094,20 @@ mod tests {
             .await;
         }
 
-        let _first = try_recv_for_test(&mut outbound_rx).expect("first commentary snapshot");
-        let second = try_recv_for_test(&mut outbound_rx).expect("second commentary snapshot");
-        match second.payload {
-            ImOutboundPayload::TelegramCommentary {
-                rich_markdown,
-                fallback_text,
-                ..
-            } => {
-                assert_eq!(rich_markdown, "same update\n\n---\n\nsame update");
-                assert_eq!(fallback_text, "same update\n\nsame update");
-            }
-            _ => panic!("commentary should use the aggregated Telegram payload"),
-        }
+        let snapshot = state
+            .runtime
+            .lock()
+            .await
+            .telegram_command_progress_snapshot_for_test("thread", "turn")
+            .expect("commentary should open the aggregate");
+        assert_eq!(snapshot.commentary.len(), 2);
+        assert_eq!(snapshot.commentary[0].text, "same update");
+        assert_eq!(snapshot.commentary[1].text, "same update");
         assert!(try_recv_for_test(&mut outbound_rx).is_none());
     }
 
     #[tokio::test]
-    async fn telegram_context_compaction_splits_following_commentary_into_a_new_card() {
+    async fn telegram_context_compaction_keeps_commentary_in_the_same_aggregate() {
         let state = test_state();
         let route = test_telegram_route();
         let api_registry = ImApiRegistry::default();
@@ -5377,11 +6130,7 @@ mod tests {
             false,
         )
         .await;
-        let before = try_recv_for_test(&mut outbound_rx).expect("commentary before compaction");
-        let before_segment = match before.payload {
-            ImOutboundPayload::TelegramCommentary { segment, .. } => segment,
-            _ => panic!("commentary should use an aggregate payload"),
-        };
+        assert!(try_recv_for_test(&mut outbound_rx).is_none());
 
         send_text_im_codex_item(
             &state,
@@ -5409,19 +6158,16 @@ mod tests {
             false,
         )
         .await;
-        let after = try_recv_for_test(&mut outbound_rx).expect("commentary after compaction");
-        match after.payload {
-            ImOutboundPayload::TelegramCommentary {
-                segment,
-                rich_markdown,
-                fallback_text,
-            } => {
-                assert_eq!(segment, before_segment + 1);
-                assert_eq!(rich_markdown, "after compaction");
-                assert_eq!(fallback_text, "after compaction");
-            }
-            _ => panic!("commentary should use an aggregate payload"),
-        }
+
+        let snapshot = state
+            .runtime
+            .lock()
+            .await
+            .telegram_command_progress_snapshot_for_test("thread", "turn")
+            .expect("compaction must not reset the aggregate");
+        assert_eq!(snapshot.commentary.len(), 2);
+        assert_eq!(snapshot.commentary[0].text, "before compaction");
+        assert_eq!(snapshot.commentary[1].text, "after compaction");
         assert!(try_recv_for_test(&mut outbound_rx).is_none());
     }
 
@@ -5466,8 +6212,9 @@ mod tests {
             .runtime
             .lock()
             .await
-            .append_telegram_commentary("thread", "turn", "before", "before".to_string())
+            .upsert_telegram_commentary_progress("thread", "turn", "before", "before".to_string())
             .expect("commentary before compaction");
+        assert_eq!(before.commentary.len(), 1);
         drop(outbound_rx);
 
         assert!(
@@ -5488,10 +6235,11 @@ mod tests {
             .runtime
             .lock()
             .await
-            .append_telegram_commentary("thread", "turn", "after", "after".to_string())
-            .expect("commentary should stay in the current segment");
-        assert_eq!(after.segment, before.segment);
-        assert_eq!(after.entries.len(), 2);
+            .upsert_telegram_commentary_progress("thread", "turn", "after", "after".to_string())
+            .expect("commentary should stay in the same aggregate");
+        assert_eq!(after.commentary.len(), 2);
+        assert_eq!(after.commentary[0].text, "before");
+        assert_eq!(after.commentary[1].text, "after");
     }
 
     #[tokio::test]
@@ -5593,9 +6341,7 @@ mod tests {
                 assert_eq!(images.len(), 1);
                 assert!(images[0].path.is_file());
             }
-            ImOutboundPayload::Text(_)
-            | ImOutboundPayload::TelegramCommentary { .. }
-            | ImOutboundPayload::Approval(_) => {
+            ImOutboundPayload::Text(_) | ImOutboundPayload::Approval(_) => {
                 panic!("MCP aggregation must not queue an item text message")
             }
         }
@@ -5642,8 +6388,7 @@ mod tests {
                 assert!(text.contains("任务失败"));
                 assert!(text.contains("503 Service Unavailable"));
             }
-            ImOutboundPayload::TelegramCommentary { .. }
-            | ImOutboundPayload::Approval(_)
+            ImOutboundPayload::Approval(_)
             | ImOutboundPayload::Image { .. }
             | ImOutboundPayload::ImageGroup { .. } => {
                 panic!("terminal failure must be queued as text")
@@ -5676,8 +6421,7 @@ mod tests {
         assert_eq!(message.item_type.as_deref(), Some("turnCompleted"));
         match message.payload {
             ImOutboundPayload::Text(text) => assert!(text.contains("已完成")),
-            ImOutboundPayload::TelegramCommentary { .. }
-            | ImOutboundPayload::Approval(_)
+            ImOutboundPayload::Approval(_)
             | ImOutboundPayload::Image { .. }
             | ImOutboundPayload::ImageGroup { .. } => {
                 panic!("terminal success must be queued as text")

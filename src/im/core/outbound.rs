@@ -61,11 +61,6 @@ enum TelegramTextPresentation {
 #[derive(Debug, Clone)]
 pub(crate) enum ImOutboundPayload {
     Text(String),
-    TelegramCommentary {
-        segment: u64,
-        rich_markdown: String,
-        fallback_text: String,
-    },
     Approval(PendingApproval),
     Image {
         path: PathBuf,
@@ -328,16 +323,6 @@ async fn send_wecom_outbound(
             }
             .await
         }
-        ImOutboundPayload::TelegramCommentary { fallback_text, .. } => {
-            adapter
-                .send_text(
-                    state,
-                    &message.route.account_id,
-                    &message.route.chat_id,
-                    fallback_text,
-                )
-                .await
-        }
     };
     match result {
         Ok(message_id) => {
@@ -437,22 +422,6 @@ async fn send_telegram_outbound(
             send_telegram_image_group(state, &adapter, &message, images).await;
             false
         }
-        ImOutboundPayload::TelegramCommentary {
-            segment,
-            rich_markdown,
-            fallback_text,
-        } => {
-            send_telegram_commentary(
-                state,
-                &adapter,
-                &message,
-                *segment,
-                rich_markdown,
-                fallback_text,
-            )
-            .await;
-            false
-        }
     };
     if sent_context_compaction {
         telegram_typing::restore_after_persistent_message(
@@ -488,7 +457,6 @@ async fn send_feishu_outbound(
             send_feishu_approval(state, &adapter, &message, approval).await;
         }
         ImOutboundPayload::Text(_)
-        | ImOutboundPayload::TelegramCommentary { .. }
         | ImOutboundPayload::Image { .. }
         | ImOutboundPayload::ImageGroup { .. } => {
             state
@@ -602,9 +570,6 @@ async fn send_wechat_outbound(
                 )
                 .await;
             }
-        }
-        ImOutboundPayload::TelegramCommentary { fallback_text, .. } => {
-            send_wechat_text(state, &adapter, &message, fallback_text).await;
         }
     }
 }
@@ -822,9 +787,7 @@ async fn defer_wechat_outbound_if_waiting(
     if waiting {
         if matches!(
             message.payload,
-            ImOutboundPayload::Text(_)
-                | ImOutboundPayload::TelegramCommentary { .. }
-                | ImOutboundPayload::Approval(_)
+            ImOutboundPayload::Text(_) | ImOutboundPayload::Approval(_)
         ) {
             log_outbound_result(
                 "wechat_context_token_waiting_text_allowed",
@@ -845,9 +808,7 @@ async fn defer_wechat_outbound_if_waiting(
     if context_token.is_none() {
         if matches!(
             message.payload,
-            ImOutboundPayload::Text(_)
-                | ImOutboundPayload::TelegramCommentary { .. }
-                | ImOutboundPayload::Approval(_)
+            ImOutboundPayload::Text(_) | ImOutboundPayload::Approval(_)
         ) {
             log_outbound_result(
                 "wechat_context_token_missing_text_allowed",
@@ -1155,114 +1116,6 @@ async fn send_telegram_text(
     }
 }
 
-async fn send_telegram_commentary(
-    state: &SharedState,
-    adapter: &TelegramAdapter,
-    message: &ImOutboundMessage,
-    segment: u64,
-    rich_markdown: &str,
-    fallback_text: &str,
-) {
-    let Some(turn_id) = message.turn_id.as_deref() else {
-        return;
-    };
-    let message_id = state
-        .runtime
-        .lock()
-        .await
-        .telegram_commentary_delivery_target(&message.thread_id, turn_id, segment);
-    let Some(message_id) = message_id else {
-        state
-            .push_event(
-                "info",
-                "telegram_commentary_skipped",
-                format!(
-                    "thread={} turn={} chat={} reason=stale",
-                    message.thread_id, turn_id, message.route.chat_id,
-                ),
-            )
-            .await;
-        return;
-    };
-    state
-        .push_event(
-            "info",
-            "telegram_commentary_send_begin",
-            format!(
-                "thread={} turn={} chat={} message={} rich_len={} fallback_len={}",
-                message.thread_id,
-                message.turn_id.as_deref().unwrap_or(""),
-                message.route.chat_id,
-                message_id.as_deref().unwrap_or(""),
-                rich_markdown.chars().count(),
-                fallback_text.chars().count(),
-            ),
-        )
-        .await;
-    log_outbound_message(
-        "send_telegram_commentary_begin",
-        message,
-        Some(fallback_text),
-    );
-    match adapter
-        .send_or_update_rich_markdown_with_fallback(
-            &message.route.chat_id,
-            message_id.as_deref(),
-            rich_markdown,
-            fallback_text,
-        )
-        .await
-    {
-        Ok(delivered_message_id) => {
-            if let Some(turn_id) = message.turn_id.as_deref() {
-                state
-                    .runtime
-                    .lock()
-                    .await
-                    .remember_telegram_commentary_delivery(
-                        &message.thread_id,
-                        turn_id,
-                        segment,
-                        delivered_message_id.clone(),
-                    );
-            }
-            log_outbound_result(
-                "send_telegram_commentary_done",
-                message,
-                &delivered_message_id,
-            );
-            state
-                .push_event(
-                    "info",
-                    "telegram_commentary_sent",
-                    format!(
-                        "thread={} turn={} chat={} message={delivered_message_id}",
-                        message.thread_id,
-                        message.turn_id.as_deref().unwrap_or(""),
-                        message.route.chat_id,
-                    ),
-                )
-                .await;
-        }
-        Err(err) => {
-            cleanup_deleted_telegram_topic(state, message, &err).await;
-            log_outbound_result("send_telegram_commentary_failed", message, &err.to_string());
-            state
-                .push_event(
-                    "error",
-                    "telegram_commentary_failed",
-                    format!(
-                        "thread={} turn={} chat={} err={err}",
-                        message.thread_id,
-                        message.turn_id.as_deref().unwrap_or(""),
-                        message.route.chat_id,
-                    ),
-                )
-                .await;
-        }
-    }
-}
-
 fn telegram_text_presentation(message: &ImOutboundMessage) -> TelegramTextPresentation {
     match (message.kind, message.item_type.as_deref()) {
         (ImOutboundKind::TurnReply, Some("agentMessage")) => {
@@ -1282,21 +1135,6 @@ fn log_outbound_message(event: &str, message: &ImOutboundMessage, text: Option<&
         (_, Some(text)) => ("text", text.chars().count(), log_text_preview(text, 500)),
         (ImOutboundPayload::Text(text), None) => {
             ("text", text.chars().count(), log_text_preview(text, 500))
-        }
-        (
-            ImOutboundPayload::TelegramCommentary {
-                fallback_text,
-                rich_markdown,
-                ..
-            },
-            None,
-        ) => {
-            let rich_text = format!("rich={} fallback={}", rich_markdown, fallback_text);
-            (
-                "telegram_commentary",
-                rich_text.chars().count(),
-                log_text_preview(&rich_text, 500),
-            )
         }
         (ImOutboundPayload::Approval(approval), None) => (
             "approval",

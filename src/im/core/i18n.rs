@@ -165,7 +165,7 @@ impl ImText {
             .map(str::trim)
             .filter(|summary| !summary.is_empty())
             .unwrap_or_else(|| self.choose("系统错误", "System error"));
-        match self.turn_error_hint(&summary) {
+        match self.turn_error_hint(summary) {
             Some(hint) => match self.locale {
                 ImLocale::ZhCn => format!("❌ 任务失败\n\n{hint}\n\n原因：{summary}"),
                 ImLocale::EnUs => format!("❌ Task failed\n\n{hint}\n\nCause: {summary}"),
@@ -322,10 +322,19 @@ impl ImText {
         }
     }
 
-    pub(crate) fn telegram_commentary_earlier(self, count: usize) -> String {
+    /// 聚合气泡里「思考过程（N）」折叠块的标题。
+    pub(crate) fn telegram_commentary_heading(self, count: usize) -> String {
         match self.locale {
-            ImLocale::ZhCn => format!("较早进展 · {count} 条"),
-            ImLocale::EnUs => format!("Earlier updates · {count}"),
+            ImLocale::ZhCn => format!("思考过程（{count}）"),
+            ImLocale::EnUs => format!("Thinking ({count})"),
+        }
+    }
+
+    /// 聚合气泡里「工具摘要（N）」折叠块的标题。
+    pub(crate) fn telegram_tools_summary_heading(self, count: usize) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("工具摘要（{count}）"),
+            ImLocale::EnUs => format!("Tool summary ({count})"),
         }
     }
 
@@ -361,10 +370,6 @@ impl ImText {
             ImLocale::ZhCn => "✅ 已完成",
             ImLocale::EnUs => "✅ Completed",
         }
-    }
-
-    pub(crate) fn telegram_reasoning_heading(self) -> &'static str {
-        self.choose("思考摘要", "Reasoning summary")
     }
 
     pub(crate) fn telegram_plan_heading(self, completed: usize, total: usize) -> String {

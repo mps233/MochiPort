@@ -47,6 +47,16 @@ pub fn agent_message_is_final_answer(item: &Value) -> bool {
     }
 }
 
+/// 是否**显式**声明为最终答复（`phase == "final_answer"`）。
+///
+/// 与 [`agent_message_is_final_answer`] 的区别：这里不把"缺少 `phase`"当作最终
+/// 答复。缺 `phase` 的消息在 turn 结束前无法区分"过程说明"和"最终答复"，因此
+/// 交给调用方按"该 turn 的最后一条 agentMessage"规则延迟判定——否则一次 turn 里
+/// 多条无 `phase` 的过程说明会各自被当成最终答复，重复发出「已完成」卡片。
+pub fn agent_message_is_explicit_final_answer(item: &Value) -> bool {
+    is_agent_message_item(item) && agent_message_phase(item) == Some("final_answer")
+}
+
 pub fn extract_turn_reply_text(params: &Value) -> Option<String> {
     extract_direct_turn_reply_text(params)
         .or_else(|| {

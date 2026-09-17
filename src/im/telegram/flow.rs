@@ -314,7 +314,7 @@ pub(crate) async fn start_next_telegram_queued_turn(
                 )
                 .await;
                 let adapter =
-                    TelegramAdapter::with_locale(api.clone(), im_locale_for_state(&state).await);
+                    TelegramAdapter::with_locale(api.clone(), im_locale_for_state(state).await);
                 let _ = adapter
                     .send_text(
                         &route.chat_id,
@@ -355,7 +355,7 @@ pub(crate) async fn start_next_telegram_queued_turn(
                     .await
                     .clear_telegram_queue(&route.conversation_key);
                 let adapter =
-                    TelegramAdapter::with_locale(api.clone(), im_locale_for_state(&state).await);
+                    TelegramAdapter::with_locale(api.clone(), im_locale_for_state(state).await);
                 let _ = adapter
                     .send_text(
                         &route.chat_id,
@@ -366,14 +366,14 @@ pub(crate) async fn start_next_telegram_queued_turn(
             }
             TurnStartOutcome::Expired { .. } => {
                 let adapter =
-                    TelegramAdapter::with_locale(api.clone(), im_locale_for_state(&state).await);
+                    TelegramAdapter::with_locale(api.clone(), im_locale_for_state(state).await);
                 let _ = adapter
                     .send_text(&route.chat_id, im_text_for_state(state).inbound_expired())
                     .await;
             }
             TurnStartOutcome::Failed { error } => {
                 let adapter =
-                    TelegramAdapter::with_locale(api.clone(), im_locale_for_state(&state).await);
+                    TelegramAdapter::with_locale(api.clone(), im_locale_for_state(state).await);
                 let _ = adapter
                     .send_text(
                         &route.chat_id,

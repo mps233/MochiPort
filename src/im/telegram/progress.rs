@@ -9,7 +9,7 @@ use crate::{
     },
 };
 
-use super::{collab_progress, rich_blocks};
+use super::{collab_progress, commentary, rich_blocks};
 
 const TELEGRAM_COMMAND_PROGRESS_VISIBLE_STEPS: usize = 3;
 const TELEGRAM_COMMAND_PROGRESS_COMMAND_CHARS: usize = 180;
@@ -17,14 +17,27 @@ const TELEGRAM_COMMAND_PROGRESS_RICH_COMMAND_CHARS: usize = 56;
 pub(crate) const TELEGRAM_COMMAND_PROGRESS_FAILURE_CHARS: usize = 480;
 const TELEGRAM_COMMAND_PROGRESS_FAILURE_LINES: usize = 6;
 const TELEGRAM_COMMAND_PROGRESS_RETRY_ERROR_CHARS: usize = 600;
-const TELEGRAM_REASONING_RENDER_CHARS: usize = 720;
+/// 「思考摘要」在气泡里**只占一行**，超出部分截断并以 `…` 结尾。
+///
+/// 之前这里是 720，且走的是保留换行的 `compact_text`，于是 Codex 那种累积式、
+/// 带项目符号一大段的 reasoning summary 会整段铺在卡片顶部，把「执行完成」气泡
+/// 撑得很高。需求是"截短放到顶部"，所以改成单行 + 省略号。
+const TELEGRAM_REASONING_RENDER_CHARS: usize = 80;
 const TELEGRAM_PLAN_RENDER_STEPS: usize = 6;
 const TELEGRAM_PLAN_STEP_CHARS: usize = 180;
 const TELEGRAM_DIFF_RENDER_PATHS: usize = 8;
 const TELEGRAM_DIFF_PATH_CHARS: usize = 180;
 const TELEGRAM_DIFF_TABLE_PATH_CHARS: usize = 48;
 const TELEGRAM_DIFF_MAX_PATHS: usize = 128;
-const TELEGRAM_COMMAND_PROGRESS_DETAILS_STEPS: usize = 12;
+/// 折叠的工具摘要里，除优先级选中的步骤外，最多再展开的历史步骤数。
+///
+/// 与 `TELEGRAM_COMMAND_PROGRESS_VISIBLE_STEPS` 相加，气泡里同时参与交错渲染的
+/// 工具步骤上限是 **30**。
+///
+/// 名额不能太少：窗口是从最新往回连续取的，一旦总步数超过上限，中段的工具会
+/// 被整体挤出，思考之间失去间隔，气泡就退化成"思考全并在一起、工具全并在一起"
+/// （实测 35 步时必然出现）。
+const TELEGRAM_COMMAND_PROGRESS_DETAILS_STEPS: usize = 27;
 const TELEGRAM_WEB_SEARCH_VISIBLE_ENTRIES: usize = 2;
 const TELEGRAM_WEB_SEARCH_HISTORY_ENTRIES: usize = 8;
 const TELEGRAM_WEB_SEARCH_SUMMARY_CHARS: usize = 140;
@@ -348,6 +361,8 @@ pub(crate) fn running_entry(item_id: &str, item: &Value) -> TelegramCommandProgr
         exit_code: None,
         duration_ms: item.get("durationMs").and_then(Value::as_u64),
         failure_output: None,
+        // 真实序号由 upsert 在新增条目时分配（更新条目会沿用原值）。
+        sequence: 0,
     }
 }
 
@@ -363,6 +378,7 @@ pub(crate) fn completed_entry(item_id: &str, item: &Value) -> TelegramCommandPro
         failure_output: (status == TelegramCommandProgressStatus::Failed)
             .then(|| failure_output_tail(item))
             .flatten(),
+        sequence: 0,
     }
 }
 
@@ -375,6 +391,8 @@ pub(crate) fn mcp_running_entry(item_id: &str, item: &Value) -> TelegramCommandP
         exit_code: None,
         duration_ms: item.get("durationMs").and_then(Value::as_u64),
         failure_output: None,
+        // 真实序号由 upsert 在新增条目时分配（更新条目会沿用原值）。
+        sequence: 0,
     }
 }
 
@@ -390,6 +408,7 @@ pub(crate) fn mcp_completed_entry(item_id: &str, item: &Value) -> TelegramComman
         failure_output: (status == TelegramCommandProgressStatus::Failed)
             .then(|| mcp_failure_output(item))
             .flatten(),
+        sequence: 0,
     }
 }
 
@@ -493,7 +512,25 @@ pub(crate) fn render_task_progress(
     snapshot: &TelegramCommandProgressSnapshot,
     text: ImText,
 ) -> TelegramTaskProgressRender {
+    let commentary = commentary::render_commentary(
+        &snapshot.commentary,
+        snapshot.commentary_dropped_entries,
+        text,
+    );
+    let commentary_text = commentary::render_commentary_fallback(&commentary, text);
     let command_fallback = render_command_progress(snapshot, text);
+    // 富消息不可用时无法折叠：回退文本按「过程文案 → 工具摘要 → 协作」顺序直出。
+    // 预算仍要守：先保工具摘要，过程文案按尾部（最新内容）截断。
+    let commentary_text = truncate_tail(
+        &commentary_text,
+        TELEGRAM_TASK_PROGRESS_FALLBACK_MAX_CHARS
+            .saturating_sub(command_fallback.chars().count().saturating_add(2)),
+    );
+    let command_fallback = if commentary_text.is_empty() {
+        command_fallback
+    } else {
+        format!("{commentary_text}\n\n{command_fallback}")
+    };
     let fallback_markdown = match snapshot.collab.as_ref() {
         Some(collab) => {
             let rendered_collab = collab_progress::render_collab_progress(collab, text);
@@ -531,6 +568,26 @@ fn render_task_progress_blocks(
         blocks.push(rich_blocks::paragraph(rich_blocks::text(
             text.telegram_retry_progress_summary(snapshot.retry_count),
         )));
+    }
+
+    // 思考摘要放在「执行中 · N 步」正下方，**只占一行**。
+    //
+    // Codex 的 reasoning summary 是**累积式**的一大段（不是按轮次分条），
+    // 所以不参与与工具步骤的交错排序——放顶部更符合阅读顺序，也让主体信息
+    // （思考→工具→结论）自上而下展开。截断值为 TELEGRAM_REASONING_RENDER_CHARS，
+    // 每次进度刷新都原地重渲染这条气泡，因此这里的内容会随之更新。
+    //
+    // 这里**不加「思考摘要」标题**：单行文案本身已经足够表意，标题只会白占一行高度。
+    //
+    // 用 `code`（等宽蓝底）而不是 `inline_markdown`：与底部 `turn <id>` 的样式一致，
+    // 一眼能区分"这是模型的过程说明"，也不会和下面的工具/正文混淆。
+    if let Some(reasoning) = snapshot.reasoning_summary.as_deref() {
+        let trimmed = reasoning.trim();
+        if !trimmed.is_empty() {
+            blocks.push(rich_blocks::paragraph(rich_blocks::code(
+                reasoning_render_line(trimmed),
+            )));
+        }
     }
 
     if snapshot.plan_explanation.is_some() || !snapshot.plan.is_empty() {
@@ -580,84 +637,15 @@ fn render_task_progress_blocks(
         }
     }
 
-    let selected = selected_entry_indices(&snapshot.entries);
-    let command_total = snapshot
-        .dropped_entries
-        .saturating_add(snapshot.entries.len());
-    if has_plan_progress(snapshot) && command_total > 0 {
-        blocks.push(rich_blocks::divider());
-        blocks.push(rich_blocks::paragraph(rich_blocks::bold(
-            command_execution_progress_title(snapshot, text),
-        )));
-    }
-    if !selected.is_empty() {
-        for index in &selected {
-            blocks.extend(rich_command_entry_blocks(&snapshot.entries[*index], text));
-        }
-    }
-
-    let hidden = (0..snapshot.entries.len())
-        .filter(|index| !selected.contains(index))
-        .take(TELEGRAM_COMMAND_PROGRESS_DETAILS_STEPS)
-        .collect::<Vec<_>>();
-    if !hidden.is_empty() || snapshot.dropped_entries > 0 {
-        let omitted = snapshot
-            .dropped_entries
-            .saturating_add(snapshot.entries.len().saturating_sub(selected.len()));
-        let mut hidden_blocks = hidden
-            .iter()
-            .flat_map(|index| rich_command_entry_blocks(&snapshot.entries[*index], text))
-            .collect::<Vec<_>>();
-        let still_hidden = omitted.saturating_sub(hidden.len());
-        if still_hidden > 0 {
-            hidden_blocks.push(rich_blocks::paragraph(rich_blocks::text(
-                text.telegram_command_progress_omitted(still_hidden),
-            )));
-        }
-        blocks.push(rich_blocks::details(
-            rich_blocks::text(text.telegram_command_progress_omitted(omitted)),
-            hidden_blocks,
-            false,
-        ));
-    }
-
-    for index in &selected {
-        let entry = &snapshot.entries[*index];
-        if let Some(output) = entry.failure_output.as_deref() {
-            blocks.push(rich_blocks::details(
-                rich_blocks::rich_text(vec![
-                    rich_blocks::text(format!(
-                        "{} ",
-                        text.telegram_command_progress_error_summary()
-                            .trim_end_matches([':', '：'])
-                    )),
-                    rich_blocks::code(truncate_middle(
-                        &entry.command,
-                        TELEGRAM_COMMAND_PROGRESS_RICH_COMMAND_CHARS,
-                    )),
-                ]),
-                vec![rich_blocks::preformatted(
-                    truncate_tail(output, TELEGRAM_COMMAND_PROGRESS_FAILURE_CHARS),
-                    Some("text"),
-                )],
-                false,
-            ));
-        }
-    }
+    // 过程文案与工具步骤按**实际到达顺序**交错渲染：
+    // 文案（思考内容）保持可见，工具步骤按批次收进折叠块。
+    render_interleaved_progress(snapshot, text, &mut blocks);
 
     blocks.extend(render_web_search_progress_blocks(snapshot));
     if let Some(collab) = snapshot.collab.as_ref() {
         blocks.push(collab_progress::render_collab_progress_details(
             collab, text,
         ));
-    }
-    if let Some(reasoning) = snapshot.reasoning_summary.as_deref() {
-        blocks.push(rich_blocks::paragraph(rich_blocks::bold(
-            text.telegram_reasoning_heading(),
-        )));
-        blocks.push(rich_blocks::paragraph(rich_blocks::inline_markdown(
-            &compact_text(reasoning, TELEGRAM_REASONING_RENDER_CHARS),
-        )));
     }
     if let Some(diff) = snapshot.diff_summary.as_ref() {
         let mut rows = vec![vec![
@@ -759,6 +747,449 @@ fn render_task_progress_blocks(
         rich_blocks::code(short_identifier(&snapshot.turn_id)),
     ])));
     blocks
+}
+
+/// 工具/命令步骤的折叠块：标题带步骤总数，内部保留优先级筛选与省略说明。
+/// 按到达顺序交错渲染「过程文案」与「工具步骤」。
+///
+/// 规则：
+/// - 文案（Codex 的说明文字）保持可见、不折叠——用户要能直接读到思考内容；
+/// - 连续的多个工具步骤合并成一个折叠块，标题带该批次的步骤数；
+/// - 两者按 `sequence`（到达序号）排序，因此顺序与真实发生顺序一致。
+///
+/// 超预算的文案由 `commentary::render_commentary` 从最早开始丢弃，并在顶部标注。
+fn render_interleaved_progress(
+    snapshot: &TelegramCommandProgressSnapshot,
+    text: ImText,
+    blocks: &mut Vec<Value>,
+) {
+    let commentary = commentary::render_commentary(
+        &snapshot.commentary,
+        snapshot.commentary_dropped_entries,
+        text,
+    );
+    if commentary.dropped > 0 {
+        blocks.push(rich_blocks::paragraph(rich_blocks::text(
+            text.telegram_commentary_omitted(commentary.dropped),
+        )));
+    }
+
+    // 只有进入渲染范围的步骤才参与交错：优先级步骤 + 最近的历史步骤，
+    // 与折叠块原先的选择口径保持一致。
+    let selected = interleaved_tool_indices(snapshot);
+    let selected_count = selected.len();
+
+    let mut items: Vec<InterleavedItem<'_>> = Vec::new();
+    for entry in &commentary.entries {
+        items.push(InterleavedItem {
+            sequence: entry.sequence,
+            kind: InterleavedKind::Commentary(entry),
+        });
+    }
+    for index in selected {
+        let entry = &snapshot.entries[index];
+        items.push(InterleavedItem {
+            sequence: entry.sequence,
+            kind: InterleavedKind::Tool(entry),
+        });
+    }
+    items.sort_by_key(|item| item.sequence);
+
+    // 诊断：dump 排序后的 (kind, seq)，直接反映交错顺序。
+
+    let total = snapshot
+        .dropped_entries
+        .saturating_add(snapshot.entries.len());
+    let omitted = total.saturating_sub(selected_count);
+
+    // 相邻的同类条目合并成一个批次：连续的文案 → 一个「思考过程（N）」，
+    // 连续的工具 → 一个「工具摘要（N）」。被异类隔开就各自成批。
+    let mut batches: Vec<InterleavedBatch<'_>> = Vec::new();
+    for item in items {
+        match item.kind {
+            InterleavedKind::Commentary(entry) => match batches.last_mut() {
+                Some(InterleavedBatch::Commentary(entries)) => entries.push(entry),
+                _ => batches.push(InterleavedBatch::Commentary(vec![entry])),
+            },
+            InterleavedKind::Tool(entry) => match batches.last_mut() {
+                Some(InterleavedBatch::Tool(entries)) => entries.push(entry),
+                _ => batches.push(InterleavedBatch::Tool(vec![entry])),
+            },
+        }
+    }
+
+    let last_tool_batch = batches
+        .iter()
+        .rposition(|batch| matches!(batch, InterleavedBatch::Tool(_)));
+    let mut tool_batch_seen = 0usize;
+    for (index, batch) in batches.iter().enumerate() {
+        match batch {
+            // 思考过程：可折叠但**默认展开**，用户要能直接读到内容。
+            InterleavedBatch::Commentary(entries) => {
+                let mut panel = Vec::new();
+                for entry in entries {
+                    panel.extend(commentary_entry_blocks(&entry.text));
+                }
+                if !panel.is_empty() {
+                    blocks.push(rich_blocks::details(
+                        rich_blocks::text(text.telegram_commentary_heading(entries.len())),
+                        panel,
+                        true,
+                    ));
+                }
+            }
+            // 工具摘要：默认折叠，标题带该批次的步骤数。
+            InterleavedBatch::Tool(entries) => {
+                let is_first = tool_batch_seen == 0;
+                tool_batch_seen += 1;
+                let batch_omitted = if Some(index) == last_tool_batch {
+                    omitted
+                } else {
+                    0
+                };
+                flush_tool_batch(snapshot, entries, text, blocks, is_first, batch_omitted);
+            }
+        }
+    }
+    // 没有任何工具批次时，省略提示单独成段。
+    if omitted > 0 && last_tool_batch.is_none() {
+        blocks.push(rich_blocks::paragraph(rich_blocks::text(
+            text.telegram_command_progress_omitted(omitted),
+        )));
+    }
+}
+
+/// 交错渲染中的一个批次：相邻同类条目合并而成。
+enum InterleavedBatch<'a> {
+    Commentary(Vec<&'a commentary::TelegramCommentaryRenderedEntry>),
+    Tool(Vec<&'a TelegramCommandProgressEntry>),
+}
+
+enum InterleavedKind<'a> {
+    Commentary(&'a commentary::TelegramCommentaryRenderedEntry),
+    Tool(&'a TelegramCommandProgressEntry),
+}
+
+struct InterleavedItem<'a> {
+    sequence: u64,
+    kind: InterleavedKind<'a>,
+}
+
+/// 把一批连续的工具步骤渲染成一个折叠块（标题带该批次数量）。
+fn flush_tool_batch(
+    snapshot: &TelegramCommandProgressSnapshot,
+    pending: &[&TelegramCommandProgressEntry],
+    text: ImText,
+    blocks: &mut Vec<Value>,
+    is_first_batch: bool,
+    omitted: usize,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let mut panel = Vec::new();
+    // 首批带上整体执行进度标题（"执行中 · 4 步 · 1 个进行中"）。
+    if is_first_batch && has_plan_progress(snapshot) {
+        panel.push(rich_blocks::paragraph(rich_blocks::bold(
+            command_execution_progress_title(snapshot, text),
+        )));
+    }
+    for entry in pending {
+        panel.extend(rich_command_entry_blocks(entry, text));
+        if let Some(output) = entry.failure_output.as_deref() {
+            panel.push(rich_blocks::details(
+                rich_blocks::rich_text(vec![
+                    rich_blocks::text(format!(
+                        "{} ",
+                        text.telegram_command_progress_error_summary()
+                            .trim_end_matches([':', '：'])
+                    )),
+                    rich_blocks::code(truncate_middle(
+                        &entry.command,
+                        TELEGRAM_COMMAND_PROGRESS_RICH_COMMAND_CHARS,
+                    )),
+                ]),
+                vec![rich_blocks::preformatted(
+                    truncate_tail(output, TELEGRAM_COMMAND_PROGRESS_FAILURE_CHARS),
+                    Some("text"),
+                )],
+                false,
+            ));
+        }
+    }
+    if omitted > 0 {
+        panel.push(rich_blocks::paragraph(rich_blocks::text(
+            text.telegram_command_progress_omitted(omitted),
+        )));
+    }
+    blocks.push(rich_blocks::details(
+        rich_blocks::text(text.telegram_tools_summary_heading(pending.len())),
+        panel,
+        false,
+    ));
+}
+
+fn commentary_entry_blocks(entry: &str) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    let mut paragraph = String::new();
+    let mut fenced: Option<(String, Option<String>)> = None;
+    let mut list_items: Vec<Value> = Vec::new();
+
+    let lines: Vec<&str> = entry.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let remaining = &lines[index..];
+        let line = remaining[0];
+        // 默认前进一行；表格分支会按解析到的行数再额外消费。
+        index += 1;
+
+        if let Some((body, language)) = fenced.as_mut() {
+            if line.trim_start().starts_with("```") {
+                blocks.push(rich_blocks::preformatted(
+                    body.trim_end_matches('\n').to_string(),
+                    language.as_deref(),
+                ));
+                fenced = None;
+            } else {
+                body.push_str(line);
+                body.push('\n');
+            }
+            continue;
+        }
+        if line.trim_start().starts_with("```") {
+            push_commentary_paragraph(&mut blocks, &mut paragraph);
+            flush_commentary_list(&mut blocks, &mut list_items);
+            fenced = Some((String::new(), fence_language(line)));
+            continue;
+        }
+        if line.trim().is_empty() {
+            push_commentary_paragraph(&mut blocks, &mut paragraph);
+            flush_commentary_list(&mut blocks, &mut list_items);
+            continue;
+        }
+        // `| a | b |` + `|---|---|` + 数据行 → 协议的 table 块。
+        //
+        // 不处理的话整张表会被并进普通段落，渲染成一堆带竖线的原文（用户实测）。
+        if let Some((table, consumed)) = commentary_table_block(remaining) {
+            push_commentary_paragraph(&mut blocks, &mut paragraph);
+            flush_commentary_list(&mut blocks, &mut list_items);
+            blocks.push(table);
+            index += consumed - 1;
+            continue;
+        }
+        // `## 结论` → heading 块，同样避免露出 `##` 记号。
+        if let Some((level, content)) = heading_line(line) {
+            push_commentary_paragraph(&mut blocks, &mut paragraph);
+            flush_commentary_list(&mut blocks, &mut list_items);
+            if !content.trim().is_empty() {
+                blocks.push(rich_blocks::heading(
+                    rich_blocks::inline_markdown(content.trim()),
+                    heading_render_size(level),
+                ));
+            }
+            continue;
+        }
+        // `- 项目` / `* 项目` / `+ 项目` 折成协议的 list 块。
+        //
+        // 不处理的话这些行会被并进普通段落，渲染出一条带 `-` 的长文本——正是
+        // 用户看到的"markdown 原文格式"。缩进的续行并进上一个项目。
+        if let Some(item) = bullet_item_text(line) {
+            push_commentary_paragraph(&mut blocks, &mut paragraph);
+            list_items.push(rich_blocks::list_item(vec![rich_blocks::paragraph(
+                rich_blocks::inline_markdown(item),
+            )]));
+            continue;
+        }
+        if !list_items.is_empty() && line.starts_with([' ', '\t']) {
+            if let Some(last) = list_items.last_mut()
+                && let Some(items) = last.get_mut("blocks").and_then(Value::as_array_mut)
+                && let Some(first) = items.first_mut()
+            {
+                let existing = first["text"].clone();
+                first["text"] = rich_blocks::inline_markdown(&format!(
+                    "{} {}",
+                    inline_plain_text(&existing),
+                    line.trim()
+                ));
+            }
+            continue;
+        }
+        if !paragraph.is_empty() {
+            paragraph.push('\n');
+        }
+        paragraph.push_str(line);
+    }
+
+    if let Some((body, language)) = fenced {
+        blocks.push(rich_blocks::preformatted(
+            body.trim_end_matches('\n').to_string(),
+            language.as_deref(),
+        ));
+    }
+    push_commentary_paragraph(&mut blocks, &mut paragraph);
+    flush_commentary_list(&mut blocks, &mut list_items);
+    blocks
+}
+
+/// 解析 markdown 表格，返回 (table 块, 消费的行数)。
+///
+/// 形态必须是「表头行 + 分隔行 [+ 数据行…]」；列数按**分隔行**对齐，数据行缺列
+/// 补空、多列丢弃，避免某一行多打一个 `|` 就把整张表打乱。
+fn commentary_table_block(lines: &[&str]) -> Option<(Value, usize)> {
+    let header = *lines.first()?;
+    if !is_table_row(header) {
+        return None;
+    }
+    let aligns = table_separator_alignments(lines.get(1)?)?;
+    let header_cells = split_table_row(header);
+    if header_cells.len() != aligns.len() {
+        return None;
+    }
+
+    let mut rows = vec![
+        header_cells
+            .iter()
+            .zip(aligns.iter())
+            .map(|(cell, align)| {
+                rich_blocks::table_cell(rich_blocks::inline_markdown(cell), true, align)
+            })
+            .collect::<Vec<_>>(),
+    ];
+    let mut consumed = 2;
+    for line in &lines[2..] {
+        if !is_table_row(line) {
+            break;
+        }
+        let cells = split_table_row(line);
+        rows.push(
+            aligns
+                .iter()
+                .enumerate()
+                .map(|(column, align)| {
+                    let cell = cells.get(column).copied().unwrap_or("");
+                    rich_blocks::table_cell(rich_blocks::inline_markdown(cell), false, align)
+                })
+                .collect(),
+        );
+        consumed += 1;
+    }
+    Some((rich_blocks::table(rows, true, true), consumed))
+}
+
+fn is_table_row(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.len() >= 2 && trimmed.starts_with('|') && trimmed.ends_with('|')
+}
+
+fn split_table_row(line: &str) -> Vec<&str> {
+    let trimmed = line.trim();
+    let inner = trimmed.strip_prefix('|').unwrap_or(trimmed);
+    let inner = inner.strip_suffix('|').unwrap_or(inner);
+    inner.split('|').map(str::trim).collect()
+}
+
+/// 解析分隔行（`|---|:---:|---:|`）得到每列对齐方式；不是分隔行时返回 `None`。
+fn table_separator_alignments(line: &str) -> Option<Vec<&'static str>> {
+    if !is_table_row(line) {
+        return None;
+    }
+    let cells = split_table_row(line);
+    if cells.is_empty() {
+        return None;
+    }
+    let mut aligns = Vec::with_capacity(cells.len());
+    for cell in cells {
+        let core = cell.trim_matches(':').trim();
+        if core.is_empty() || !core.chars().all(|ch| ch == '-') {
+            return None;
+        }
+        aligns.push(match (cell.starts_with(':'), cell.ends_with(':')) {
+            (true, true) => "center",
+            (false, true) => "right",
+            _ => "left",
+        });
+    }
+    Some(aligns)
+}
+
+/// 解析 ATX 标题（`# ` ~ `###### `），返回 (级别, 正文)。
+///
+/// 必须带空格分隔：`#1` 这类文本不是标题，不能当成标题吃掉。
+fn heading_line(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start();
+    let level = trimmed.chars().take_while(|ch| *ch == '#').count();
+    if level == 0 || level > 6 {
+        return None;
+    }
+    let rest = &trimmed[level..];
+    if rest.is_empty() {
+        return Some((level, ""));
+    }
+    let content = rest.strip_prefix(' ')?;
+    Some((level, content.trim()))
+}
+
+/// markdown 标题级别 → 卡片内的 heading size。
+///
+/// 卡片大标题用的是 size 3，正文标题必须**更小**（size 越大字越小），否则
+/// `## 结论` 会比「执行完成」还显眼。
+fn heading_render_size(level: usize) -> u8 {
+    match level {
+        0..=2 => 4,
+        3 | 4 => 5,
+        _ => 6,
+    }
+}
+
+/// 取 `- xxx` / `* xxx` / `+ xxx` 的项目正文；不是列表行时返回 `None`。
+fn bullet_item_text(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("+ "))?;
+    let rest = rest.trim();
+    (!rest.is_empty()).then_some(rest)
+}
+
+fn flush_commentary_list(blocks: &mut Vec<Value>, list_items: &mut Vec<Value>) {
+    if !list_items.is_empty() {
+        blocks.push(rich_blocks::list(std::mem::take(list_items)));
+    }
+}
+
+/// 把已是富文本的 value 还原成纯文字（用于续行拼接）。
+fn inline_plain_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts.iter().map(inline_plain_text).collect(),
+        Value::Object(map) => map.get("text").map(inline_plain_text).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn push_commentary_paragraph(blocks: &mut Vec<Value>, paragraph: &mut String) {
+    let trimmed = paragraph.trim();
+    if !trimmed.is_empty() {
+        blocks.push(rich_blocks::paragraph(rich_blocks::inline_markdown(
+            trimmed,
+        )));
+    }
+    paragraph.clear();
+}
+
+/// 提取围栏行上的语言标注；仅保留安全字符。
+fn fence_language(line: &str) -> Option<String> {
+    let info = line.trim_start().strip_prefix("```")?.trim();
+    let language: String = info
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_' || *ch == '+')
+        .take(24)
+        .collect();
+    (!language.is_empty()).then_some(language)
 }
 
 fn render_web_search_progress_blocks(snapshot: &TelegramCommandProgressSnapshot) -> Vec<Value> {
@@ -1001,12 +1432,8 @@ fn render_supplemental_progress(
         sections.push(searches);
     }
     if let Some(reasoning) = snapshot.reasoning_summary.as_deref() {
-        let reasoning = compact_text(reasoning, TELEGRAM_REASONING_RENDER_CHARS);
-        sections.push(format!(
-            "{}\n{}",
-            text.telegram_reasoning_heading(),
-            reasoning
-        ));
+        // 不带「思考摘要」标题，只留那一行文案。
+        sections.push(reasoning_render_line(reasoning));
     }
     if let Some(diff) = snapshot.diff_summary.as_ref() {
         let mut lines =
@@ -1111,6 +1538,62 @@ pub(crate) fn render_diff_standalone(diff: &TelegramDiffSummary, text: ImText) -
         lines.push(text.telegram_diff_omitted(diff.files.len() - TELEGRAM_PLAN_RENDER_STEPS));
     }
     lines.join("\n")
+}
+
+/// 参与交错渲染的工具步骤下标：优先级步骤 + 最近的历史步骤。
+///
+/// 与折叠块原先的口径一致——折叠块本身不占屏面，展开后能看到较完整的上下文；
+/// 只有在交错视图里这些步骤才会和文案一起排序。
+fn interleaved_tool_indices(snapshot: &TelegramCommandProgressSnapshot) -> Vec<usize> {
+    let priority = selected_entry_indices(&snapshot.entries);
+    let mut shown = priority.clone();
+    let budget = TELEGRAM_COMMAND_PROGRESS_DETAILS_STEPS;
+
+    // 先为**每条思考**保留它前后紧邻的工具。
+    //
+    // 只按"最近的 N 条"取会有一个必然的塌陷：名额全部堆在时间轴末端，一旦工具
+    // 总数超过名额，中段的工具就被整体挤出，思考之间失去间隔，气泡退化成
+    // 「思考全并成一批 + 工具全并成一批」（实测 35 步以上必然发生）。
+    //
+    // 锚定每条思考的相邻工具后，无论任务多长，思考之间都至少隔着一个工具，
+    // 交错结构因此不会随步数增长而消失。
+    let mut anchors = Vec::new();
+    for sequence in snapshot.commentary.iter().map(|entry| entry.sequence) {
+        let before = snapshot
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.sequence < sequence)
+            .map(|(index, _)| index)
+            .next_back();
+        let after = snapshot
+            .entries
+            .iter()
+            .position(|entry| entry.sequence > sequence);
+        anchors.extend(before);
+        anchors.extend(after);
+    }
+    for index in anchors {
+        if !shown.contains(&index) && shown.len() < budget + priority.len() {
+            shown.push(index);
+        }
+    }
+
+    // 剩余名额按"最近优先"补齐；从后往前取，保证刚完成的步骤不会消失。
+    //
+    // 曾经写成从前往后 `.take(N)`，取到的是**最旧**的 N 条。于是刚完成的步骤
+    // 两头都不在——既掉出"最后 3 条"的优先级窗口，又不属于最旧的 N 条——因而
+    // 在完成的一瞬间从气泡里消失（表现为"闪一下就没了"）。
+    for index in (0..snapshot.entries.len()).rev() {
+        if shown.len() >= budget + priority.len() {
+            break;
+        }
+        if !shown.contains(&index) {
+            shown.push(index);
+        }
+    }
+    shown.sort_unstable();
+    shown
 }
 
 fn selected_entry_indices(entries: &[TelegramCommandProgressEntry]) -> Vec<usize> {
@@ -1391,6 +1874,57 @@ fn single_line(text: &str) -> String {
         .join(" ")
 }
 
+/// 把「思考摘要」折成**一行**并按 `TELEGRAM_REASONING_RENDER_CHARS` 截断。
+///
+/// 不能直接用 `compact_text`：它会保留换行（`lines.join("\n")`），而 Codex 的
+/// reasoning summary 是累积式的多行文本，整段贴上去会把进度气泡撑爆。先折叠
+/// 所有空白成单行，再截断加 `…`。
+///
+/// 还要剥掉内联 markdown 记号：这条文案用 `code`（等宽蓝底）渲染，`code` 是
+/// **字面量**、不做 markdown 解析，不剥的话 `**Check**` 会原样显示成星号。
+pub(crate) fn reasoning_render_line(reasoning: &str) -> String {
+    truncate_text_with_ellipsis(
+        &strip_inline_markdown(&single_line(reasoning)),
+        TELEGRAM_REASONING_RENDER_CHARS,
+    )
+}
+
+/// 去掉内联 markdown 记号，只留可读文字（用于按字面量渲染的场景）。
+fn strip_inline_markdown(text: &str) -> String {
+    let mut output = text.replace("**", "").replace("__", "");
+    output = output.replace('`', "");
+    // 把 `[文字](链接)` 压成 `文字`，避免等宽样式里出现原始 URL。
+    while let Some(start) = output.find('[') {
+        let Some(label_end) = output[start..].find("](") else {
+            break;
+        };
+        let label_end = start + label_end;
+        let Some(url_end) = output[label_end..].find(')') else {
+            break;
+        };
+        let url_end = label_end + url_end;
+        let label = output[start + 1..label_end].to_string();
+        output.replace_range(start..=url_end, &label);
+    }
+    output.trim().to_string()
+}
+
+/// 只从尾部截断并补 `…`，用于"只显示一行"的场景（区别于居中截断的 `truncate_middle`）。
+fn truncate_text_with_ellipsis(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".chars().take(max_chars).collect();
+    }
+    let mut output = text
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    output.push('…');
+    output
+}
+
 fn compact_text(text: &str, max_chars: usize) -> String {
     let normalized = text
         .replace("```", "'''")
@@ -1474,13 +2008,17 @@ mod tests {
         im::core::i18n::ImText,
         im_runtime::{
             TelegramCollabProgressEntry, TelegramCollabProgressSnapshot,
-            TelegramCollabProgressStatus, TelegramCommandProgressEntryKind,
-            TelegramCommandProgressSnapshot, TelegramCommandProgressStatus,
+            TelegramCollabProgressStatus, TelegramCommandProgressEntry,
+            TelegramCommandProgressEntryKind, TelegramCommandProgressSnapshot,
+            TelegramCommandProgressStatus, TelegramCommentaryEntry,
         },
     };
 
+    use super::interleaved_tool_indices;
+
     use super::{
-        TELEGRAM_COMMAND_PROGRESS_MAX_CHARS, TELEGRAM_DIFF_TABLE_PATH_CHARS, completed_entry,
+        TELEGRAM_COMMAND_PROGRESS_MAX_CHARS, TELEGRAM_DIFF_TABLE_PATH_CHARS,
+        TELEGRAM_REASONING_RENDER_CHARS, commentary_entry_blocks, completed_entry,
         diff_file_display_name, diff_summary_from_diff, file_change_diff_summary,
         mcp_completed_entry, mcp_running_entry, parse_plan_update, reasoning_summary_from_item,
         render_command_progress, render_task_progress, rich_command_entry_blocks, running_entry,
@@ -1557,6 +2095,8 @@ mod tests {
                 diff_summary: None,
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: false,
                 failed: false,
@@ -1604,6 +2144,8 @@ mod tests {
                 diff_summary: None,
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: false,
                 failed: false,
@@ -1638,7 +2180,7 @@ mod tests {
     }
 
     #[test]
-    fn rich_progress_shows_three_mcp_steps_and_folds_the_rest() {
+    fn rich_progress_folds_every_mcp_step_into_the_tools_summary() {
         let entries = (0..8)
             .map(|index| {
                 mcp_completed_entry(
@@ -1667,6 +2209,8 @@ mod tests {
                 diff_summary: None,
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: true,
                 failed: false,
@@ -1674,30 +2218,28 @@ mod tests {
             ImText::zh_cn(),
         );
 
-        let visible_commands = rendered
+        let tools = rendered
             .blocks
+            .iter()
+            .find(|block| block["type"] == "details")
+            .expect("tools summary panel");
+        assert_eq!(tools["summary"], "工具摘要（8）");
+        let panel = tools["blocks"].as_array().expect("tools panel blocks");
+        let visible_commands = panel
             .iter()
             .filter(|block| block["type"] == "pre")
             .collect::<Vec<_>>();
-        assert_eq!(visible_commands.len(), 3);
+        assert_eq!(visible_commands.len(), 8);
         assert!(
             visible_commands
                 .iter()
                 .all(|block| block["language"] == "text")
         );
-        let folded = rendered
-            .blocks
-            .iter()
-            .find(|block| block["summary"] == "… 另外 5 个较早步骤")
-            .expect("folded earlier steps");
-        assert_eq!(
-            folded["blocks"]
-                .as_array()
-                .unwrap()
+        assert!(
+            !panel
                 .iter()
-                .filter(|block| block["type"] == "pre")
-                .count(),
-            5
+                .any(|block| block["text"] == "… 另外 5 个较早步骤"),
+            "steps inside the history budget stay available in the folded panel"
         );
 
         let encoded = serde_json::to_string(&rendered.blocks).expect("rich progress");
@@ -1738,6 +2280,8 @@ mod tests {
                 diff_summary: None,
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: false,
                 failed: false,
@@ -1782,6 +2326,8 @@ mod tests {
                 diff_summary: None,
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: true,
                 failed: false,
@@ -1827,6 +2373,8 @@ mod tests {
                 diff_summary: None,
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: true,
                 failed: true,
@@ -1863,6 +2411,8 @@ mod tests {
                 diff_summary: None,
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: true,
                 failed: false,
@@ -1895,6 +2445,8 @@ mod tests {
                 diff_summary: None,
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: true,
                 failed: true,
@@ -1922,6 +2474,8 @@ mod tests {
             diff_summary: None,
             web_searches: Vec::new(),
             dropped_web_searches: 0,
+            commentary: Vec::new(),
+            commentary_dropped_entries: 0,
             collab: None,
             completed: false,
             failed: false,
@@ -1957,6 +2511,8 @@ mod tests {
                 diff_summary: None,
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: false,
                 failed: false,
@@ -2152,6 +2708,8 @@ mod tests {
                 }),
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: true,
                 failed: false,
@@ -2160,12 +2718,512 @@ mod tests {
         );
 
         assert!(rendered.chars().count() <= TELEGRAM_COMMAND_PROGRESS_MAX_CHARS);
-        assert!(rendered.contains("思考摘要"));
+        // 思考摘要已去掉标题，只保留那一行内容。
+        assert!(!rendered.contains("思考摘要"));
+        assert!(rendered.contains("first thought second thought"));
         assert!(rendered.contains("计划 · 1/2"));
         assert!(rendered.contains("文件修改 · 1 个文件 · +2 -1"));
         assert!(rendered.contains("• main.rs"));
         assert!(!rendered.contains("• src/main.rs"));
         assert!(!rendered.contains("```diff"));
+    }
+
+    /// 回归：「思考摘要」必须**只占一行**。
+    ///
+    /// 症状（用户实测）：Codex 的 reasoning summary 是累积式的一大段（带项目符号、
+    /// 多行），卡片顶部把整段铺出来，把「执行完成」气泡撑得很高。
+    ///
+    /// 原因：原先走的是保留换行的 `compact_text(.., 720)`：
+    ///   1. 换行被保留 → 多行原样输出；
+    ///   2. 720 的阈值又高于多数摘要长度 → 连截断都不触发，等于全量显示。
+    ///
+    /// 断言渲染结果里思考摘要**恰好一行**，且超长时以 `…` 结尾。
+    #[test]
+    fn reasoning_summary_renders_as_a_single_truncated_line() {
+        // 复刻真实形态：多行、带项目符号、总长远超单行预算。
+        let reasoning = "The folder is open. Now write the final message.\n\nFinal message:\n- 找到了，已整理到 Downloads\n- 01 英文矢量 SVG\n- 02 英文 960px\n- 03 中文版 logo\nKeep concise. Done.";
+        let snapshot = TelegramCommandProgressSnapshot {
+            turn_id: "turn".to_string(),
+            revision: 1,
+            message_id: None,
+            entries: Vec::new(),
+            dropped_entries: 0,
+            retry_count: 0,
+            retry_error: None,
+            reasoning_summary: Some(reasoning.to_string()),
+            plan_explanation: None,
+            plan: Vec::new(),
+            diff_summary: None,
+            web_searches: Vec::new(),
+            dropped_web_searches: 0,
+            commentary: Vec::new(),
+            commentary_dropped_entries: 0,
+            collab: None,
+            completed: true,
+            failed: false,
+        };
+        let rendered = render_command_progress(&snapshot, ImText::zh_cn());
+
+        // 已去掉「思考摘要」标题：正文行直接以开头文案起始。
+        assert!(!rendered.contains("思考摘要"), "不应再渲染「思考摘要」标题");
+        let line = rendered
+            .lines()
+            .find(|line| line.starts_with("The folder is open"))
+            .expect("应渲染出思考摘要正文行")
+            .to_string();
+
+        // 1) 必须是一行：正文里不能再夹带原始换行/项目符号。
+        assert!(!line.contains('\n'), "思考摘要不应包含换行，实际: {line:?}");
+        // 2) 超长时必须截断并加省略号，且不超过预算。
+        assert!(
+            line.ends_with('…'),
+            "超长思考摘要应以 … 结尾，实际: {line:?}"
+        );
+        assert!(
+            line.chars().count() <= TELEGRAM_REASONING_RENDER_CHARS,
+            "思考摘要超过单行预算: {} > {}",
+            line.chars().count(),
+            TELEGRAM_REASONING_RENDER_CHARS
+        );
+        // 3) 原始的多行内容不得整段出现。
+        assert!(
+            !rendered.contains("Keep concise. Done."),
+            "思考摘要不应把整段累积文本都渲染出来"
+        );
+    }
+
+    /// 回归：最终回复里的 markdown **表格**与**标题**不能露出原文。
+    ///
+    /// 症状（用户实测）：气泡里直接显示
+    /// `|时间|最后那条消息|记录显示|` / `|---|---|---|` 和 `## 结论`。
+    ///
+    /// 原因：内嵌走 `commentary_entry_blocks` 后，它只处理段落/代码/列表/链接，
+    /// 没有表格与标题分支，于是这些行被并进普通段落原样输出。旧路径由 Telegram
+    /// 原生渲染 markdown，所以这是内嵌改造引入的回退。
+    #[test]
+    fn commentary_markdown_renders_tables_and_headings() {
+        let reply = "研究完了——原因找到了。直接说结论：\n## 结论\n四个时间点全部对得上：\n| 时间 | 最后那条消息 | 记录显示 |\n|---|---|---|\n|11:29:38|好，继续找战双|正常完成|\n|11:58:42|好，找《终末地》|同上|\n证据链都来自本机日志。";
+        let blocks = commentary_entry_blocks(reply);
+        let encoded = serde_json::to_string(&serde_json::Value::Array(blocks.clone())).unwrap();
+
+        // 1) 表格必须变成 table 块，而不是带竖线的段落原文。
+        assert!(!encoded.contains("|---|"), "表格分隔行原文泄漏: {encoded}");
+        assert!(!encoded.contains("|11:29:38|"), "表格数据行原文泄漏");
+        let table = blocks
+            .iter()
+            .find(|block| block["type"] == "table")
+            .expect("应渲染出 table 块");
+        let rows = table["cells"].as_array().expect("table cells");
+        assert_eq!(rows.len(), 3, "表头 + 两条数据行: {table}");
+        // 表头单元格要标记 is_header，三列都要有。
+        let header = rows[0].as_array().unwrap();
+        assert_eq!(header.len(), 3);
+        assert!(
+            header.iter().all(|cell| cell["is_header"] == true),
+            "表头单元格应标记 is_header"
+        );
+        // 2) `## 结论` 必须变成 heading 块，记号被剥掉。
+        assert!(!encoded.contains("## 结论"), "标题记号未剥离");
+        let heading = blocks
+            .iter()
+            .find(|block| block["type"] == "heading")
+            .expect("应渲染出 heading 块");
+        assert_eq!(heading["text"], "结论");
+        // 3) 正文标题必须比卡片大标题（size 3）**小**，否则喧宾夺主。
+        assert!(
+            heading["size"].as_u64().unwrap_or(0) > 3,
+            "正文标题应小于卡片标题: {heading}"
+        );
+    }
+
+    /// 表格对齐要尊重分隔行的 `:` 标记；列数不齐的数据行不能把表打乱。
+    #[test]
+    fn markdown_table_honors_alignment_and_ragged_rows() {
+        let blocks = commentary_entry_blocks(
+            "| 左 | 中 | 右 |\n|:---|---:|:---:|\n| a | b | c |\n| 只有一列 |",
+        );
+        let table = blocks
+            .iter()
+            .find(|block| block["type"] == "table")
+            .expect("table");
+        let rows = table["cells"].as_array().unwrap();
+        let header = rows[0].as_array().unwrap();
+        assert_eq!(header[0]["align"], "left");
+        assert_eq!(header[1]["align"], "right");
+        assert_eq!(header[2]["align"], "center");
+        // 列数不足的数据行补空单元格，保持列数一致。
+        let ragged = rows[2].as_array().unwrap();
+        assert_eq!(ragged.len(), 3, "缺列应补空: {ragged:?}");
+        assert_eq!(ragged[0]["text"], "只有一列");
+        assert_eq!(ragged[1]["text"], "");
+    }
+
+    /// 不是表格的普通竖线文本不能被误判成表格。
+    #[test]
+    fn non_table_pipe_text_stays_a_paragraph() {
+        let blocks = commentary_entry_blocks("管道符 | 不是表格\n第二行");
+        assert!(
+            blocks.iter().all(|block| block["type"] != "table"),
+            "不应误判为表格: {blocks:?}"
+        );
+        assert!(
+            blocks.iter().any(|block| block["type"] == "paragraph"),
+            "应保持段落"
+        );
+    }
+
+    /// `#1` 这类没有空格分隔的文本不能当成标题吃掉。
+    #[test]
+    fn hash_without_space_is_not_a_heading() {
+        let blocks = commentary_entry_blocks("#1 号方案 与 #2 号方案");
+        assert!(
+            blocks.iter().all(|block| block["type"] != "heading"),
+            "`#1` 不应被当作标题: {blocks:?}"
+        );
+        assert!(blocks.iter().any(|block| block["type"] == "paragraph"));
+    }
+
+    /// 回归：最终回复的 markdown 不能以"原文"形式露出。
+    ///
+    /// 症状（用户实测）：气泡里直接显示 `[Logo 合集/战双 logo](/Users/...)`，
+    /// 以及成排的 `- xxx` 列表原文。
+    ///
+    /// 原因：最终回复内嵌进 blocks 后，走的是 `commentary_entry_blocks`，而它当时
+    /// ① 只把 http(s) 链接转成 url（本地路径原样输出）② 完全不处理 `- ` 列表。
+    /// 旧路径用的是 `TelegramInputRichMessage::markdown(..)`，由 Telegram 原生渲染，
+    /// 所以这是内嵌改造引入的回退。
+    #[test]
+    fn commentary_markdown_does_not_leak_raw_syntax() {
+        let reply = "找到了，已整理到 [Logo 合集/战双 logo](/Users/miaopasi/Downloads/Logo 合集/战双 logo)（Finder 已打开）。\n核心的几张：\n- [01 游戏 LOGO](/Users/miaopasi/a.png) —— 早期 LOGO\n- [02 Steam 头图](/Users/miaopasi/b.jpg)\n_更多_ 里还有一张维基版图标。来源都写在 [README.md](https://example.com/r.md) 里。";
+        let blocks = commentary_entry_blocks(reply);
+        let encoded = serde_json::to_string(&serde_json::Value::Array(blocks.clone())).unwrap();
+
+        // 1) 本地路径链接不能以 `[文字](/Users/...)` 原文出现。
+        assert!(
+            !encoded.contains("](/Users/"),
+            "本地路径链接原文泄漏: {encoded}"
+        );
+        // 2) 链接文字要保留为可读文本。
+        assert!(encoded.contains("Logo 合集/战双 logo"), "链接文字应保留");
+        assert!(encoded.contains("01 游戏 LOGO"), "列表项链接文字应保留");
+        // 3) `- ` 列表要变成 list 块，而不是带 `-` 的普通段落。
+        let list = blocks
+            .iter()
+            .find(|block| block["type"] == "list")
+            .expect("`- ` 列表应渲染为 list 块");
+        assert_eq!(
+            list["items"].as_array().map(Vec::len),
+            Some(2),
+            "两条列表项应合入同一个 list: {list}"
+        );
+        // 4) 斜体 `_更多_` 的记号要剥掉。
+        assert!(!encoded.contains("_更多_"), "斜体记号未剥离: {encoded}");
+        assert!(encoded.contains("更多"), "斜体文字应保留");
+        // 5) http 链接仍要转成可点 url。
+        assert!(encoded.contains("https://example.com/r.md"));
+        assert!(encoded.contains(r#""type":"url""#));
+    }
+
+    /// 回归：思考摘要必须用 `code`（等宽蓝底）渲染，且剥掉内联 markdown 记号。
+    ///
+    /// 需求：让它和底部 `turn <id>` 一样显示成蓝色。`code` 是**字面量**渲染、
+    /// 不解析 markdown，所以 `**Check**` 必须被剥成 `Check`，否则界面上会出现星号。
+    #[test]
+    fn reasoning_summary_renders_as_blue_code_without_markdown_markers() {
+        let snapshot = TelegramCommandProgressSnapshot {
+            turn_id: "turn".to_string(),
+            revision: 1,
+            message_id: None,
+            entries: Vec::new(),
+            dropped_entries: 0,
+            retry_count: 0,
+            retry_error: None,
+            reasoning_summary: Some(
+                "**Check** the `Telegram` [state](https://telegram.org)".to_string(),
+            ),
+            plan_explanation: None,
+            plan: Vec::new(),
+            diff_summary: None,
+            web_searches: Vec::new(),
+            dropped_web_searches: 0,
+            commentary: Vec::new(),
+            commentary_dropped_entries: 0,
+            collab: None,
+            completed: false,
+            failed: false,
+        };
+        let rendered = render_command_progress(&snapshot, ImText::zh_cn());
+        let blocks =
+            serde_json::Value::Array(render_task_progress(&snapshot, ImText::zh_cn()).blocks);
+        let encoded = serde_json::to_string(&blocks).expect("serialize");
+
+        // 必须有一个 code 类型的段落，内容已剥掉 markdown 记号。
+        let code_block = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|block| block["type"] == "paragraph" && block["text"]["type"] == "code")
+            .expect("思考摘要应渲染为 code 块（蓝色）");
+        let code_text = code_block["text"]["text"].as_str().unwrap();
+        assert!(
+            code_text.contains("Check") && code_text.contains("Telegram"),
+            "应保留可读文字，实际: {code_text:?}"
+        );
+        assert!(!code_text.contains("**"), "不应残留 ** 记号: {code_text:?}");
+        assert!(!code_text.contains('`'), "不应残留反引号: {code_text:?}");
+        assert!(
+            !code_text.contains("https://"),
+            "链接应压成文字，实际: {code_text:?}"
+        );
+        assert!(!encoded.contains("**Check**"));
+        assert!(rendered.contains("Check"));
+    }
+
+    /// 短思考摘要不截断、不加省略号。
+    #[test]
+    fn short_reasoning_summary_is_not_ellipsized() {
+        let snapshot = TelegramCommandProgressSnapshot {
+            turn_id: "turn".to_string(),
+            revision: 1,
+            message_id: None,
+            entries: Vec::new(),
+            dropped_entries: 0,
+            retry_count: 0,
+            retry_error: None,
+            reasoning_summary: Some("checking the build output".to_string()),
+            plan_explanation: None,
+            plan: Vec::new(),
+            diff_summary: None,
+            web_searches: Vec::new(),
+            dropped_web_searches: 0,
+            commentary: Vec::new(),
+            commentary_dropped_entries: 0,
+            collab: None,
+            completed: true,
+            failed: false,
+        };
+        let rendered = render_command_progress(&snapshot, ImText::zh_cn());
+        assert!(rendered.contains("checking the build output"));
+        assert!(!rendered.contains("checking the build output…"));
+    }
+
+    /// 思考文案与工具步骤必须按到达序号交错：文案可见、工具折叠、顺序与发生顺序一致。
+    /// 回归：展示窗口必须是**连续的最新一段**，否则刚完成的步骤会"闪一下就消失"。
+    ///
+    /// 曾经从前往后 `.take(N)` 取填充窗口，拿到的是**最旧**的 N 条。步骤一完成就
+    /// 掉出"最后 3 条"的优先级窗口，又不在最旧的 N 条里，于是从气泡中消失。
+    ///
+    /// 只断言"最新一条可见"抓不到这个 bug（它始终在优先级窗口里）；正确的特征是
+    /// **窗口必须是从最新一条往回的连续区间，中间没有空洞**。
+    /// 回归：工具数超过名额上限时，思考**不能**全被挤到一起。
+    ///
+    /// 症状（用户实测）：任务前面显示正常，步数涨上去后"思考过程和工具摘要
+    /// 突然全部合并"。
+    ///
+    /// 原因：名额原先只按"最近的 N 条"分配，全堆在时间轴末端。总量一超过名额，
+    /// 中段工具被整体挤出，思考之间失去间隔，于是各自并成一大批。
+    ///
+    /// 修法：为每条思考锚定它前后紧邻的工具，剩余名额再按最近补齐。
+    #[test]
+    fn thinking_stays_interleaved_when_tool_count_exceeds_the_budget() {
+        // 三条思考分布在工具流的前段，之后是大量工具——正是长任务的实际形态。
+        for tool_count in [30usize, 44, 60, 100] {
+            let commentary_sequences = [0u64, 8, 16];
+            let mut entries = Vec::new();
+            let mut sequence = 1u64;
+            for _ in 0..tool_count {
+                while commentary_sequences.contains(&sequence) {
+                    sequence += 1;
+                }
+                let mut entry = completed_entry(
+                    &format!("cmd-{sequence}"),
+                    &json!({"command": "cargo test"}),
+                );
+                entry.sequence = sequence;
+                entries.push(entry);
+                sequence += 1;
+            }
+
+            let snapshot = TelegramCommandProgressSnapshot {
+                turn_id: "turn".to_string(),
+                revision: 1,
+                message_id: None,
+                entries,
+                dropped_entries: 0,
+                retry_count: 0,
+                retry_error: None,
+                reasoning_summary: None,
+                plan_explanation: None,
+                plan: Vec::new(),
+                diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
+                commentary: commentary_sequences
+                    .iter()
+                    .map(|sequence| TelegramCommentaryEntry {
+                        item_id: format!("think-{sequence}"),
+                        text: "思考".to_string(),
+                        sequence: *sequence,
+                    })
+                    .collect(),
+                commentary_dropped_entries: 0,
+                collab: None,
+                completed: false,
+                failed: false,
+            };
+
+            let shown = interleaved_tool_indices(&snapshot);
+
+            // 组装排序后的条目序列（思考 + 命中的工具），断言**没有两条思考相邻**。
+            //
+            // 这正是"思考过程全部合并"的直接特征：相邻同类会被合并成一个批次。
+            let mut items: Vec<(u64, bool)> = snapshot
+                .commentary
+                .iter()
+                .map(|entry| (entry.sequence, true))
+                .chain(
+                    shown
+                        .iter()
+                        .map(|index| (snapshot.entries[*index].sequence, false)),
+                )
+                .collect();
+            items.sort_unstable();
+
+            for window in items.windows(2) {
+                assert!(
+                    !(window[0].1 && window[1].1),
+                    "共 {tool_count} 个工具时，思考 {:?} 与 {:?} 相邻，\
+                     会被合并成一批：{items:?}",
+                    window[0].0,
+                    window[1].0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recent_tool_window_is_contiguous_so_completed_steps_do_not_vanish() {
+        for count in [4usize, 13, 16, 20, 40] {
+            let entries: Vec<TelegramCommandProgressEntry> = (0..count)
+                .map(|index| {
+                    let mut entry =
+                        completed_entry(&format!("cmd-{index}"), &json!({"command": "cargo test"}));
+                    entry.sequence = index as u64;
+                    entry
+                })
+                .collect();
+
+            let snapshot = TelegramCommandProgressSnapshot {
+                turn_id: "turn".to_string(),
+                revision: 1,
+                message_id: None,
+                entries,
+                dropped_entries: 0,
+                retry_count: 0,
+                retry_error: None,
+                reasoning_summary: None,
+                plan_explanation: None,
+                plan: Vec::new(),
+                diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
+                collab: None,
+                completed: false,
+                failed: false,
+            };
+
+            let shown = interleaved_tool_indices(&snapshot);
+            let max_index = snapshot.entries.len() - 1;
+            // 期望：从最新一条往回、长度为 shown.len() 的连续区间。
+            // 旧实现取"最旧 N 条"，会在中段留下空洞（例如 16 条时缺下标 12），
+            // 这正是"闪一下就消失"的表现。
+            let expected: Vec<usize> =
+                ((max_index + 1).saturating_sub(shown.len())..=max_index).collect();
+            assert_eq!(
+                shown, expected,
+                "共 {count} 条时展示窗口不是连续的最新区间（中间有空洞）"
+            );
+        }
+    }
+
+    #[test]
+    fn render_task_progress_interleaves_commentary_and_tool_batches() {
+        let mut tool_a = completed_entry("tool-a", &json!({"command": "cargo test"}));
+        tool_a.sequence = 1;
+        let mut tool_b = completed_entry("tool-b", &json!({"command": "cargo build"}));
+        tool_b.sequence = 3;
+
+        let rendered = render_task_progress(
+            &TelegramCommandProgressSnapshot {
+                turn_id: "turn-interleave".to_string(),
+                revision: 1,
+                message_id: None,
+                entries: vec![tool_a, tool_b],
+                dropped_entries: 0,
+                retry_count: 0,
+                retry_error: None,
+                reasoning_summary: None,
+                plan_explanation: None,
+                plan: Vec::new(),
+                diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
+                commentary: vec![
+                    TelegramCommentaryEntry {
+                        item_id: "c1".to_string(),
+                        text: "先看事件流".to_string(),
+                        sequence: 0,
+                    },
+                    TelegramCommentaryEntry {
+                        item_id: "c2".to_string(),
+                        text: "再看渲染".to_string(),
+                        sequence: 2,
+                    },
+                ],
+                commentary_dropped_entries: 0,
+                collab: None,
+                completed: false,
+                failed: false,
+            },
+            ImText::zh_cn(),
+        );
+
+        // 顶层块序列：思考批次与工具批次交替出现。
+        let summaries: Vec<String> = rendered
+            .blocks
+            .iter()
+            .filter(|block| block["type"] == "details")
+            .map(|block| {
+                format!(
+                    "{}|open={}",
+                    block["summary"].as_str().unwrap_or(""),
+                    block["is_open"].as_bool().unwrap_or(false)
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            summaries,
+            vec![
+                // 思考默认展开（is_open=true），工具默认折叠。
+                "思考过程（1）|open=true",
+                "工具摘要（1）|open=false",
+                "思考过程（1）|open=true",
+                "工具摘要（1）|open=false",
+            ],
+            "思考与工具应按到达序号交错，且思考展开、工具折叠"
+        );
+
+        // 文案内容确实在「思考过程」块里，而不是被折叠丢弃。
+        let first_thinking = rendered
+            .blocks
+            .iter()
+            .find(|block| block["type"] == "details" && block["summary"] == "思考过程（1）")
+            .expect("思考过程块");
+        let encoded = first_thinking.to_string();
+        assert!(encoded.contains("先看事件流"), "思考块应含文案：{encoded}");
     }
 
     #[test]
@@ -2220,6 +3278,8 @@ mod tests {
                 }),
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: Some(TelegramCollabProgressSnapshot {
                     entries: vec![TelegramCollabProgressEntry {
                         agent_id: "secret-agent-id".to_string(),
@@ -2246,20 +3306,27 @@ mod tests {
             blocks[blocks.as_array().unwrap().len() - 1]["type"],
             "footer"
         );
-        let first_divider = blocks
+        let tools_index = blocks
             .as_array()
             .unwrap()
             .iter()
-            .position(|block| block["type"] == "divider")
-            .expect("plan and execution should have a divider");
-        assert_eq!(blocks[first_divider + 1]["type"], "paragraph");
-        assert_eq!(blocks[first_divider + 1]["text"]["type"], "bold");
-        assert_eq!(
-            blocks[first_divider + 1]["text"]["text"],
-            "执行中 · 4 步 · 1 个进行中"
+            // 标题显示的是**该批次**的步骤数（与图中 `工具摘要（1）` 的口径一致），
+            // 历史省略数由面板内的"...另外 N 个较早步骤"提示。
+            .position(|block| block["type"] == "details" && block["summary"] == "工具摘要（2）")
+            .expect("tools should be folded into one summary panel");
+        let panel = blocks[tools_index]["blocks"]
+            .as_array()
+            .expect("tools panel blocks");
+        assert_eq!(panel[0]["type"], "paragraph");
+        assert_eq!(panel[0]["text"]["type"], "bold");
+        assert_eq!(panel[0]["text"]["text"], "执行中 · 4 步 · 1 个进行中");
+        assert_eq!(panel[1]["type"], "pre");
+        assert_eq!(panel[1]["language"], "shell");
+        assert!(
+            panel
+                .iter()
+                .any(|block| block["text"] == "… 另外 2 个较早步骤")
         );
-        assert_eq!(blocks[first_divider + 2]["type"], "pre");
-        assert_eq!(blocks[first_divider + 2]["language"], "shell");
         assert_eq!(
             blocks
                 .as_array()
@@ -2267,8 +3334,8 @@ mod tests {
                 .iter()
                 .filter(|block| block["type"] == "divider")
                 .count(),
-            1,
-            "only the plan-to-execution divider should remain"
+            0,
+            "the folded tools summary replaces the plan-to-execution divider"
         );
         assert!(encoded.contains("details"));
         assert!(encoded.contains("browser.screenshot"));
@@ -2285,22 +3352,22 @@ mod tests {
         assert!(!encoded.contains("secret-agent-id"));
         assert_eq!(encoded.matches("\"has_checkbox\":true").count(), 3);
         assert_eq!(encoded.matches("\"is_checked\":true").count(), 1);
-        let reasoning_heading = blocks
+        // 思考摘要已去掉标题，并改为 `code`（等宽蓝底，与底部 `turn <id>` 一致）。
+        assert!(!encoded.contains("思考摘要"), "不应再渲染「思考摘要」标题");
+        let reasoning_body = blocks
             .as_array()
             .unwrap()
             .iter()
-            .position(|block| {
+            .find(|block| {
                 block["type"] == "paragraph"
-                    && block["text"]["type"] == "bold"
-                    && block["text"]["text"] == "思考摘要"
+                    && block["text"]["type"] == "code"
+                    && block["text"]["text"]
+                        .as_str()
+                        .is_some_and(|t| t.contains("Check"))
             })
-            .expect("reasoning heading should be always visible");
-        let reasoning_body = &blocks[reasoning_heading + 1];
+            .expect("reasoning body should be always visible");
         assert_eq!(reasoning_body["type"], "paragraph");
-        assert_eq!(reasoning_body["text"][0]["type"], "bold");
-        assert_eq!(reasoning_body["text"][0]["text"], "Check");
-        assert_eq!(reasoning_body["text"][2]["type"], "code");
-        assert_eq!(reasoning_body["text"][4]["type"], "url");
+        assert_eq!(reasoning_body["text"]["type"], "code");
         assert!(
             !blocks
                 .as_array()
@@ -2327,10 +3394,11 @@ mod tests {
             .fallback_markdown
             .find("执行中 · 4 步 · 1 个进行中")
             .expect("fallback execution heading");
+        // 思考摘要已去掉标题，用正文内容定位它在 fallback 中的位置。
         let fallback_reasoning = rendered
             .fallback_markdown
-            .find("思考摘要")
-            .expect("fallback reasoning heading");
+            .find("Check")
+            .expect("fallback reasoning body");
         let fallback_diff = rendered
             .fallback_markdown
             .find("文件修改 · 1 个文件 · +12 -3")
@@ -2377,6 +3445,8 @@ mod tests {
                 diff_summary: None,
                 web_searches,
                 dropped_web_searches: 2,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: false,
                 failed: false,
@@ -2457,6 +3527,8 @@ mod tests {
                 }),
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: true,
                 failed: false,
@@ -2523,6 +3595,8 @@ mod tests {
                 diff_summary: None,
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: true,
                 failed: true,
@@ -2530,8 +3604,13 @@ mod tests {
             ImText::zh_cn(),
         );
 
-        let error_details = rendered
+        let tools = rendered
             .blocks
+            .iter()
+            .find(|block| block["type"] == "details" && block["summary"] == "工具摘要（1）")
+            .expect("tools summary panel");
+        let panel = tools["blocks"].as_array().expect("tools panel blocks");
+        let error_details = panel
             .iter()
             .find(|block| block["type"] == "details" && block["blocks"][0]["type"] == "pre")
             .expect("failure details");
@@ -2547,22 +3626,21 @@ mod tests {
         );
         assert_eq!(error_details["blocks"][0]["text"], "boom");
 
-        let command_block_index = rendered
-            .blocks
+        let command_block_index = panel
             .iter()
             .position(|block| block["type"] == "pre" && block["language"] == "shell")
             .expect("command block");
         assert_eq!(
-            rendered.blocks[command_block_index],
+            panel[command_block_index],
             json!({
                 "type": "pre",
                 "text": "prefix-xxxxxxxxxxxxxxxxxxx...xxxxxxxxxxxxxxxxxxxx-suffix",
                 "language": "shell",
             })
         );
-        assert_eq!(rendered.blocks[command_block_index + 1]["type"], "footer");
+        assert_eq!(panel[command_block_index + 1]["type"], "footer");
         assert_eq!(
-            rendered.blocks[command_block_index + 1]["text"],
+            panel[command_block_index + 1]["text"],
             json!([
                 {"type": "bold", "text": "失败"},
                 " · exit 1",
@@ -2572,7 +3650,7 @@ mod tests {
     }
 
     #[test]
-    fn rich_progress_without_plan_keeps_execution_as_the_top_level_section() {
+    fn rich_progress_without_plan_folds_the_only_step_into_the_tools_summary() {
         let rendered = render_task_progress(
             &TelegramCommandProgressSnapshot {
                 turn_id: "turn".to_string(),
@@ -2588,6 +3666,8 @@ mod tests {
                 diff_summary: None,
                 web_searches: Vec::new(),
                 dropped_web_searches: 0,
+                commentary: Vec::new(),
+                commentary_dropped_entries: 0,
                 collab: None,
                 completed: false,
                 failed: false,
@@ -2598,8 +3678,12 @@ mod tests {
         let blocks = serde_json::Value::Array(rendered.blocks);
         assert_eq!(blocks[0]["type"], "heading");
         assert_eq!(blocks[0]["text"], "执行中 · 1 步 · 1 个进行中");
-        assert_eq!(blocks[1]["type"], "pre");
-        assert_eq!(blocks[1]["language"], "shell");
+        assert_eq!(blocks[1]["type"], "details");
+        assert_eq!(blocks[1]["summary"], "工具摘要（1）");
+        let panel = blocks[1]["blocks"].as_array().expect("tools panel blocks");
+        assert_eq!(panel[0]["type"], "pre");
+        assert_eq!(panel[0]["language"], "shell");
+        assert_eq!(panel[1]["type"], "footer");
         assert_eq!(
             blocks
                 .as_array()
@@ -2614,6 +3698,149 @@ mod tests {
             rendered
                 .fallback_markdown
                 .starts_with("🔄 执行中 · 1 步 · 1 个进行中\n──────────────")
+        );
+    }
+
+    #[test]
+    fn commentary_is_visible_and_tools_are_folded() {
+        let rendered = render_task_progress(
+            &TelegramCommandProgressSnapshot {
+                turn_id: "turn".to_string(),
+                revision: 3,
+                message_id: None,
+                entries: vec![{
+                    // 真实系统里 upsert 会分配递增序号；这里给工具序号 2，
+                    // 表示两条思考之后才发生（避免与文案的序号冲突）。
+                    let mut entry =
+                        completed_entry("cmd", &json!({"command": "cargo test", "exitCode": 0}));
+                    entry.sequence = 2;
+                    entry
+                }],
+                dropped_entries: 0,
+                retry_count: 0,
+                retry_error: None,
+                reasoning_summary: None,
+                plan_explanation: None,
+                plan: Vec::new(),
+                diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
+                commentary: vec![
+                    TelegramCommentaryEntry {
+                        item_id: "commentary-1".to_string(),
+                        text: "先看 `src/im/events.rs`".to_string(),
+                        sequence: 0,
+                    },
+                    TelegramCommentaryEntry {
+                        item_id: "commentary-2".to_string(),
+                        text: "跑测试：\n```shell\ncargo test\n```".to_string(),
+                        sequence: 1,
+                    },
+                ],
+                commentary_dropped_entries: 2,
+                collab: None,
+                completed: false,
+                failed: false,
+            },
+            ImText::zh_cn(),
+        );
+
+        let blocks = serde_json::Value::Array(rendered.blocks.clone());
+        let array = blocks.as_array().expect("rich blocks");
+
+        // 思考过程：可折叠但默认展开（is_open = true），内容直接可见。
+        // 两条连续的思考文案合并成一张卡片（中间没有工具插入）。
+        let thinking = array
+            .iter()
+            .find(|block| block["type"] == "details" && block["summary"] == "思考过程（2）")
+            .expect("thinking card");
+        assert!(
+            thinking["is_open"].as_bool().unwrap_or(false),
+            "思考过程必须默认展开，否则用户读不到内容"
+        );
+        let thinking_encoded = thinking.to_string();
+        assert!(thinking_encoded.contains("先看"), "{thinking_encoded}");
+        assert!(thinking_encoded.contains("跑测试"), "{thinking_encoded}");
+        // 代码围栏保留在思考块内（不被折叠丢弃）。
+        assert!(
+            thinking["blocks"]
+                .as_array()
+                .expect("thinking panel")
+                .iter()
+                .any(|block| block["type"] == "pre" && block["language"] == "shell"),
+            "思考块内应保留代码围栏"
+        );
+
+        // 工具摘要：默认折叠。
+        let tools = array
+            .iter()
+            .find(|block| block["type"] == "details" && block["summary"] == "工具摘要（1）")
+            .expect("tools summary panel");
+        // rich_blocks::details 在折叠（false）时不写 is_open 字段，缺省即折叠。
+        assert!(
+            !tools["is_open"].as_bool().unwrap_or(false),
+            "工具摘要必须默认折叠"
+        );
+
+        // 省略提示仍然出现（2 条较早进展被丢弃），且位于思考卡片之前。
+        let omitted_block = array
+            .iter()
+            .position(|block| block["text"] == "… 另外 2 条较早进展已省略")
+            .expect("省略提示");
+        let thinking_index = array
+            .iter()
+            .position(|block| block["type"] == "details" && block["summary"] == "思考过程（2）")
+            .expect("thinking");
+        assert!(omitted_block < thinking_index, "省略提示应在思考卡片之前");
+        let tools_index = array
+            .iter()
+            .position(|block| block["type"] == "details" && block["summary"] == "工具摘要（1）")
+            .expect("tools");
+        assert!(thinking_index < tools_index);
+    }
+
+    #[test]
+    fn commentary_and_tools_stay_within_the_fallback_budget() {
+        let rendered = render_task_progress(
+            &TelegramCommandProgressSnapshot {
+                turn_id: "turn".to_string(),
+                revision: 5,
+                message_id: None,
+                entries: vec![completed_entry(
+                    "cmd",
+                    &json!({"command": "cargo test", "exitCode": 0}),
+                )],
+                dropped_entries: 0,
+                retry_count: 0,
+                retry_error: None,
+                reasoning_summary: None,
+                plan_explanation: None,
+                plan: Vec::new(),
+                diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
+                commentary: (0..4)
+                    .map(|index| TelegramCommentaryEntry {
+                        item_id: format!("commentary-{index}"),
+                        text: "x".repeat(1_500),
+                        sequence: 0,
+                    })
+                    .collect(),
+                commentary_dropped_entries: 0,
+                collab: None,
+                completed: false,
+                failed: false,
+            },
+            ImText::zh_cn(),
+        );
+
+        assert!(
+            rendered.fallback_markdown.chars().count()
+                <= super::TELEGRAM_TASK_PROGRESS_FALLBACK_MAX_CHARS
+        );
+        assert!(
+            rendered.fallback_markdown.contains("cargo test"),
+            "the tools fallback must survive the commentary truncation"
         );
     }
 

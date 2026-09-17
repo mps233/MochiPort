@@ -41,13 +41,43 @@ pub(crate) fn inline_markdown(value: &str) -> Value {
         {
             let label = &after_label[..label_end];
             let target = &after_label[label_end + 2..label_end + 2 + url_end];
-            if !label.is_empty()
-                && (target.starts_with("https://") || target.starts_with("http://"))
-            {
+            if !label.is_empty() {
                 push_plain(&mut parts, &mut plain);
-                parts.push(url(text(label), target));
+                if target.starts_with("https://") || target.starts_with("http://") {
+                    parts.push(url(text(label), target));
+                } else {
+                    // 非 http(s) 目标（典型是 `/Users/...` 本地路径）无法变成可点的
+                    // 链接。此时**只保留链接文字**，不要把 `[文字](路径)` 原文漏出去——
+                    // 那正是用户看到的"markdown 原文格式"。
+                    parts.push(text(label));
+                }
                 rest = &after_label[label_end + 2 + url_end + 1..];
                 continue;
+            }
+        }
+        // 斜体 `_文字_` / `*文字*`：协议没有斜体块，剥掉记号保留文字即可。
+        // 只在成对且外侧是词边界时处理，避免破坏 `01_游戏_LOGO.png` 这类文件名。
+        if (rest.starts_with('_') || rest.starts_with('*')) && !rest.starts_with("**") {
+            let marker = rest.chars().next().expect("marker");
+            if let Some(end) = rest[1..].find(marker) {
+                let inner = &rest[1..1 + end];
+                let after = &rest[1 + end + 1..];
+                let boundary_before = plain.is_empty() || plain.ends_with(char::is_whitespace);
+                let boundary_after = after.is_empty()
+                    || after.starts_with(char::is_whitespace)
+                    || after.starts_with([',', '.', '。', '，', '；', ';', ':', '：', ')', '（']);
+                if boundary_before
+                    && boundary_after
+                    && !inner.is_empty()
+                    && !inner.contains(marker)
+                    && !inner.starts_with(char::is_whitespace)
+                    && !inner.ends_with(char::is_whitespace)
+                {
+                    push_plain(&mut parts, &mut plain);
+                    parts.push(text(inner));
+                    rest = after;
+                    continue;
+                }
             }
         }
 
@@ -124,10 +154,6 @@ pub(crate) fn footer(value: Value) -> Value {
         "type": "footer",
         "text": value,
     })
-}
-
-pub(crate) fn divider() -> Value {
-    json!({ "type": "divider" })
 }
 
 pub(crate) fn details(summary: Value, blocks: Vec<Value>, is_open: bool) -> Value {
@@ -290,6 +316,37 @@ mod tests {
     #[test]
     fn keeps_unmatched_inline_markdown_as_plain_text() {
         assert_eq!(inline_markdown("**unfinished"), text("**unfinished"));
+    }
+
+    /// 斜体剥离不能误伤文件名里的下划线。
+    ///
+    /// `01_游戏_LOGO_2019版_250px.png` 这类素材名在同一段文案里很常见；若把
+    /// 成对下划线一律当斜体，文件名会被吃掉或变形。
+    #[test]
+    fn italic_stripping_does_not_mangle_snake_case_filenames() {
+        assert_eq!(
+            inline_markdown("素材 01_游戏_LOGO_2019版_250px.png 已下载"),
+            text("素材 01_游戏_LOGO_2019版_250px.png 已下载")
+        );
+        // 真正的斜体仍要被剥掉。
+        assert_eq!(
+            inline_markdown("_更多_ 里还有"),
+            json!([text("更多"), " 里还有"])
+        );
+    }
+
+    /// 非 http(s) 链接只保留文字，不泄漏 `[文字](路径)` 原文。
+    #[test]
+    fn local_path_links_keep_only_the_label() {
+        assert_eq!(
+            inline_markdown("[战双 logo](/Users/miaopasi/a.png) 已整理"),
+            json!([text("战双 logo"), " 已整理"])
+        );
+        // http(s) 仍转成可点链接（只有一段时会折叠成裸对象，不包数组）。
+        assert_eq!(
+            inline_markdown("[README](https://example.com/r.md)"),
+            json!({"type": "url", "text": "README", "url": "https://example.com/r.md"})
+        );
     }
 
     #[test]
