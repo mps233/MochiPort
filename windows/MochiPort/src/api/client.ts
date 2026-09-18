@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { isUsageSummaryResponse } from "./generated/manageContracts";
 import type {
   Gateway,
   GatewayProvider,
@@ -328,6 +329,12 @@ export const api = {
       : { kind: "versioned", health };
   },
   dashboard: () => request("api/v1/manage/dashboard", isDashboard),
+  /// Local Codex usage parsed by the daemon; this client only displays it.
+  usageSummary: (days?: number) =>
+    request(
+      `api/v1/manage/usage/summary${days === undefined ? "" : `?days=${days}`}`,
+      isUsageSummaryResponse,
+    ),
   lifecycle: () => request("api/v1/manage/lifecycle", isLifecycle),
   codexStatus: () => request("api/v1/manage/codex/status", isCodexStatus),
   codexModelCatalog: async () => {

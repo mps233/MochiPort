@@ -6,6 +6,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures_util::stream::{self, StreamExt};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -85,7 +86,7 @@ pub(super) async fn stop_bridge(State(state): State<SharedState>) -> impl IntoRe
     )
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SetImChannelEnabledRequest {
     channel: String,
@@ -183,7 +184,7 @@ pub(super) async fn set_im_channel_enabled(
     )
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ImAccountItem {
     platform: String,
@@ -202,40 +203,40 @@ pub(super) struct ImAccountItem {
     reply_granularity: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ImAccountsResponse {
     accounts: Vec<ImAccountItem>,
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ManageImAccountsResponse {
     service: crate::web::manage::ManageStatusResponse,
     accounts: Vec<ImAccountItem>,
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TelegramProjectGroupAccount {
     account_id: String,
     project_groups: Vec<TelegramProjectGroupConfig>,
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TelegramProjectGroupsResponse {
     accounts: Vec<TelegramProjectGroupAccount>,
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdateTelegramProjectGroupsRequest {
     account_id: String,
     project_groups: Vec<TelegramProjectGroupConfig>,
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SyncTelegramTopicsRequest {
     account_id: String,
@@ -366,7 +367,7 @@ pub(super) async fn update_telegram_project_groups(
     )
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SetTelegramReplyGranularityRequest {
     account_id: String,
@@ -458,7 +459,7 @@ pub(super) async fn telegram_pairing_code(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct RotateTelegramPairingCodeRequest {
     account_id: String,
@@ -1457,7 +1458,7 @@ pub(super) async fn im_accounts_snapshot(state: &SharedState) -> ImAccountsRespo
 /// Do not reword without updating the Swift client and its tests.
 pub(super) const IM_ACCOUNT_NOT_FOUND_ERROR: &str = "IM account not found";
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SetImAccountEnabledRequest {
     platform: String,
@@ -1526,7 +1527,7 @@ pub(super) async fn set_im_account_enabled(
     )
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct DeleteImAccountRequest {
     platform: String,
@@ -2144,7 +2145,7 @@ fn im_platform_from_key(platform: &str) -> Option<ImPlatformKind> {
     ImPlatformKind::from_key(platform)
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct FeishuBotStatus {
     configured: bool,
@@ -2209,7 +2210,7 @@ pub(super) async fn feishu_bot_status(State(state): State<SharedState>) -> Json<
     })
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TelegramBotStatus {
     configured: bool,
@@ -2313,7 +2314,7 @@ fn telegram_user_display_name(user: &crate::im::telegram::api::TelegramUser) -> 
     }
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ConfigureTelegramBotRequest {
     bot_token: Option<String>,
@@ -2473,7 +2474,7 @@ pub(super) fn is_masked_secret(value: &str) -> bool {
     !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '*')
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct WechatBotStatus {
     configured: bool,
@@ -2524,7 +2525,7 @@ pub(super) async fn wechat_bot_status(State(state): State<SharedState>) -> Json<
     })
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct WecomBotStatus {
     configured: bool,

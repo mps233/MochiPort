@@ -4,6 +4,7 @@
 //! legacy routes remain untouched during the SwiftUI migration; new clients
 //! use the versioned routes defined in `web.rs`.
 
+use schemars::JsonSchema;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -53,7 +54,7 @@ const CREDENTIAL_ROTATION_REASON_LEAK: &str = "leakRecovery";
 
 static EXECUTABLE_IDENTITY: OnceLock<Result<ExecutableIdentity, String>> = OnceLock::new();
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(JsonSchema, Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthResponse {
     pub service: &'static str,
@@ -61,7 +62,7 @@ pub struct HealthResponse {
     pub ready: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(JsonSchema, Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ManageStatusResponse {
     pub service: String,
@@ -72,7 +73,7 @@ pub struct ManageStatusResponse {
     pub started_at_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(JsonSchema, Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleServiceIdentity {
     pub service: String,
@@ -83,7 +84,7 @@ pub struct LifecycleServiceIdentity {
     pub started_at_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(JsonSchema, Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleRuntimeStatus {
     pub state: &'static str,
@@ -92,7 +93,7 @@ pub struct LifecycleRuntimeStatus {
     pub api_major: u16,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(JsonSchema, Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleProtectedWorkItems {
     pub ai_gateway_requests: usize,
@@ -104,7 +105,7 @@ pub struct LifecycleProtectedWorkItems {
     pub total: usize,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(JsonSchema, Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleManagementOwnership {
     /// The daemon reports an active lease without exposing the management
@@ -119,7 +120,7 @@ pub struct LifecycleManagementOwnership {
     pub management_token_generation: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(JsonSchema, Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleResponse {
     pub service: LifecycleServiceIdentity,
@@ -171,7 +172,7 @@ struct CredentialRotationRecord {
     rotated_at_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleDaemonIdentityProof {
     pub pid: u32,
@@ -181,7 +182,7 @@ pub struct LifecycleDaemonIdentityProof {
     pub bind: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleLeaseRequest {
     pub installation_id: String,
@@ -190,7 +191,7 @@ pub struct LifecycleLeaseRequest {
     pub daemon_identity: Option<LifecycleDaemonIdentityProof>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleLeaseTakeoverRequest {
     pub installation_id: String,
@@ -202,7 +203,7 @@ pub struct LifecycleLeaseTakeoverRequest {
     pub daemon_identity: LifecycleDaemonIdentityProof,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleCredentialRotateRequest {
     pub installation_id: String,
@@ -228,7 +229,7 @@ struct ExecutableIdentity {
     sha256: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleControlRequest {
     pub installation_id: String,

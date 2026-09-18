@@ -1,5 +1,6 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use futures_util::FutureExt;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::panic::AssertUnwindSafe;
@@ -14,13 +15,13 @@ use crate::{
 
 use super::masked_url;
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct EnhancedLaunchOperationRequest {
     request_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ConfigureCodexAppRequest {
     codex_home: Option<String>,
@@ -32,13 +33,13 @@ pub(super) struct ConfigureCodexAppRequest {
     supports_websockets: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct DeleteCodexAppProviderRequest {
     provider_name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SetCodexAppProviderWebSocketRequest {
     provider_name: String,
@@ -66,7 +67,7 @@ struct ManageCodexSession {
     cwd: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ManageCodexAppStatus {
     codex_home: String,
@@ -89,7 +90,7 @@ pub(super) struct ManageCodexAppStatus {
     active_provider: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManageCodexAppProviderStatus {
     name: String,

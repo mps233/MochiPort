@@ -9,6 +9,86 @@ import XCTest
 #endif
 
 final class APIContractTests: XCTestCase {
+
+    /// The daemon's usage summary must decode into the generated contract.
+    func testUsageSummaryDecodesDaemonPayload() throws {
+        let json = """
+        {
+          "generatedAtMs": 1700000000000,
+          "windowDays": 7,
+          "sessions": 2,
+          "totals": {
+            "inputTokens": 120,
+            "cachedInputTokens": 60,
+            "cacheWriteInputTokens": 3,
+            "outputTokens": 30,
+            "reasoningOutputTokens": 5,
+            "totalTokens": 150
+          },
+          "days": [
+            {
+              "date": "2026-08-25",
+              "sessions": 2,
+              "totals": {
+                "inputTokens": 120,
+                "cachedInputTokens": 60,
+                "cacheWriteInputTokens": 3,
+                "outputTokens": 30,
+                "reasoningOutputTokens": 5,
+                "totalTokens": 150
+              }
+            }
+          ],
+          "sessionsRoot": "/Users/example/.codex/sessions"
+        }
+        """
+
+        let summary = try JSONDecoder().decode(
+            UsageSummaryResponse.self,
+            from: Data(json.utf8)
+        )
+
+        XCTAssertEqual(summary.windowDays, 7)
+        XCTAssertEqual(summary.sessions, 2)
+        XCTAssertEqual(summary.generatedAtMs, 1700000000000)
+        XCTAssertEqual(summary.totals.totalTokens, 150)
+        XCTAssertEqual(summary.totals.cacheWriteInputTokens, 3)
+        XCTAssertEqual(summary.days.count, 1)
+        XCTAssertEqual(summary.days.first?.date, "2026-08-25")
+        XCTAssertEqual(summary.days.first?.sessions, 2)
+        XCTAssertEqual(summary.sessionsRoot, "/Users/example/.codex/sessions")
+    }
+
+    /// A machine without a local Codex installation answers with a null root and
+    /// no days; that is a normal state, not a decode failure.
+    func testUsageSummaryDecodesWithoutLocalInstallation() throws {
+        let json = """
+        {
+          "generatedAtMs": 1,
+          "windowDays": 7,
+          "sessions": 0,
+          "totals": {
+            "inputTokens": 0,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 0,
+            "reasoningOutputTokens": 0,
+            "totalTokens": 0
+          },
+          "days": [],
+          "sessionsRoot": null
+        }
+        """
+
+        let summary = try JSONDecoder().decode(
+            UsageSummaryResponse.self,
+            from: Data(json.utf8)
+        )
+
+        XCTAssertNil(summary.sessionsRoot)
+        XCTAssertTrue(summary.days.isEmpty)
+        XCTAssertEqual(summary.sessions, 0)
+    }
     override func tearDown() {
         MockURLProtocol.reset()
         super.tearDown()
@@ -20,7 +100,7 @@ final class APIContractTests: XCTestCase {
 
         XCTAssertEqual(
             health,
-            HealthResponse(service: "mochiport", apiMajor: 1, ready: true)
+            HealthResponse(apiMajor: 1, ready: true, service: "mochiport")
         )
     }
 
@@ -1192,6 +1272,9 @@ final class APIContractTests: XCTestCase {
         )
     }
 
+
+
+
     func testDaemonLauncherActivatesAStoppedOrDrainingLoadedService() async throws {
         let fixture = try makeDaemonLauncherFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -2112,7 +2195,7 @@ final class APIContractTests: XCTestCase {
     }
 
     func testServiceProbeKeepsVersionedHealthPayload() {
-        let health = HealthResponse(service: "mochiport", apiMajor: 1, ready: true)
+        let health = HealthResponse(apiMajor: 1, ready: true, service: "mochiport")
         XCTAssertEqual(ServiceProbe.versioned(health), .versioned(health))
     }
 
@@ -2130,7 +2213,7 @@ final class APIContractTests: XCTestCase {
 
         XCTAssertEqual(
             result,
-            .versioned(HealthResponse(service: "mochiport", apiMajor: 1, ready: true))
+            .versioned(HealthResponse(apiMajor: 1, ready: true, service: "mochiport"))
         )
         XCTAssertEqual(recorder.paths, ["/healthz"])
     }

@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use std::{
     collections::HashSet,
     io::Write,
@@ -25,7 +26,7 @@ pub(crate) fn normalize_config_paths(config: &mut AppConfig, config_path: &Path)
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppConfig {
     pub bind: String,
@@ -56,7 +57,7 @@ pub struct AppConfig {
     pending_v2_save: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LocalConnectionMode {
     #[default]
@@ -64,7 +65,7 @@ pub enum LocalConnectionMode {
     VpnCompatible,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OutboundProxyMode {
     #[default]
@@ -73,14 +74,14 @@ pub enum OutboundProxyMode {
     Custom,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct OutboundProxyConfig {
     pub mode: OutboundProxyMode,
     pub url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FeishuConfig {
     pub enabled: bool,
@@ -95,7 +96,7 @@ pub struct FeishuConfig {
 
 /// Telegram 账号的回复颗粒度；档位按"消息包含哪些成分与形态"划分，
 /// 与 GUI 的「回复颗粒度」选择和 Telegram 内的 /回复 命令共享。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TelegramReplyGranularity {
     /// 只发过程文本（助手说明）和最终结果；工具执行、文件修改等一律静默。
@@ -131,7 +132,7 @@ impl TelegramReplyGranularity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TelegramConfig {
     pub enabled: bool,
@@ -157,7 +158,7 @@ pub fn generate_pairing_code() -> String {
     format!("{:06}", n)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(JsonSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TelegramProjectGroupConfig {
     pub chat_id: String,
@@ -165,7 +166,7 @@ pub struct TelegramProjectGroupConfig {
     pub cwd: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WechatConfig {
     pub enabled: bool,
@@ -178,7 +179,7 @@ pub struct WechatConfig {
     pub allowed_user_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WecomConfig {
     pub enabled: bool,
@@ -191,7 +192,7 @@ pub struct WecomConfig {
     pub allowed_chat_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BridgeConfig {
     pub enabled: bool,
@@ -199,7 +200,7 @@ pub struct BridgeConfig {
     pub send_streaming: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct LoggingConfig {
     pub diagnostic: bool,

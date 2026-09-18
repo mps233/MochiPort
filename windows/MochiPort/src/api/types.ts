@@ -1,11 +1,5 @@
 export type ServiceStatus = "checking" | "available" | "bridgeAvailable" | "unavailable";
 
-export interface HealthResponse {
-  service: string;
-  apiMajor: number;
-  ready: boolean;
-}
-
 export type ServiceProbe =
   | { kind: "versioned"; health: HealthResponse }
   | { kind: "legacy" };
@@ -113,21 +107,6 @@ export interface IMAccount {
   lastError?: string | null;
   lastEventAtMs?: number | null;
   lastInboundAtMs?: number | null;
-}
-
-export interface TelegramProjectGroup {
-  chatId: string;
-  projectName: string;
-  cwd: string;
-}
-
-export interface TelegramProjectGroupAccount {
-  accountId: string;
-  projectGroups: TelegramProjectGroup[];
-}
-
-export interface TelegramProjectGroupsResponse {
-  accounts: TelegramProjectGroupAccount[];
 }
 
 export interface TelegramProjectGroupsMutationResponse {
@@ -398,3 +377,17 @@ export interface RequestLogsResponse {
   nextCursor?: string | null;
   hasMore?: boolean;
 }
+
+// 以下契约由 daemon 导出的 JSON Schema 生成（scripts/generate-client-contracts.py），
+// 客户端不再手写一份，避免两端字段漂移。
+export type HealthResponse = import("./generated/manageContracts").HealthResponse;
+export type TelegramProjectGroup =
+  import("./generated/manageContracts").TelegramProjectGroupConfig;
+export type TelegramProjectGroupAccount =
+  import("./generated/manageContracts").TelegramProjectGroupAccount;
+export type TelegramProjectGroupsResponse =
+  import("./generated/manageContracts").TelegramProjectGroupsResponse;
+export type UsageSummaryResponse =
+  import("./generated/manageContracts").UsageSummaryResponse;
+export type UsageTotals = import("./generated/manageContracts").UsageTotals;
+export type UsageDayEntry = import("./generated/manageContracts").UsageDayEntry;

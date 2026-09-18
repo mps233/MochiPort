@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
@@ -430,7 +431,7 @@ impl RemoteControlState {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(JsonSchema, Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeishuWsState {
     pub connecting: bool,
@@ -438,7 +439,7 @@ pub struct FeishuWsState {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(JsonSchema, Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WechatState {
     pub polling: bool,
@@ -455,7 +456,7 @@ pub struct WechatRecoveryState {
         HashMap<String, VecDeque<crate::im::core::outbound::ImOutboundMessage>>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(JsonSchema, Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelegramState {
     pub polling: bool,
@@ -465,7 +466,7 @@ pub struct TelegramState {
     pub last_inbound_at_ms: Option<u128>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(JsonSchema, Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImAccountRuntimeState {
     pub platform: ImPlatformKind,

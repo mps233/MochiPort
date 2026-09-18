@@ -1,11 +1,5 @@
 import Foundation
 
-struct HealthResponse: Codable, Equatable {
-    let service: String
-    let apiMajor: Int
-    let ready: Bool
-}
-
 struct ManageLogDirectory: Decodable, Equatable {
     let directory: String
     let instanceId: String
@@ -1303,13 +1297,28 @@ struct APIClient: Sendable {
             throw APIClientError.incompatibleService
         }
         guard health.apiMajor == 1 else {
-            throw APIClientError.unsupportedAPIMajor(health.apiMajor)
+            throw APIClientError.unsupportedAPIMajor(Int(health.apiMajor))
         }
         return .versioned(health)
     }
 
     func fetchDashboard(bearerToken: String) async throws -> ManageDashboard {
         try await fetchDashboard(baseURL: connectionLoader().baseURL, bearerToken: bearerToken)
+    }
+
+    /// Local Codex usage the daemon derived from the rollout logs.
+    ///
+    /// The daemon owns the parsing; this client only displays the result. `days`
+    /// selects the window and is clamped by the daemon.
+    func fetchUsageSummary(
+        bearerToken: String,
+        days: Int? = nil
+    ) async throws -> UsageSummaryResponse {
+        try await fetchUsageSummary(
+            baseURL: connectionLoader().baseURL,
+            bearerToken: bearerToken,
+            days: days
+        )
     }
 
     func fetchLogDirectory(bearerToken: String) async throws -> URL {
@@ -1350,6 +1359,34 @@ struct APIClient: Sendable {
                     continue
                 }
                 return dashboard
+            } catch APIClientError.unauthorized {
+                continue
+            }
+        }
+        throw APIClientError.unauthorized
+    }
+
+    /// Full-history usage, used to rebuild the local history database from the
+    /// daemon instead of parsing the rollout logs a second time.
+    ///
+    /// Follows the same credential pattern as `dashboard()`: candidates are
+    /// tried in order so a rotated management token does not fail the call.
+    /// - Parameter days: window to request; `nil` means everything on disk, which
+    ///   is what a history rebuild needs. A periodic refresh should pass a window
+    ///   so it does not walk the whole sessions tree every time.
+    func usageHistory(days: Int? = nil) async throws -> UsageSummaryResponse {
+        let connection = connectionLoader()
+        let baseURL = connection.baseURL
+        let candidates = connection.credentials()
+        guard !candidates.isEmpty else { throw APIClientError.unauthorized }
+
+        for candidate in candidates {
+            do {
+                return try await fetchUsageHistory(
+                    baseURL: baseURL,
+                    bearerToken: candidate.token,
+                    days: days
+                )
             } catch APIClientError.unauthorized {
                 continue
             }
@@ -2247,6 +2284,54 @@ struct APIClient: Sendable {
 
     private struct Sub2ApiAccountSchedulableRequest: Encodable {
         let schedulable: Bool
+    }
+
+    private func fetchUsageHistory(
+        baseURL: URL,
+        bearerToken: String,
+        days: Int?
+    ) async throws -> UsageSummaryResponse {
+        let queryItems = days.map { [URLQueryItem(name: "days", value: String($0))] } ?? []
+        let (data, response) = try await request(
+            baseURL: baseURL,
+            path: "api/v1/manage/usage/history",
+            queryItems: queryItems,
+            bearerToken: bearerToken
+        )
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIClientError.invalidResponse
+        }
+        guard httpResponse.statusCode != 401 else { throw APIClientError.unauthorized }
+        guard httpResponse.statusCode == 200 else { throw APIClientError.invalidResponse }
+        do {
+            return try JSONDecoder().decode(UsageSummaryResponse.self, from: data)
+        } catch {
+            throw APIClientError.invalidResponse
+        }
+    }
+
+    private func fetchUsageSummary(
+        baseURL: URL,
+        bearerToken: String,
+        days: Int?
+    ) async throws -> UsageSummaryResponse {
+        let queryItems = days.map { [URLQueryItem(name: "days", value: String($0))] } ?? []
+        let (data, response) = try await request(
+            baseURL: baseURL,
+            path: "api/v1/manage/usage/summary",
+            queryItems: queryItems,
+            bearerToken: bearerToken
+        )
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIClientError.invalidResponse
+        }
+        guard httpResponse.statusCode != 401 else { throw APIClientError.unauthorized }
+        guard httpResponse.statusCode == 200 else { throw APIClientError.invalidResponse }
+        do {
+            return try JSONDecoder().decode(UsageSummaryResponse.self, from: data)
+        } catch {
+            throw APIClientError.invalidResponse
+        }
     }
 
     private func fetchDashboard(

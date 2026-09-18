@@ -10,6 +10,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -25,12 +26,14 @@ use crate::{
 };
 
 mod codex_app;
+pub(crate) mod contracts;
 mod im_api;
 pub(crate) mod manage;
 mod manage_workspace;
 mod oauth;
 mod onboarding;
 pub(crate) mod plugins;
+mod usage_api;
 
 /// Return a display-safe URL without credentials, query parameters, or fragments.
 /// Management responses use this helper wherever a configured endpoint is exposed.
@@ -138,6 +141,8 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/sessions", get(codex_app::codex_app_sessions))
         .route("/gateway", get(manage_workspace::gateway))
+        .route("/usage/summary", get(usage_api::usage_summary))
+        .route("/usage/history", get(usage_api::usage_history))
         .route(
             "/gateway/model-library/reload",
             post(|| async { manage_workspace::reload_model_library().await }),
@@ -425,7 +430,7 @@ async fn access_log(request: Request<Body>, next: Next) -> impl IntoResponse {
     response
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StatusResponse {
     service: String,
@@ -483,7 +488,7 @@ async fn status_snapshot(state: &SharedState) -> StatusResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManageDashboardResponse {
     service: manage::ManageStatusResponse,
@@ -503,7 +508,7 @@ struct ManageDashboardResponse {
     request_logging_enabled: bool,
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManageExecutionClients {
     codex_app: ManageExecutionClient,
@@ -511,14 +516,14 @@ struct ManageExecutionClients {
     cli: ManageExecutionClient,
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManageExecutionClient {
     configured: bool,
     connected: bool,
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManageMessageChannels {
     telegram: ManageMessageChannel,
@@ -527,14 +532,14 @@ struct ManageMessageChannels {
     wecom: ManageMessageChannel,
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManageMessageChannel {
     account_count: usize,
     connected_account_count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManageLogDirectoryResponse {
     directory: String,
@@ -704,7 +709,7 @@ async fn shutdown(State(state): State<SharedState>) -> impl IntoResponse {
     perform_shutdown(&state, "daemon shutdown requested").await
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InstanceShutdownRequest {
     daemon_instance_id: String,
@@ -821,7 +826,7 @@ async fn save_config(
     (StatusCode::OK, Json(json!({ "ok": true })))
 }
 
-#[derive(Serialize)]
+#[derive(JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteControlBackendStatusResponse {
     available: bool,
@@ -1270,6 +1275,30 @@ mod tests {
 
         let valid = route_response(app, "/api/v1/manage/status", Some(&token)).await;
         assert_eq!(valid.status(), StatusCode::OK);
+    }
+
+    /// The usage summary is registered under the protected management routes;
+    /// an unauthenticated call answering 401 (rather than 404) is what proves
+    /// the route is actually mounted.
+    #[tokio::test]
+    async fn manage_usage_summary_route_is_registered_and_protected() {
+        let (app, _temp, _token) = management_test_router();
+
+        let missing = route_response(app.clone(), "/api/v1/manage/usage/summary", None).await;
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let unknown = route_response(app, "/api/v1/manage/usage/unknown", None).await;
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The history endpoint is what clients rebuild their database from, so it
+    /// must be mounted and protected like the rest of the management API.
+    #[tokio::test]
+    async fn manage_usage_history_route_is_registered_and_protected() {
+        let (app, _temp, _token) = management_test_router();
+
+        let missing = route_response(app.clone(), "/api/v1/manage/usage/history", None).await;
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

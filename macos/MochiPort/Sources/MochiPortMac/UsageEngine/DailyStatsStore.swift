@@ -34,6 +34,40 @@ public struct DailyStatsRow: Hashable, Sendable {
     }
 }
 
+extension DailyStatsRow {
+    /// Builds history rows from the daemon's cross-product breakdown.
+    ///
+    /// The daemon exposes exactly the key this database replaces rows by
+    /// (`day, service, source, model, project`) plus the same five counters, so
+    /// the shape maps one-to-one. It returns `nil` when any row cannot be
+    /// converted, because `rebuildCodexStats` replaces rows rather than adding
+    /// to them: a partial conversion would silently drop history.
+    public static func rows(fromDaemonBreakdown rows: [UsageBreakdownRow]) -> [DailyStatsRow]? {
+        var converted: [DailyStatsRow] = []
+        converted.reserveCapacity(rows.count)
+        for row in rows {
+            guard !row.day.isEmpty, !row.model.isEmpty else { return nil }
+            converted.append(
+                DailyStatsRow(
+                    day: row.day,
+                    service: row.service,
+                    source: row.source,
+                    model: row.model,
+                    // 本地重建把缺失的 project 记为 ""，这里保持一致，
+                    // 否则同一份历史的行数会随数据来源变化。
+                    project: row.project,
+                    input: Int(clamping: row.totals.inputTokens),
+                    output: Int(clamping: row.totals.outputTokens),
+                    cacheRead: Int(clamping: row.totals.cachedInputTokens),
+                    cacheCreate: Int(clamping: row.totals.cacheWriteInputTokens),
+                    usageTotal: Int(clamping: row.totals.totalTokens)
+                )
+            )
+        }
+        return converted
+    }
+}
+
 /// 基于 SQLite 的每日 Token 统计持久化存储。
 ///
 /// 以 (day, service, source, model, project) 为单位聚合，用 `INSERT OR REPLACE` 写入。
@@ -448,6 +482,71 @@ public final class DailyStatsStore {
         revision &+= 1
     }
 
+    /// Replaces the Codex rows for the days covered by `rows`, leaving other days
+    /// untouched.
+    ///
+    /// This is the steady-state counterpart to `rebuildCodexStats`: the daemon
+    /// re-reads the same logs on every request, so its rows are a complete
+    /// statement about those days and can simply replace what is stored, instead
+    /// of being merged in as an event-by-event increment.
+    ///
+    /// Days absent from `rows` are deliberately left alone — a window that does
+    /// not reach back far enough must not delete older history.
+    @discardableResult
+    public func replaceCodexDays(rows: [DailyStatsRow]) -> Bool {
+        guard let db, !rows.isEmpty else { return false }
+        let days = Set(rows.map(\.day))
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { return false }
+
+        var deleteStatement: OpaquePointer?
+        let deleteSQL = "DELETE FROM daily_stats WHERE service = ? AND day = ?"
+        guard sqlite3_prepare_v2(db, deleteSQL, -1, &deleteStatement, nil) == SQLITE_OK else {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return false
+        }
+        defer { sqlite3_finalize(deleteStatement) }
+        for day in days {
+            sqlite3_bind_text(deleteStatement, 1, Self.codexServiceID, -1, Self.SQLITE_TRANSIENT)
+            sqlite3_bind_text(deleteStatement, 2, day, -1, Self.SQLITE_TRANSIENT)
+            sqlite3_step(deleteStatement)
+            sqlite3_reset(deleteStatement)
+        }
+
+        var insertStatement: OpaquePointer?
+        let insertSQL = """
+        INSERT OR REPLACE INTO daily_stats
+        (day, service, source, model, project, input, output, cache_read, cache_create,
+         usage_total)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        guard sqlite3_prepare_v2(db, insertSQL, -1, &insertStatement, nil) == SQLITE_OK else {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return false
+        }
+        defer { sqlite3_finalize(insertStatement) }
+        for row in rows {
+            sqlite3_bind_text(insertStatement, 1, row.day, -1, Self.SQLITE_TRANSIENT)
+            sqlite3_bind_text(insertStatement, 2, row.service, -1, Self.SQLITE_TRANSIENT)
+            sqlite3_bind_text(insertStatement, 3, row.source, -1, Self.SQLITE_TRANSIENT)
+            sqlite3_bind_text(insertStatement, 4, row.model, -1, Self.SQLITE_TRANSIENT)
+            sqlite3_bind_text(insertStatement, 5, row.project, -1, Self.SQLITE_TRANSIENT)
+            sqlite3_bind_int64(insertStatement, 6, Int64(row.input))
+            sqlite3_bind_int64(insertStatement, 7, Int64(row.output))
+            sqlite3_bind_int64(insertStatement, 8, Int64(row.cacheRead))
+            sqlite3_bind_int64(insertStatement, 9, Int64(row.cacheCreate))
+            sqlite3_bind_int64(insertStatement, 10, Int64(row.usageTotal))
+            sqlite3_step(insertStatement)
+            sqlite3_reset(insertStatement)
+        }
+
+        guard sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else { return false }
+        revision &+= 1
+        return true
+    }
+
+    /// The service id Codex rows are written under.
+    private static let codexServiceID = "codex"
+
     /// Replace every Codex row after a verified complete scan of the raw
     /// session logs. This is the only operation allowed to remove legacy
     /// rows, so a partial or failed scan cannot silently undercount history.
@@ -670,6 +769,42 @@ public final class DailyStatsStore {
             total += CostEstimator.cost(of: synth)
         }
         return total
+    }
+
+    /// 区间 `[from, to)` 内用量最高的项目；无数据时返回 nil。
+    ///
+    /// 与 `dailyTotals` / `totalCost` 同一区间语义。空 project（会话未记录 cwd）
+    /// 会被排除，避免它作为一个空名字的项目参与排序。
+    public func topProject(from: Date, to: Date, calendar: Calendar = .current,
+                           source: String? = nil) -> String? {
+        let fromStr = Self.dayFormatter.string(from: from)
+        let toStr = Self.dayFormatter.string(from: to)
+        let sql = """
+        SELECT project, SUM(usage_total) AS total
+        FROM daily_stats
+        WHERE day >= ? AND day < ? AND service = 'codex'
+          AND project IS NOT NULL AND project <> ''
+          AND (? IS NULL OR source = ?)
+        GROUP BY project
+        ORDER BY total DESC, project ASC
+        LIMIT 1
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, fromStr, -1, Self.SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, toStr, -1, Self.SQLITE_TRANSIENT)
+        if let source {
+            sqlite3_bind_text(stmt, 3, source, -1, Self.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 4, source, -1, Self.SQLITE_TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, 3)
+            sqlite3_bind_null(stmt, 4)
+        }
+        guard sqlite3_step(stmt) == SQLITE_ROW, let projectC = sqlite3_column_text(stmt, 0) else {
+            return nil
+        }
+        return String(cString: projectC)
     }
 
     // MARK: - 破纪录 / 连续使用（趣味逻辑）

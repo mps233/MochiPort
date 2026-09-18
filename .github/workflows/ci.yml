@@ -34,6 +34,18 @@ jobs:
       - name: Test
         run: cargo test --locked -p mochiport --all-targets
 
+      - name: Export management contract schema
+        run: cargo test --locked -p mochiport --lib write_management_contract_schema
+
+      - name: Check generated client contracts
+        run: |
+          set -euo pipefail
+          python3 scripts/generate-client-contracts.py \
+            contracts/manage-contracts.schema.json \
+            --swift macos/MochiPort/Sources/MochiPortMac/Generated/ManageContracts.swift \
+            --typescript windows/MochiPort/src/api/generated/manageContracts.ts \
+            --check
+
   windows-client:
     name: Windows client crate
     # `windows/MochiPort/src-tauri` is a member of the root workspace, but it is

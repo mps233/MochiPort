@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
@@ -8,7 +9,7 @@ pub(crate) const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_PROVIDER_WEIGHT: u32 = 100;
 
 /// AI Gateway 顶层配置，对应 config.toml 中 `[aiGateway]` 段。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 #[derive(Default)]
 pub struct AiGatewayConfig {
@@ -70,7 +71,7 @@ pub struct AiGatewayConfig {
     pub sub2api_admin: Sub2ApiAdminConfig,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Sub2ApiAdminConfig {
     pub base_url: String,
@@ -78,7 +79,7 @@ pub struct Sub2ApiAdminConfig {
 }
 
 /// 协议家族：决定自动合成目录条目时继承哪一套能力模板。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelFamily {
     /// OpenAI Responses 透传。
@@ -111,7 +112,7 @@ impl ModelFamily {
 /// 只描述“这个模型是什么”；Codex 依赖的协议字段（`comp_hash`、
 /// `apply_patch_tool_type`、`use_responses_lite`、`shell_type`、推理等级等）
 /// 由 `family` 或所属 provider 的协议家族模板补齐。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CustomModelConfig {
     /// 模型名（同时是 `/models` 返回的 slug 与路由匹配名）。
@@ -386,7 +387,7 @@ pub fn provider_display_base_url(base_url: &str) -> String {
 /// 上游 `/models` 发现到的单个模型元数据。
 ///
 /// 字段全部可选：只有上游明确声明的信息才落库，避免把猜测当成能力。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct DiscoveredModel {
     /// 上游模型名。
@@ -420,7 +421,7 @@ impl DiscoveredModel {
 }
 
 /// 单个 provider 配置。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ProviderConfig {
     /// provider 名称标识（如 "openai"、"deepseek"）。
@@ -548,7 +549,7 @@ impl ProviderConfig {
 }
 
 /// Provider 类型枚举。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderType {
     /// OpenAI Responses API 透传。

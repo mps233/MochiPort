@@ -1,4 +1,5 @@
 #[cfg(target_os = "macos")]
+use schemars::JsonSchema;
 use std::process::Command;
 use std::{
     collections::{HashMap, HashSet},
@@ -132,7 +133,7 @@ pub struct UninstallCodexAppReport {
     pub gui_api_base: CodexAppGuiApiBaseStatus,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(JsonSchema, Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexAppGuiApiBaseStatus {
     pub supported: bool,
@@ -145,7 +146,7 @@ pub struct CodexAppGuiApiBaseStatus {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(JsonSchema, Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexAppConfigStatus {
     pub codex_home: PathBuf,
@@ -172,7 +173,7 @@ pub struct CodexAppConfigStatus {
 ///
 /// `direct-api` means Codex calls the selected third-party API provider
 /// directly, without going through MochiPort's local gateway.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CodexProviderMode {
     #[serde(rename = "mochiport", alias = "threadrelay")]
@@ -191,7 +192,7 @@ pub struct CodexProviderModeSwitchReport {
     pub gui_api_base: CodexAppGuiApiBaseStatus,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(JsonSchema, Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexAppRemoteControlSwitchStatus {
     pub supported: bool,
@@ -201,7 +202,7 @@ pub struct CodexAppRemoteControlSwitchStatus {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(JsonSchema, Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexAppRemoteControlSwitchDatabaseStatus {
     pub path: PathBuf,
@@ -211,7 +212,7 @@ pub struct CodexAppRemoteControlSwitchDatabaseStatus {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(JsonSchema, Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexAppProviderStatus {
     pub name: String,

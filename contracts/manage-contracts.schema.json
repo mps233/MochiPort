@@ -1,0 +1,3654 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ManageContractCatalogue",
+  "description": "Every request and response shape the desktop clients consume.",
+  "type": "object",
+  "properties": {
+    "app_config": {
+      "$ref": "#/$defs/AppConfig"
+    },
+    "clear_old_request_logs": {
+      "$ref": "#/$defs/ClearOldRequestLogsRequest"
+    },
+    "codex_app_config_status": {
+      "$ref": "#/$defs/CodexAppConfigStatus"
+    },
+    "codex_app_status": {
+      "$ref": "#/$defs/ManageCodexAppStatus"
+    },
+    "configure_codex_app": {
+      "$ref": "#/$defs/ConfigureCodexAppRequest"
+    },
+    "configure_feishu_account": {
+      "$ref": "#/$defs/ConfigureFeishuAccountRequest"
+    },
+    "configure_telegram_bot": {
+      "$ref": "#/$defs/ConfigureTelegramBotRequest"
+    },
+    "dashboard": {
+      "$ref": "#/$defs/ManageDashboardResponse"
+    },
+    "delete_codex_app_provider": {
+      "$ref": "#/$defs/DeleteCodexAppProviderRequest"
+    },
+    "delete_im_account": {
+      "$ref": "#/$defs/DeleteImAccountRequest"
+    },
+    "delete_provider": {
+      "$ref": "#/$defs/DeleteProviderRequest"
+    },
+    "enhanced_launch_operation": {
+      "$ref": "#/$defs/EnhancedLaunchOperationRequest"
+    },
+    "feishu_bot_status": {
+      "$ref": "#/$defs/FeishuBotStatus"
+    },
+    "fetch_provider_models": {
+      "$ref": "#/$defs/FetchProviderModelsRequest"
+    },
+    "fetch_provider_usage": {
+      "$ref": "#/$defs/FetchProviderUsageRequest"
+    },
+    "fetch_sub2api_accounts": {
+      "$ref": "#/$defs/FetchSub2ApiAccountsRequest"
+    },
+    "health": {
+      "$ref": "#/$defs/HealthResponse"
+    },
+    "im_accounts": {
+      "$ref": "#/$defs/ImAccountsResponse"
+    },
+    "instance_shutdown": {
+      "$ref": "#/$defs/InstanceShutdownRequest"
+    },
+    "lifecycle": {
+      "$ref": "#/$defs/LifecycleResponse"
+    },
+    "lifecycle_control": {
+      "$ref": "#/$defs/LifecycleControlRequest"
+    },
+    "lifecycle_credential_rotate": {
+      "$ref": "#/$defs/LifecycleCredentialRotateRequest"
+    },
+    "lifecycle_lease": {
+      "$ref": "#/$defs/LifecycleLeaseRequest"
+    },
+    "lifecycle_lease_takeover": {
+      "$ref": "#/$defs/LifecycleLeaseTakeoverRequest"
+    },
+    "log_directory": {
+      "$ref": "#/$defs/ManageLogDirectoryResponse"
+    },
+    "manage_im_accounts": {
+      "$ref": "#/$defs/ManageImAccountsResponse"
+    },
+    "manage_status": {
+      "$ref": "#/$defs/ManageStatusResponse"
+    },
+    "remote_control_backend_status": {
+      "$ref": "#/$defs/RemoteControlBackendStatusResponse"
+    },
+    "rotate_telegram_pairing_code": {
+      "$ref": "#/$defs/RotateTelegramPairingCodeRequest"
+    },
+    "set_codex_app_provider_websocket": {
+      "$ref": "#/$defs/SetCodexAppProviderWebSocketRequest"
+    },
+    "set_im_account_enabled": {
+      "$ref": "#/$defs/SetImAccountEnabledRequest"
+    },
+    "set_im_channel_enabled": {
+      "$ref": "#/$defs/SetImChannelEnabledRequest"
+    },
+    "set_sub2api_account_schedulable": {
+      "$ref": "#/$defs/SetSub2ApiAccountSchedulableRequest"
+    },
+    "set_telegram_reply_granularity": {
+      "$ref": "#/$defs/SetTelegramReplyGranularityRequest"
+    },
+    "status": {
+      "$ref": "#/$defs/StatusResponse"
+    },
+    "sync_telegram_topics": {
+      "$ref": "#/$defs/SyncTelegramTopicsRequest"
+    },
+    "telegram_bot_status": {
+      "$ref": "#/$defs/TelegramBotStatus"
+    },
+    "telegram_project_groups": {
+      "$ref": "#/$defs/TelegramProjectGroupsResponse"
+    },
+    "update_gateway": {
+      "$ref": "#/$defs/UpdateGatewayRequest"
+    },
+    "update_settings": {
+      "$ref": "#/$defs/UpdateSettingsRequest"
+    },
+    "update_sub2api_admin": {
+      "$ref": "#/$defs/UpdateSub2ApiAdminRequest"
+    },
+    "update_telegram_project_groups": {
+      "$ref": "#/$defs/UpdateTelegramProjectGroupsRequest"
+    },
+    "upsert_provider": {
+      "$ref": "#/$defs/UpsertProviderRequest"
+    },
+    "usage_breakdown_row": {
+      "$ref": "#/$defs/UsageBreakdownRow"
+    },
+    "usage_day_entry": {
+      "$ref": "#/$defs/UsageDayEntry"
+    },
+    "usage_hour_entry": {
+      "$ref": "#/$defs/UsageHourEntry"
+    },
+    "usage_minute_bucket": {
+      "$ref": "#/$defs/UsageMinuteBucket"
+    },
+    "usage_model_entry": {
+      "$ref": "#/$defs/UsageModelEntry"
+    },
+    "usage_project_entry": {
+      "$ref": "#/$defs/UsageProjectEntry"
+    },
+    "usage_provider_entry": {
+      "$ref": "#/$defs/UsageProviderEntry"
+    },
+    "usage_quota_history_point": {
+      "$ref": "#/$defs/UsageQuotaHistoryPoint"
+    },
+    "usage_quota_point": {
+      "$ref": "#/$defs/UsageQuotaPoint"
+    },
+    "usage_quota_snapshot": {
+      "$ref": "#/$defs/UsageQuotaSnapshot"
+    },
+    "usage_quota_window": {
+      "$ref": "#/$defs/UsageQuotaWindow"
+    },
+    "usage_summary": {
+      "$ref": "#/$defs/UsageSummaryResponse"
+    },
+    "usage_totals": {
+      "$ref": "#/$defs/UsageTotals"
+    },
+    "wechat_bot_status": {
+      "$ref": "#/$defs/WechatBotStatus"
+    },
+    "wechat_onboard_poll": {
+      "$ref": "#/$defs/WechatOnboardPollRequest"
+    },
+    "wecom_bot_status": {
+      "$ref": "#/$defs/WecomBotStatus"
+    },
+    "wecom_onboard_poll": {
+      "$ref": "#/$defs/WecomOnboardPollRequest"
+    }
+  },
+  "required": [
+    "app_config",
+    "codex_app_config_status",
+    "manage_status",
+    "health",
+    "lifecycle",
+    "lifecycle_control",
+    "lifecycle_lease",
+    "lifecycle_lease_takeover",
+    "lifecycle_credential_rotate",
+    "instance_shutdown",
+    "status",
+    "dashboard",
+    "log_directory",
+    "remote_control_backend_status",
+    "update_gateway",
+    "upsert_provider",
+    "delete_provider",
+    "fetch_provider_models",
+    "fetch_provider_usage",
+    "update_settings",
+    "clear_old_request_logs",
+    "fetch_sub2api_accounts",
+    "set_sub2api_account_schedulable",
+    "update_sub2api_admin",
+    "usage_summary",
+    "usage_totals",
+    "usage_day_entry",
+    "usage_hour_entry",
+    "usage_project_entry",
+    "usage_model_entry",
+    "usage_provider_entry",
+    "usage_breakdown_row",
+    "usage_quota_snapshot",
+    "usage_quota_window",
+    "usage_minute_bucket",
+    "usage_quota_history_point",
+    "usage_quota_point",
+    "codex_app_status",
+    "configure_codex_app",
+    "delete_codex_app_provider",
+    "set_codex_app_provider_websocket",
+    "enhanced_launch_operation",
+    "manage_im_accounts",
+    "im_accounts",
+    "configure_telegram_bot",
+    "rotate_telegram_pairing_code",
+    "sync_telegram_topics",
+    "set_telegram_reply_granularity",
+    "telegram_project_groups",
+    "update_telegram_project_groups",
+    "delete_im_account",
+    "set_im_account_enabled",
+    "set_im_channel_enabled",
+    "telegram_bot_status",
+    "feishu_bot_status",
+    "wechat_bot_status",
+    "wecom_bot_status",
+    "configure_feishu_account",
+    "wechat_onboard_poll",
+    "wecom_onboard_poll"
+  ],
+  "$defs": {
+    "AiGatewayConfig": {
+      "description": "AI Gateway 顶层配置，对应 config.toml 中 `[aiGateway]` 段。",
+      "type": "object",
+      "properties": {
+        "codexVisibleModels": {
+          "description": "Codex App 前端模型选择器可见的模型列表。\n\n该列表只控制 `/models` 暴露给 Codex App 的 catalog 模型，不参与上游 provider 路由。",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "customModels": {
+          "description": "用户自定义的模型目录条目。\n\n内置 `models.json` 之外的新模型在这里声明后即可被 `codexVisibleModels`\n选中；没声明、但被某个 provider 的 `models` 列表覆盖的模型名，也会按该\nprovider 的协议家族自动合成一个保守的目录条目。",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CustomModelConfig"
+          }
+        },
+        "defaultProvider": {
+          "description": "兼容旧配置的遗留字段；路由不使用默认/兜底 provider。",
+          "type": "string",
+          "writeOnly": true
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "filterImageGenerationTool": {
+          "description": "是否过滤 Codex 请求中的 image_generation tool。",
+          "type": "boolean",
+          "default": false
+        },
+        "modelOwners": {
+          "description": "同名模型由多个 provider 声明时的归属：Codex 侧模型名 → provider 名称。\n\n未配置的模型继续按权重 + 会话粘性选路；配置了但对应 provider 不可用\n（被禁用、被删除或不再声明该模型）时自动回落到默认选路。",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "promptCacheRetention": {
+          "description": "全局 prompt_cache_retention 值（如 \"1h\"），可选。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerDisplayPrefix": {
+          "description": "是否用服务商名给模型加显示前缀（`AutoClaw · GLM-5.3-Flash`）。\n\n前缀跟随 provider 的 `name`；没有逐服务商覆盖。",
+          "type": "boolean",
+          "default": false
+        },
+        "providers": {
+          "description": "provider 列表。",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProviderConfig"
+          }
+        },
+        "requestLogDetailsEnabled": {
+          "description": "是否记录请求/响应/SSE 详情。关闭时仍保留摘要指标。",
+          "type": "boolean",
+          "default": false
+        },
+        "requestLogMaxMb": {
+          "description": "请求日志库体积上限（MB）；0 表示不按体积限制。\n\n超过上限时按时间从旧到新删除，直到回落到上限以内，避免长期运行后\n数据库无界膨胀。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 256,
+          "minimum": 0
+        },
+        "requestLogRetentionDays": {
+          "description": "请求日志保留天数；0 表示不自动清理。\n\n请求日志库会随使用持续增长（实测数周可达数十 MB）。daemon 会定期删除\n早于该天数的记录并回收空间；设 0 可关闭自动清理、完全手动管理。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "requestLoggingEnabled": {
+          "description": "是否启用请求日志记录。",
+          "type": "boolean",
+          "default": false
+        },
+        "sub2apiAdmin": {
+          "description": "Optional read-only connection to a Sub2API administration API. This is\ndeliberately separate from provider API keys: it reads the upstream\naccount pool instead of authorizing model requests.",
+          "$ref": "#/$defs/Sub2ApiAdminConfig"
+        }
+      }
+    },
+    "AppConfig": {
+      "type": "object",
+      "properties": {
+        "aiGateway": {
+          "$ref": "#/$defs/AiGatewayConfig",
+          "default": {
+            "codexVisibleModels": [],
+            "enabled": false,
+            "filterImageGenerationTool": false,
+            "providerDisplayPrefix": false,
+            "providers": [],
+            "requestLogDetailsEnabled": false,
+            "requestLogMaxMb": 0,
+            "requestLogRetentionDays": 0,
+            "requestLoggingEnabled": false
+          }
+        },
+        "bind": {
+          "type": "string",
+          "default": "127.0.0.1:3847"
+        },
+        "bridge": {
+          "$ref": "#/$defs/BridgeConfig",
+          "default": {
+            "accountId": "default",
+            "enabled": true,
+            "sendStreaming": true
+          }
+        },
+        "feishu": {
+          "$ref": "#/$defs/FeishuConfig",
+          "writeOnly": true
+        },
+        "feishuAccounts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FeishuConfig"
+          }
+        },
+        "language": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "localConnectionMode": {
+          "$ref": "#/$defs/LocalConnectionMode",
+          "default": "standard"
+        },
+        "logging": {
+          "$ref": "#/$defs/LoggingConfig",
+          "default": {
+            "diagnostic": true,
+            "maxMb": 20,
+            "retentionDays": 7
+          }
+        },
+        "outboundProxy": {
+          "$ref": "#/$defs/OutboundProxyConfig",
+          "default": {
+            "mode": "system",
+            "url": ""
+          }
+        },
+        "statePath": {
+          "type": "string",
+          "default": ""
+        },
+        "telegram": {
+          "$ref": "#/$defs/TelegramConfig",
+          "writeOnly": true
+        },
+        "telegramAccounts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TelegramConfig"
+          }
+        },
+        "theme": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wechat": {
+          "$ref": "#/$defs/WechatConfig",
+          "writeOnly": true
+        },
+        "wechatAccounts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WechatConfig"
+          }
+        },
+        "wecom": {
+          "$ref": "#/$defs/WecomConfig",
+          "writeOnly": true
+        },
+        "wecomAccounts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WecomConfig"
+          }
+        }
+      }
+    },
+    "BridgeConfig": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "default": "default"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "sendStreaming": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "ClearOldRequestLogsRequest": {
+      "type": "object",
+      "properties": {
+        "days": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "CodexAppConfigStatus": {
+      "type": "object",
+      "properties": {
+        "activeProvider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authOk": {
+          "type": "boolean"
+        },
+        "authPath": {
+          "type": "string"
+        },
+        "codexHome": {
+          "type": "string"
+        },
+        "configError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configOk": {
+          "type": "boolean"
+        },
+        "configPath": {
+          "type": "string"
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "connectionMode": {
+          "$ref": "#/$defs/LocalConnectionMode"
+        },
+        "guiApiBase": {
+          "$ref": "#/$defs/CodexAppGuiApiBaseStatus"
+        },
+        "imageGenerationEnabled": {
+          "type": "boolean"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodexAppProviderStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "providerMode": {
+          "$ref": "#/$defs/CodexProviderMode"
+        },
+        "providerModeMessage": {
+          "type": "string"
+        },
+        "providerOk": {
+          "type": "boolean"
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CodexAppProviderStatus"
+          }
+        },
+        "remoteControlSwitch": {
+          "$ref": "#/$defs/CodexAppRemoteControlSwitchStatus"
+        }
+      },
+      "required": [
+        "codexHome",
+        "configPath",
+        "authPath",
+        "configured",
+        "configOk",
+        "authOk",
+        "providerOk",
+        "guiApiBase",
+        "remoteControlSwitch",
+        "providers",
+        "imageGenerationEnabled",
+        "connectionMode",
+        "providerMode",
+        "providerModeMessage"
+      ]
+    },
+    "CodexAppGuiApiBaseStatus": {
+      "type": "object",
+      "properties": {
+        "configured": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expected": {
+          "type": "string"
+        },
+        "loginIssuerConfigured": {
+          "type": "boolean"
+        },
+        "loginIssuerExpected": {
+          "type": "string"
+        },
+        "loginIssuerValue": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supported": {
+          "type": "boolean"
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "supported",
+        "configured",
+        "expected",
+        "loginIssuerConfigured",
+        "loginIssuerExpected"
+      ]
+    },
+    "CodexAppProviderStatus": {
+      "type": "object",
+      "properties": {
+        "baseUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "requiresOpenaiAuth": {
+          "type": "boolean"
+        },
+        "supportsWebsockets": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "requiresOpenaiAuth",
+        "supportsWebsockets"
+      ]
+    },
+    "CodexAppRemoteControlSwitchDatabaseStatus": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      },
+      "required": [
+        "path",
+        "exists"
+      ]
+    },
+    "CodexAppRemoteControlSwitchStatus": {
+      "type": "object",
+      "properties": {
+        "configured": {
+          "type": "boolean"
+        },
+        "databases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CodexAppRemoteControlSwitchDatabaseStatus"
+          }
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "featureName": {
+          "type": "string"
+        },
+        "supported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "supported",
+        "configured",
+        "featureName",
+        "databases"
+      ]
+    },
+    "CodexProviderMode": {
+      "description": "Which process currently owns Codex's provider routing.\n\n`direct-api` means Codex calls the selected third-party API provider\ndirectly, without going through MochiPort's local gateway.",
+      "type": "string",
+      "enum": [
+        "mochiport",
+        "direct-api",
+        "unknown"
+      ]
+    },
+    "ConfigureCodexAppRequest": {
+      "type": "object",
+      "properties": {
+        "activate": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "codexHome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "connectionMode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalConnectionMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "providerBaseUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supportsWebsockets": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "ConfigureFeishuAccountRequest": {
+      "type": "object",
+      "properties": {
+        "appId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "appSecret": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ConfigureTelegramBotRequest": {
+      "type": "object",
+      "properties": {
+        "botToken": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mentionOnly": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "CustomModelConfig": {
+      "description": "用户自定义的模型目录条目。\n\n只描述“这个模型是什么”；Codex 依赖的协议字段（`comp_hash`、\n`apply_patch_tool_type`、`use_responses_lite`、`shell_type`、推理等级等）\n由 `family` 或所属 provider 的协议家族模板补齐。",
+      "type": "object",
+      "properties": {
+        "contextWindow": {
+          "description": "上下文窗口（token）；为空时继承家族模板。",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "description": {
+          "description": "说明文案；为空时用协议家族的默认说明。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "description": "前端显示名；为空时用 slug。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "family": {
+          "description": "显式覆盖的协议家族；为空时按所属 provider 的类型推断。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelFamily"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "providerName": {
+          "description": "提供该模型的服务商名称；为空时按各 provider 的 `models` 列表推断。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "slug": {
+          "description": "模型名（同时是 `/models` 返回的 slug 与路由匹配名）。",
+          "type": "string",
+          "default": ""
+        },
+        "supportsImageInput": {
+          "description": "是否接受图片输入；默认 false（保守）。",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "DeleteCodexAppProviderRequest": {
+      "type": "object",
+      "properties": {
+        "providerName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerName"
+      ]
+    },
+    "DeleteImAccountRequest": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "platform",
+        "accountId"
+      ]
+    },
+    "DeleteProviderRequest": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "DiscoveredModel": {
+      "description": "上游 `/models` 发现到的单个模型元数据。\n\n字段全部可选：只有上游明确声明的信息才落库，避免把猜测当成能力。",
+      "type": "object",
+      "properties": {
+        "contextWindow": {
+          "description": "上游声明的上下文窗口。",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "displayName": {
+          "description": "上游声明的展示名。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "上游模型名。",
+          "type": "string",
+          "default": ""
+        },
+        "supportsImageInput": {
+          "description": "上游明确声明的图片输入能力。",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "EnhancedLaunchOperationRequest": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "requestId"
+      ]
+    },
+    "FeishuBotStatus": {
+      "type": "object",
+      "properties": {
+        "allowedOpenIds": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "appId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "configured",
+        "enabled",
+        "allowedOpenIds"
+      ]
+    },
+    "FeishuConfig": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "default": ""
+        },
+        "allowedChatIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowedOpenIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "appId": {
+          "type": "string",
+          "default": ""
+        },
+        "appSecret": {
+          "type": "string",
+          "default": ""
+        },
+        "displayName": {
+          "type": "string",
+          "default": ""
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "mentionOnly": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "FeishuWsState": {
+      "type": "object",
+      "properties": {
+        "connected": {
+          "type": "boolean"
+        },
+        "connecting": {
+          "type": "boolean"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connecting",
+        "connected"
+      ]
+    },
+    "FetchProviderModelsRequest": {
+      "type": "object",
+      "properties": {
+        "apiKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "baseUrl": {
+          "type": "string"
+        },
+        "modelsUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerType": {
+          "$ref": "#/$defs/ProviderType"
+        }
+      },
+      "required": [
+        "baseUrl",
+        "providerType"
+      ]
+    },
+    "FetchProviderUsageRequest": {
+      "type": "object",
+      "properties": {
+        "providerName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerName"
+      ]
+    },
+    "FetchSub2ApiAccountsRequest": {
+      "type": "object",
+      "properties": {
+        "forceBillingRefresh": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "HealthResponse": {
+      "type": "object",
+      "properties": {
+        "apiMajor": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "service": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "apiMajor",
+        "ready"
+      ]
+    },
+    "ImAccountItem": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "avatarData": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "connected": {
+          "type": "boolean"
+        },
+        "connecting": {
+          "type": "boolean"
+        },
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastEventAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint128",
+          "minimum": 0
+        },
+        "lastInboundAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint128",
+          "minimum": 0
+        },
+        "platform": {
+          "type": "string"
+        },
+        "polling": {
+          "type": "boolean"
+        },
+        "replyGranularity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secretSet": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "platform",
+        "accountId",
+        "enabled",
+        "configured",
+        "secretSet",
+        "connecting",
+        "polling",
+        "connected"
+      ]
+    },
+    "ImAccountRuntimeState": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "connected": {
+          "type": "boolean"
+        },
+        "connecting": {
+          "type": "boolean"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastEventAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint128",
+          "minimum": 0
+        },
+        "lastInboundAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint128",
+          "minimum": 0
+        },
+        "platform": {
+          "$ref": "#/$defs/ImPlatformKind"
+        },
+        "polling": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "platform",
+        "accountId",
+        "connecting",
+        "polling",
+        "connected"
+      ]
+    },
+    "ImAccountsResponse": {
+      "type": "object",
+      "properties": {
+        "accounts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ImAccountItem"
+          }
+        }
+      },
+      "required": [
+        "accounts"
+      ]
+    },
+    "ImPlatformKind": {
+      "type": "string",
+      "enum": [
+        "feishu",
+        "telegram",
+        "wechat",
+        "wecom"
+      ]
+    },
+    "InstanceShutdownRequest": {
+      "type": "object",
+      "properties": {
+        "daemonInstanceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "daemonInstanceId"
+      ]
+    },
+    "LifecycleControlRequest": {
+      "type": "object",
+      "properties": {
+        "daemonInstanceId": {
+          "type": "string"
+        },
+        "force": {
+          "type": "boolean",
+          "default": false
+        },
+        "installationId": {
+          "type": "string"
+        },
+        "leaseGeneration": {
+          "description": "New clients send the lease generation to fence a restart request if\nownership changes while existing work drains. It stays optional so\nolder GUI clients remain compatible.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "installationId",
+        "daemonInstanceId"
+      ]
+    },
+    "LifecycleCredentialRotateRequest": {
+      "type": "object",
+      "properties": {
+        "daemonInstanceId": {
+          "type": "string"
+        },
+        "expectedManagementTokenGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "installationId": {
+          "type": "string"
+        },
+        "leaseGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reason": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "installationId",
+        "daemonInstanceId",
+        "leaseGeneration",
+        "expectedManagementTokenGeneration",
+        "requestId",
+        "reason"
+      ]
+    },
+    "LifecycleDaemonIdentityProof": {
+      "type": "object",
+      "properties": {
+        "bind": {
+          "type": "string"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "executableSha256": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "startedAtMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "pid",
+        "startedAtMs",
+        "executable",
+        "executableSha256",
+        "bind"
+      ]
+    },
+    "LifecycleLeaseRequest": {
+      "type": "object",
+      "properties": {
+        "daemonIdentity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LifecycleDaemonIdentityProof"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "daemonInstanceId": {
+          "type": "string"
+        },
+        "installationId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "installationId",
+        "daemonInstanceId"
+      ]
+    },
+    "LifecycleLeaseTakeoverRequest": {
+      "type": "object",
+      "properties": {
+        "daemonIdentity": {
+          "$ref": "#/$defs/LifecycleDaemonIdentityProof"
+        },
+        "daemonInstanceId": {
+          "type": "string"
+        },
+        "expectedLeaseGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "expectedManagementTokenGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "force": {
+          "type": "boolean"
+        },
+        "installationId": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "installationId",
+        "daemonInstanceId",
+        "expectedLeaseGeneration",
+        "expectedManagementTokenGeneration",
+        "requestId",
+        "force",
+        "daemonIdentity"
+      ]
+    },
+    "LifecycleManagementOwnership": {
+      "type": "object",
+      "properties": {
+        "canControl": {
+          "type": "boolean"
+        },
+        "installationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "leaseExpiresAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "leaseGeneration": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "managementTokenGeneration": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "mode": {
+          "type": "string"
+        },
+        "state": {
+          "description": "The daemon reports an active lease without exposing the management\ncredential. Clients compare `installationId` with their own identity.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "mode",
+        "canControl"
+      ]
+    },
+    "LifecycleProtectedWorkItems": {
+      "type": "object",
+      "properties": {
+        "aiGatewayRequests": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "codexTurns": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "enhancedLaunches": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "imStreams": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "pendingApprovals": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "remoteControlRequests": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "aiGatewayRequests",
+        "codexTurns",
+        "enhancedLaunches",
+        "imStreams",
+        "pendingApprovals",
+        "remoteControlRequests",
+        "total"
+      ]
+    },
+    "LifecycleResponse": {
+      "type": "object",
+      "properties": {
+        "bind": {
+          "type": "string"
+        },
+        "configPath": {
+          "type": "string"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "executableSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "management": {
+          "$ref": "#/$defs/LifecycleManagementOwnership"
+        },
+        "protectedWorkItems": {
+          "$ref": "#/$defs/LifecycleProtectedWorkItems"
+        },
+        "runtime": {
+          "$ref": "#/$defs/LifecycleRuntimeStatus"
+        },
+        "service": {
+          "$ref": "#/$defs/LifecycleServiceIdentity"
+        }
+      },
+      "required": [
+        "service",
+        "executable",
+        "configPath",
+        "bind",
+        "runtime",
+        "protectedWorkItems",
+        "management"
+      ]
+    },
+    "LifecycleRuntimeStatus": {
+      "type": "object",
+      "properties": {
+        "apiMajor": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "buildNumber": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "productVersion": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "productVersion",
+        "apiMajor"
+      ]
+    },
+    "LifecycleServiceIdentity": {
+      "type": "object",
+      "properties": {
+        "apiMajor": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "service": {
+          "type": "string"
+        },
+        "startedAtMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "service",
+        "apiMajor",
+        "ready",
+        "instanceId",
+        "pid",
+        "startedAtMs"
+      ]
+    },
+    "LocalConnectionMode": {
+      "type": "string",
+      "enum": [
+        "standard",
+        "vpnCompatible"
+      ]
+    },
+    "LoggingConfig": {
+      "type": "object",
+      "properties": {
+        "diagnostic": {
+          "type": "boolean",
+          "default": true
+        },
+        "maxMb": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 20,
+          "minimum": 0
+        },
+        "retentionDays": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 7,
+          "minimum": 0
+        }
+      }
+    },
+    "ManageCodexAppProviderStatus": {
+      "type": "object",
+      "properties": {
+        "baseUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "requiresOpenaiAuth": {
+          "type": "boolean"
+        },
+        "secretSet": {
+          "type": "boolean"
+        },
+        "supportsWebsockets": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "secretSet",
+        "requiresOpenaiAuth",
+        "supportsWebsockets"
+      ]
+    },
+    "ManageCodexAppStatus": {
+      "type": "object",
+      "properties": {
+        "activeProvider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authOk": {
+          "type": "boolean"
+        },
+        "codexHome": {
+          "type": "string"
+        },
+        "configError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configOk": {
+          "type": "boolean"
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "connectionMode": {
+          "$ref": "#/$defs/LocalConnectionMode"
+        },
+        "guiConfigured": {
+          "type": "boolean"
+        },
+        "guiError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "imageGenerationEnabled": {
+          "type": "boolean"
+        },
+        "providerMode": {
+          "$ref": "#/$defs/CodexProviderMode"
+        },
+        "providerModeMessage": {
+          "type": "string"
+        },
+        "providerOk": {
+          "type": "boolean"
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ManageCodexAppProviderStatus"
+          }
+        },
+        "remoteControlConfigured": {
+          "type": "boolean"
+        },
+        "remoteControlError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remoteControlSupported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "codexHome",
+        "configured",
+        "configOk",
+        "authOk",
+        "providerOk",
+        "guiConfigured",
+        "remoteControlSupported",
+        "remoteControlConfigured",
+        "providers",
+        "imageGenerationEnabled",
+        "connectionMode",
+        "providerMode",
+        "providerModeMessage"
+      ]
+    },
+    "ManageDashboardResponse": {
+      "type": "object",
+      "properties": {
+        "aiGatewayEnabled": {
+          "type": "boolean"
+        },
+        "aiGatewayProviderCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "bridgeRunning": {
+          "type": "boolean"
+        },
+        "codexAppConfigured": {
+          "type": "boolean"
+        },
+        "connectedImAccountCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "executionClients": {
+          "$ref": "#/$defs/ManageExecutionClients"
+        },
+        "imAccountCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "messageChannels": {
+          "$ref": "#/$defs/ManageMessageChannels"
+        },
+        "remoteControlConnected": {
+          "type": "boolean"
+        },
+        "remoteControlHealthy": {
+          "type": "boolean"
+        },
+        "requestLoggingEnabled": {
+          "type": "boolean"
+        },
+        "service": {
+          "$ref": "#/$defs/ManageStatusResponse"
+        }
+      },
+      "required": [
+        "service",
+        "bridgeRunning",
+        "remoteControlConnected",
+        "remoteControlHealthy",
+        "codexAppConfigured",
+        "imAccountCount",
+        "connectedImAccountCount",
+        "executionClients",
+        "messageChannels",
+        "aiGatewayEnabled",
+        "aiGatewayProviderCount",
+        "requestLoggingEnabled"
+      ]
+    },
+    "ManageExecutionClient": {
+      "type": "object",
+      "properties": {
+        "configured": {
+          "type": "boolean"
+        },
+        "connected": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "configured",
+        "connected"
+      ]
+    },
+    "ManageExecutionClients": {
+      "type": "object",
+      "properties": {
+        "cli": {
+          "$ref": "#/$defs/ManageExecutionClient"
+        },
+        "codexApp": {
+          "$ref": "#/$defs/ManageExecutionClient"
+        },
+        "vscode": {
+          "$ref": "#/$defs/ManageExecutionClient"
+        }
+      },
+      "required": [
+        "codexApp",
+        "vscode",
+        "cli"
+      ]
+    },
+    "ManageImAccountsResponse": {
+      "type": "object",
+      "properties": {
+        "accounts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ImAccountItem"
+          }
+        },
+        "service": {
+          "$ref": "#/$defs/ManageStatusResponse"
+        }
+      },
+      "required": [
+        "service",
+        "accounts"
+      ]
+    },
+    "ManageLogDirectoryResponse": {
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "string"
+        },
+        "instanceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "directory",
+        "instanceId"
+      ]
+    },
+    "ManageMessageChannel": {
+      "type": "object",
+      "properties": {
+        "accountCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "connectedAccountCount": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "accountCount",
+        "connectedAccountCount"
+      ]
+    },
+    "ManageMessageChannels": {
+      "type": "object",
+      "properties": {
+        "feishu": {
+          "$ref": "#/$defs/ManageMessageChannel"
+        },
+        "telegram": {
+          "$ref": "#/$defs/ManageMessageChannel"
+        },
+        "wechat": {
+          "$ref": "#/$defs/ManageMessageChannel"
+        },
+        "wecom": {
+          "$ref": "#/$defs/ManageMessageChannel"
+        }
+      },
+      "required": [
+        "telegram",
+        "feishu",
+        "wechat",
+        "wecom"
+      ]
+    },
+    "ManageStatusResponse": {
+      "type": "object",
+      "properties": {
+        "apiMajor": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "service": {
+          "type": "string"
+        },
+        "startedAtMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "service",
+        "apiMajor",
+        "ready",
+        "instanceId",
+        "pid",
+        "startedAtMs"
+      ]
+    },
+    "ModelFamily": {
+      "description": "协议家族：决定自动合成目录条目时继承哪一套能力模板。",
+      "oneOf": [
+        {
+          "description": "OpenAI Responses 透传。",
+          "type": "string",
+          "const": "open_ai_responses"
+        },
+        {
+          "description": "DeepSeek Responses 原生透传。",
+          "type": "string",
+          "const": "deepseek_responses"
+        },
+        {
+          "description": "Grok/xAI Responses 透传。",
+          "type": "string",
+          "const": "grok_responses"
+        },
+        {
+          "description": "Chat Completions（DeepSeek 等）。",
+          "type": "string",
+          "const": "chat_completions"
+        },
+        {
+          "description": "Anthropic Messages（Claude/GLM 等）。",
+          "type": "string",
+          "const": "anthropic_messages"
+        }
+      ]
+    },
+    "OutboundProxyConfig": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/OutboundProxyMode",
+          "default": "system"
+        },
+        "url": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "OutboundProxyMode": {
+      "type": "string",
+      "enum": [
+        "system",
+        "direct",
+        "custom"
+      ]
+    },
+    "ProviderConfig": {
+      "description": "单个 provider 配置。",
+      "type": "object",
+      "properties": {
+        "apiKey": {
+          "description": "API key。",
+          "type": "string",
+          "default": ""
+        },
+        "baseUrl": {
+          "description": "上游 API base URL。",
+          "type": "string",
+          "default": ""
+        },
+        "compatibility": {
+          "description": "provider 兼容 profile。Anthropic Messages 兼容厂商优先使用该字段表达差异。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "discoveredModels": {
+          "description": "从上游 `/models` 自动发现到的模型元数据。\n\n只用于给「目录之外的模型名」补齐显示名、上下文窗口和图片能力；\n上游没有明确声明时保守留空，不参与路由匹配。",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DiscoveredModel"
+          }
+        },
+        "enabled": {
+          "description": "是否启用该 provider。",
+          "type": "boolean",
+          "default": true
+        },
+        "modelAliases": {
+          "description": "Codex 侧 model 到上游 provider model 的映射。\n\n例如 `glm-5.2 = \"GLM-5.2\"`。路由使用 key 匹配 Codex 请求，出站使用 value。",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "models": {
+          "description": "该 provider 支持的 model 列表（精确匹配用）。",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "modelsUrl": {
+          "description": "可选的模型列表 API URL。为空时 GUI 按 base_url 推导 `/models`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "provider 名称标识（如 \"openai\"、\"deepseek\"）。",
+          "type": "string",
+          "default": ""
+        },
+        "promptCacheRetention": {
+          "description": "可选的 prompt_cache_retention 覆盖。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerType": {
+          "description": "provider 类型：OpenAI/DeepSeek/Grok Responses、Chat Completions 或 Anthropic Messages。",
+          "$ref": "#/$defs/ProviderType",
+          "default": "open_ai_responses"
+        },
+        "timeoutSecs": {
+          "description": "上游请求超时（秒）。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 600,
+          "minimum": 0
+        },
+        "weight": {
+          "description": "同一 model 命中多个 provider 时的路由权重。实际路由中最小按 1 处理。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 100,
+          "minimum": 0
+        }
+      }
+    },
+    "ProviderType": {
+      "description": "Provider 类型枚举。",
+      "oneOf": [
+        {
+          "description": "OpenAI Responses API 透传。",
+          "type": "string",
+          "const": "open_ai_responses"
+        },
+        {
+          "description": "DeepSeek Responses API 原生透传。",
+          "type": "string",
+          "const": "deepseek_responses"
+        },
+        {
+          "description": "Grok/xAI Responses API 透传，带 Grok 专用兼容处理。",
+          "type": "string",
+          "const": "grok_responses"
+        },
+        {
+          "description": "Chat Completions API（DeepSeek 等）。",
+          "type": "string",
+          "const": "chat_completions"
+        },
+        {
+          "description": "Anthropic Messages API（Claude）。",
+          "type": "string",
+          "const": "anthropic_messages"
+        }
+      ]
+    },
+    "RemoteControlBackendStatusResponse": {
+      "type": "object",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "currentThreadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "environmentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "feishuConfigured": {
+          "type": "boolean"
+        },
+        "installationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remoteControlBaseUrl": {
+          "type": "string"
+        },
+        "remoteControlConnected": {
+          "type": "boolean"
+        },
+        "remoteControlInitialized": {
+          "type": "boolean"
+        },
+        "serverName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "telegramConfigured": {
+          "type": "boolean"
+        },
+        "wechatConfigured": {
+          "type": "boolean"
+        },
+        "wecomConfigured": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "available",
+        "enabled",
+        "remoteControlBaseUrl",
+        "remoteControlConnected",
+        "remoteControlInitialized",
+        "feishuConfigured",
+        "telegramConfigured",
+        "wechatConfigured",
+        "wecomConfigured"
+      ]
+    },
+    "RotateTelegramPairingCodeRequest": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId"
+      ]
+    },
+    "SetCodexAppProviderWebSocketRequest": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "providerName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerName",
+        "enabled"
+      ]
+    },
+    "SetImAccountEnabledRequest": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "platform",
+        "accountId",
+        "enabled"
+      ]
+    },
+    "SetImChannelEnabledRequest": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "channel",
+        "enabled"
+      ]
+    },
+    "SetSub2ApiAccountSchedulableRequest": {
+      "type": "object",
+      "properties": {
+        "schedulable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schedulable"
+      ]
+    },
+    "SetTelegramReplyGranularityRequest": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "granularity": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "granularity"
+      ]
+    },
+    "StatusResponse": {
+      "type": "object",
+      "properties": {
+        "bind": {
+          "type": "string"
+        },
+        "feishuWs": {
+          "$ref": "#/$defs/FeishuWsState"
+        },
+        "imAccounts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ImAccountRuntimeState"
+          }
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "localConnectionMode": {
+          "$ref": "#/$defs/LocalConnectionMode"
+        },
+        "outboundProxyMode": {
+          "$ref": "#/$defs/OutboundProxyMode"
+        },
+        "pid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "service": {
+          "type": "string"
+        },
+        "startedAtMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "statePath": {
+          "type": "string"
+        },
+        "telegram": {
+          "$ref": "#/$defs/TelegramState"
+        },
+        "wechat": {
+          "$ref": "#/$defs/WechatState"
+        }
+      },
+      "required": [
+        "service",
+        "pid",
+        "instanceId",
+        "startedAtMs",
+        "running",
+        "bind",
+        "localConnectionMode",
+        "outboundProxyMode",
+        "statePath",
+        "feishuWs",
+        "telegram",
+        "wechat",
+        "imAccounts"
+      ]
+    },
+    "Sub2ApiAdminConfig": {
+      "type": "object",
+      "properties": {
+        "adminApiKey": {
+          "type": "string",
+          "default": ""
+        },
+        "baseUrl": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "SyncTelegramTopicsRequest": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "chatId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "chatId"
+      ]
+    },
+    "TelegramBotStatus": {
+      "type": "object",
+      "properties": {
+        "allowedChatIds": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "connected": {
+          "type": "boolean"
+        },
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mentionOnly": {
+          "type": "boolean"
+        },
+        "polling": {
+          "type": "boolean"
+        },
+        "tokenSet": {
+          "type": "boolean"
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "configured",
+        "enabled",
+        "tokenSet",
+        "mentionOnly",
+        "allowedChatIds",
+        "polling",
+        "connected"
+      ]
+    },
+    "TelegramConfig": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "default": ""
+        },
+        "allowedChatIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "botToken": {
+          "type": "string",
+          "default": ""
+        },
+        "displayName": {
+          "type": "string",
+          "default": ""
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "mentionOnly": {
+          "type": "boolean",
+          "default": false
+        },
+        "pairingCode": {
+          "description": "非空时启用配对码模式：未绑定私聊必须提供该码才会写入 allowedChatIds。",
+          "type": "string",
+          "default": ""
+        },
+        "projectGroups": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TelegramProjectGroupConfig"
+          }
+        },
+        "replyGranularity": {
+          "$ref": "#/$defs/TelegramReplyGranularity",
+          "default": "standard"
+        }
+      }
+    },
+    "TelegramProjectGroupAccount": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "projectGroups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TelegramProjectGroupConfig"
+          }
+        }
+      },
+      "required": [
+        "accountId",
+        "projectGroups"
+      ]
+    },
+    "TelegramProjectGroupConfig": {
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "default": ""
+        },
+        "cwd": {
+          "type": "string",
+          "default": ""
+        },
+        "projectName": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "TelegramProjectGroupsResponse": {
+      "type": "object",
+      "properties": {
+        "accounts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TelegramProjectGroupAccount"
+          }
+        }
+      },
+      "required": [
+        "accounts"
+      ]
+    },
+    "TelegramReplyGranularity": {
+      "description": "Telegram 账号的回复颗粒度；档位按\"消息包含哪些成分与形态\"划分，\n与 GUI 的「回复颗粒度」选择和 Telegram 内的 /回复 命令共享。",
+      "oneOf": [
+        {
+          "description": "只发过程文本（助手说明）和最终结果；工具执行、文件修改等一律静默。",
+          "type": "string",
+          "const": "summary"
+        },
+        {
+          "description": "现有默认行为：所有信息合并进一条聚合气泡原地更新。",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "所有信息逐条独立发送：每条工具执行、文件修改各自一条消息，不合并更新。",
+          "type": "string",
+          "const": "full"
+        }
+      ]
+    },
+    "TelegramState": {
+      "type": "object",
+      "properties": {
+        "connected": {
+          "type": "boolean"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastEventAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint128",
+          "minimum": 0
+        },
+        "lastInboundAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint128",
+          "minimum": 0
+        },
+        "polling": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "polling",
+        "connected"
+      ]
+    },
+    "UpdateGatewayRequest": {
+      "type": "object",
+      "properties": {
+        "codexVisibleModels": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "customModels": {
+          "description": "自定义模型条目；缺省表示保持现状（旧客户端不会带这个字段）。",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "$ref": "#/$defs/CustomModelConfig"
+          }
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "filterImageGenerationTool": {
+          "type": "boolean"
+        },
+        "modelOwners": {
+          "description": "同名模型归属；缺省表示保持现状。",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "providerDisplayPrefix": {
+          "description": "是否用服务商名给模型加显示前缀；缺省表示保持现状。",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "requestLogDetailsEnabled": {
+          "type": "boolean"
+        },
+        "requestLogMaxMb": {
+          "description": "请求日志库体积上限（MB）；缺省表示保持现状。",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "requestLogRetentionDays": {
+          "description": "请求日志保留天数；缺省表示保持现状。",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "requestLoggingEnabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "enabled",
+        "filterImageGenerationTool",
+        "requestLoggingEnabled",
+        "requestLogDetailsEnabled"
+      ]
+    },
+    "UpdateSettingsRequest": {
+      "type": "object",
+      "properties": {
+        "language": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "localConnectionMode": {
+          "$ref": "#/$defs/LocalConnectionMode"
+        },
+        "outboundProxyMode": {
+          "$ref": "#/$defs/OutboundProxyMode"
+        },
+        "outboundProxyUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "theme": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "localConnectionMode",
+        "outboundProxyMode"
+      ]
+    },
+    "UpdateSub2ApiAdminRequest": {
+      "type": "object",
+      "properties": {
+        "adminApiKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "baseUrl": {
+          "type": "string"
+        },
+        "clearAdminApiKey": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "baseUrl"
+      ]
+    },
+    "UpdateTelegramProjectGroupsRequest": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "projectGroups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TelegramProjectGroupConfig"
+          }
+        }
+      },
+      "required": [
+        "accountId",
+        "projectGroups"
+      ]
+    },
+    "UpsertProviderRequest": {
+      "type": "object",
+      "properties": {
+        "apiKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "baseUrl": {
+          "type": "string"
+        },
+        "clearApiKey": {
+          "type": "boolean",
+          "default": false
+        },
+        "compatibility": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "discoveredModels": {
+          "description": "从上游 `/models` 发现到的模型元数据（可选）。",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DiscoveredModel"
+          }
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "modelAliases": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "models": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "modelsUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "originalName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "promptCacheRetention": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerType": {
+          "$ref": "#/$defs/ProviderType"
+        },
+        "timeoutSecs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "weight": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "enabled",
+        "providerType",
+        "baseUrl",
+        "weight",
+        "timeoutSecs"
+      ]
+    },
+    "UsageBreakdownRow": {
+      "description": "One row of the cross-product breakdown, keyed the same way as the client's\nhistory database: `(day, service, source, model, project)`.",
+      "type": "object",
+      "properties": {
+        "costUsd": {
+          "description": "Cost for this row, priced with its own model.",
+          "type": "number",
+          "format": "double"
+        },
+        "day": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "service": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "totals": {
+          "$ref": "#/$defs/UsageTotals"
+        }
+      },
+      "required": [
+        "day",
+        "service",
+        "source",
+        "model",
+        "project",
+        "totals",
+        "costUsd"
+      ]
+    },
+    "UsageDayEntry": {
+      "description": "Usage for one calendar day.",
+      "type": "object",
+      "properties": {
+        "date": {
+          "type": "string"
+        },
+        "sessions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "totals": {
+          "$ref": "#/$defs/UsageTotals"
+        }
+      },
+      "required": [
+        "date",
+        "sessions",
+        "totals"
+      ]
+    },
+    "UsageHourEntry": {
+      "description": "Usage for one hour of one day, for the recent-activity series.",
+      "type": "object",
+      "properties": {
+        "date": {
+          "type": "string"
+        },
+        "hour": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "sessions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "totals": {
+          "$ref": "#/$defs/UsageTotals"
+        }
+      },
+      "required": [
+        "date",
+        "hour",
+        "sessions",
+        "totals"
+      ]
+    },
+    "UsageMinuteBucket": {
+      "description": "Token totals for one minute of day.",
+      "type": "object",
+      "properties": {
+        "minute": {
+          "description": "Minutes since the Unix epoch, so a 24-hour window can cross midnight.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "totals": {
+          "$ref": "#/$defs/UsageTotals"
+        }
+      },
+      "required": [
+        "minute",
+        "totals"
+      ]
+    },
+    "UsageModelEntry": {
+      "description": "Usage attributed to one model.",
+      "type": "object",
+      "properties": {
+        "costUsd": {
+          "description": "API-equivalent estimate in US dollars. Mirrors the client calculation it\nreplaces: cached input is billed once, at the cached rate.",
+          "type": "number",
+          "format": "double"
+        },
+        "model": {
+          "type": "string"
+        },
+        "sessions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "totals": {
+          "$ref": "#/$defs/UsageTotals"
+        }
+      },
+      "required": [
+        "model",
+        "sessions",
+        "totals",
+        "costUsd"
+      ]
+    },
+    "UsageProjectEntry": {
+      "description": "Usage attributed to one project.",
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "sessions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "totals": {
+          "$ref": "#/$defs/UsageTotals"
+        }
+      },
+      "required": [
+        "project",
+        "sessions",
+        "totals"
+      ]
+    },
+    "UsageProviderEntry": {
+      "description": "Usage attributed to one provider.",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "sessions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "totals": {
+          "$ref": "#/$defs/UsageTotals"
+        }
+      },
+      "required": [
+        "provider",
+        "sessions",
+        "totals"
+      ]
+    },
+    "UsageQuotaHistoryPoint": {
+      "description": "One day's last observed percentage for one quota window.",
+      "type": "object",
+      "properties": {
+        "day": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`primary` or `secondary`, i.e. the record position rather than a fixed\nduration (measured records carry a 30-day window under `primary`).",
+          "type": "string"
+        },
+        "usedPercent": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "day",
+        "kind",
+        "usedPercent"
+      ]
+    },
+    "UsageQuotaPoint": {
+      "description": "One minute-level quota reading.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "`primary` or `secondary`, i.e. the record position.",
+          "type": "string"
+        },
+        "minute": {
+          "description": "Minutes since the Unix epoch.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "usedPercent": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "minute",
+        "kind",
+        "usedPercent"
+      ]
+    },
+    "UsageQuotaSnapshot": {
+      "description": "Latest quota windows. Absent entirely when the logs carried none, which is\nthe normal state for sessions routed through the AI gateway.",
+      "type": "object",
+      "properties": {
+        "observedAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "planType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "primary": {
+          "description": "The record's `primary` window. Classify by `windowMinutes`, not by this\nposition: measured records carry a 30-day window here.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageQuotaWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secondary": {
+          "description": "The record's `secondary` window. Usually absent; classify by\n`windowMinutes` for the same reason as `primary`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageQuotaWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "UsageQuotaWindow": {
+      "description": "One quota window as reported by Codex.",
+      "type": "object",
+      "properties": {
+        "resetsAtMs": {
+          "description": "Absolute reset time, in milliseconds since the Unix epoch. Absent when\nCodex reported a relative reset without a usable record timestamp.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "usedPercent": {
+          "description": "Percentage of the window already consumed.",
+          "type": "number",
+          "format": "double"
+        },
+        "windowMinutes": {
+          "description": "Window length in minutes, as reported by Codex. Callers should classify\nwindows by this rather than by `primary`/`secondary` position: measured\nrecords carry a 30-day window under `primary`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "usedPercent"
+      ]
+    },
+    "UsageSummaryResponse": {
+      "description": "Local Codex usage across the requested window.",
+      "type": "object",
+      "properties": {
+        "breakdown": {
+          "description": "Cross-product rows, ordered by day, model, source, then project.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UsageBreakdownRow"
+          }
+        },
+        "days": {
+          "description": "Newest day first; empty when no local Codex data was found.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UsageDayEntry"
+          }
+        },
+        "estimatedCostUsd": {
+          "description": "Estimated cost across the window, in US dollars. Summed per model so each\nmodel's own rate applies.\n\n`serde(default)` like the collections above: this field was added after the\nfirst release of the endpoint, and a newer client must still be able to\ndecode an older daemon's response.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "generatedAtMs": {
+          "description": "Milliseconds since the Unix epoch, so clients can label their snapshot.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "hours": {
+          "description": "Newest hour first, for the recent-activity series.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UsageHourEntry"
+          }
+        },
+        "minutes": {
+          "description": "Per-minute totals over the trailing window the clients use (48 hours at\nmost), oldest minute first. Clients derive live rates (`tokensPerMinute`,\nbaseline) from these.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UsageMinuteBucket"
+          }
+        },
+        "models": {
+          "description": "Highest usage first. A session that switched models contributes to each\nmodel it actually used.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UsageModelEntry"
+          }
+        },
+        "projects": {
+          "description": "Highest usage first; sessions without a recorded working directory are\nomitted rather than bucketed as \"unknown\".",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UsageProjectEntry"
+          }
+        },
+        "providers": {
+          "description": "Highest usage first.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UsageProviderEntry"
+          }
+        },
+        "quota": {
+          "description": "Latest quota windows, or absent when the logs contained none.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageQuotaSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "quotaHistory": {
+          "description": "Last quota reading per day and window, oldest day first. This is the\nhistory clients persist to estimate weekly depletion.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UsageQuotaHistoryPoint"
+          }
+        },
+        "quotaMinutes": {
+          "description": "Minute-level quota readings over the trailing hour, oldest first. Clients\nestimate short-horizon depletion from this series.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UsageQuotaPoint"
+          }
+        },
+        "sessions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "sessionsRoot": {
+          "description": "`None` when this machine has no local Codex installation to read.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "totals": {
+          "$ref": "#/$defs/UsageTotals"
+        },
+        "windowDays": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "generatedAtMs",
+        "windowDays",
+        "sessions",
+        "totals"
+      ]
+    },
+    "UsageTotals": {
+      "description": "Token counters for one day or for the whole window.",
+      "type": "object",
+      "properties": {
+        "cacheWriteInputTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cachedInputTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "inputTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reasoningOutputTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "totalTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "inputTokens",
+        "cachedInputTokens",
+        "cacheWriteInputTokens",
+        "outputTokens",
+        "reasoningOutputTokens",
+        "totalTokens"
+      ]
+    },
+    "WechatBotStatus": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "allowedUserIds": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "baseUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "connected": {
+          "type": "boolean"
+        },
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastEventAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint128",
+          "minimum": 0
+        },
+        "lastInboundAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint128",
+          "minimum": 0
+        },
+        "polling": {
+          "type": "boolean"
+        },
+        "userId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "configured",
+        "enabled",
+        "allowedUserIds",
+        "polling",
+        "connected"
+      ]
+    },
+    "WechatConfig": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "default": "wechat"
+        },
+        "allowedUserIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "baseUrl": {
+          "type": "string",
+          "default": ""
+        },
+        "botToken": {
+          "type": "string",
+          "default": ""
+        },
+        "botType": {
+          "type": "string",
+          "default": "3"
+        },
+        "displayName": {
+          "type": "string",
+          "default": ""
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "userId": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "WechatOnboardPollRequest": {
+      "type": "object",
+      "properties": {
+        "sessionKey": {
+          "type": "string"
+        },
+        "verifyCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "sessionKey"
+      ]
+    },
+    "WechatState": {
+      "type": "object",
+      "properties": {
+        "connected": {
+          "type": "boolean"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastEventAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint128",
+          "minimum": 0
+        },
+        "lastInboundAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint128",
+          "minimum": 0
+        },
+        "polling": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "polling",
+        "connected"
+      ]
+    },
+    "WecomBotStatus": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "botId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "connected": {
+          "type": "boolean"
+        },
+        "connecting": {
+          "type": "boolean"
+        },
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastEventAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint128",
+          "minimum": 0
+        },
+        "lastInboundAtMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint128",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "configured",
+        "enabled",
+        "connecting",
+        "connected"
+      ]
+    },
+    "WecomConfig": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "default": "wecom"
+        },
+        "allowedChatIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowedUserIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "botId": {
+          "type": "string",
+          "default": ""
+        },
+        "displayName": {
+          "type": "string",
+          "default": "企业微信机器人"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "secret": {
+          "type": "string",
+          "default": ""
+        },
+        "websocketUrl": {
+          "type": "string",
+          "default": "wss://openws.work.weixin.qq.com"
+        }
+      }
+    },
+    "WecomOnboardPollRequest": {
+      "type": "object",
+      "properties": {
+        "sessionKey": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionKey"
+      ]
+    }
+  }
+}

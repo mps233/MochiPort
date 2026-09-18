@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
@@ -285,7 +286,7 @@ pub(super) async fn manage_feishu_onboard_poll(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ConfigureFeishuAccountRequest {
     app_id: Option<String>,
@@ -545,7 +546,7 @@ struct WechatOnboardStartResponse {
     expires_in: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct WechatOnboardPollRequest {
     session_key: String,
@@ -842,7 +843,7 @@ struct WecomOnboardStartResponse {
     interval: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(JsonSchema, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct WecomOnboardPollRequest {
     session_key: String,

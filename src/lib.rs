@@ -31,6 +31,7 @@ pub(crate) mod remote_control_backend;
 pub(crate) mod store;
 pub(crate) mod timing;
 pub(crate) mod types;
+pub(crate) mod usage;
 pub(crate) mod version;
 pub(crate) mod web;
 

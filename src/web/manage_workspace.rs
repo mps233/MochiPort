@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use std::collections::{BTreeMap, HashSet};
 
 use axum::{
@@ -111,7 +112,7 @@ impl From<&ProviderConfig> for ManageProviderResponse {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdateGatewayRequest {
     enabled: bool,
@@ -137,7 +138,7 @@ pub(super) struct UpdateGatewayRequest {
     provider_display_prefix: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpsertProviderRequest {
     original_name: Option<String>,
@@ -162,7 +163,7 @@ pub(super) struct UpsertProviderRequest {
     clear_api_key: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct DeleteProviderRequest {
     name: String,
@@ -186,7 +187,7 @@ struct ManageOutboundProxyResponse {
     credential_set: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdateSettingsRequest {
     language: Option<String>,
@@ -219,13 +220,13 @@ struct RequestLogCursorPayload {
     id: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ClearOldRequestLogsRequest {
     days: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct FetchProviderModelsRequest {
     provider_name: Option<String>,
@@ -235,13 +236,13 @@ pub(super) struct FetchProviderModelsRequest {
     api_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct FetchProviderUsageRequest {
     provider_name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdateSub2ApiAdminRequest {
     base_url: String,
@@ -250,14 +251,14 @@ pub(super) struct UpdateSub2ApiAdminRequest {
     clear_admin_api_key: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct FetchSub2ApiAccountsRequest {
     #[serde(default)]
     force_billing_refresh: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(JsonSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SetSub2ApiAccountSchedulableRequest {
     schedulable: bool,

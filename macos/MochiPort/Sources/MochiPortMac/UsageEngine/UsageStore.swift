@@ -29,6 +29,88 @@ public final class UsageStore {
 
     public init() {}
 
+    /// Applies quota windows the daemon derived from the same logs.
+    ///
+    /// Windows are classified by their reported `windowMinutes` rather than by
+    /// their position in the record: measured records carry a 30-day window under
+    /// `primary`, so treating `primary` as the 5-hour window would mislabel it.
+    /// A window whose length matches no known kind is skipped instead of being
+    /// forced into the nearest one.
+    ///
+    /// Only `session5h` and `weekly` are recognised, matching what the dashboard
+    /// renders; `daily` is a usage bucket, not a quota window.
+    ///
+    /// Passing an empty array is a no-op, so a daemon that reports no windows
+    /// cannot clear locally observed limits.
+    public func applyQuotaWindows(
+        primary: (usedPercent: Double, windowMinutes: UInt32?, resetsAt: Date?)?,
+        secondary: (usedPercent: Double, windowMinutes: UInt32?, resetsAt: Date?)?,
+        for service: ServiceID
+    ) {
+        /// Codex reports the 5-hour window as 300 minutes and the weekly one as
+        /// 10080. A tolerance absorbs the small drift seen in real records.
+        func kind(for minutes: UInt32?) -> LimitWindow.Kind? {
+            guard let minutes else { return nil }
+            switch minutes {
+            case 240...360: return .session5h
+            case 9_000...11_000: return .weekly
+            default: return nil
+            }
+        }
+
+        var windows: [LimitWindow] = []
+        for candidate in [primary, secondary] {
+            guard let candidate, let kind = kind(for: candidate.windowMinutes) else { continue }
+            windows.append(
+                LimitWindow(
+                    kind: kind,
+                    usedPercent: candidate.usedPercent,
+                    resetsAt: candidate.resetsAt
+                )
+            )
+        }
+        guard !windows.isEmpty else { return }
+        setLimits(windows, for: service)
+    }
+
+    /// Replaces the minute buckets for a service with totals the daemon derived
+    /// from the same logs.
+    ///
+    /// This is a **replacement**, not a merge: both sides read the same records,
+    /// so adding them would double-count every minute. Minutes absent from
+    /// `totals` are cleared for that service, which is what lets the daemon
+    /// become authoritative instead of merely additive.
+    ///
+    /// Passing an empty dictionary is a no-op rather than a wipe, so a daemon
+    /// that returns no usable minutes cannot erase locally observed activity.
+    public func replaceMinuteBuckets(_ totals: [Int: Int], for service: ServiceID) {
+        guard !totals.isEmpty else { return }
+        minuteBuckets[service] = totals
+        if let newest = totals.keys.max() {
+            let observed = Date(timeIntervalSince1970: TimeInterval(newest * 60))
+            if let previous = lastEventTimestamp[service] {
+                if observed > previous { lastEventTimestamp[service] = observed }
+            } else {
+                lastEventTimestamp[service] = observed
+            }
+        }
+    }
+
+    /// Whether the daemon currently owns the percentage series.
+    ///
+    /// While it does, `setLimits` must not append: the two read the same records,
+    /// so interleaving an append after a replacement would duplicate or drop
+    /// samples depending on timing. The flag keeps exactly one writer active.
+    ///
+    /// It is not permanent — if the daemon stops supplying samples (it was shut
+    /// down, or reported no quota data), local appends resume so depletion
+    /// estimation keeps working instead of freezing on a stale series.
+    private var daemonOwnsPercentHistory = false
+    /// Last time the daemon supplied a series, used to expire that ownership.
+    private var daemonPercentHistoryAt: Date?
+    /// How long daemon ownership survives without fresh samples.
+    private static let daemonOwnershipTimeout: TimeInterval = 5 * 60
+
     public func setLimits(_ windows: [LimitWindow], for service: ServiceID) {
         setLimits(windows, for: service, at: Date())
     }
@@ -36,6 +118,16 @@ public final class UsageStore {
     /// 测试用：可注入样本记录时间的变体。生产用 `setLimits(_:for:)`。
     func setLimits(_ windows: [LimitWindow], for service: ServiceID, at sampleDate: Date) {
         limits[service] = windows
+        if daemonOwnsPercentHistory {
+            // Ownership expires so a daemon that stopped reporting cannot freeze
+            // the series forever.
+            if let since = daemonPercentHistoryAt,
+               Date().timeIntervalSince(since) < Self.daemonOwnershipTimeout {
+                return
+            }
+            daemonOwnsPercentHistory = false
+            daemonPercentHistoryAt = nil
+        }
         let trimCutoff = sampleDate.addingTimeInterval(-60 * 60)
         for window in windows {
             var series = percentHistory[service]?[window.kind] ?? []
@@ -43,6 +135,33 @@ public final class UsageStore {
             series.removeAll { $0.date < trimCutoff }
             percentHistory[service, default: [:]][window.kind] = series
         }
+    }
+
+    /// Replaces the percentage series for one service with samples the daemon
+    /// derived from the same logs.
+    ///
+    /// This is a **replacement**, not an append: both sides read the same
+    /// records, so appending the daemon's series to the locally accumulated one
+    /// would count every sample twice and distort the depletion slope.
+    ///
+    /// Samples are accepted only for kinds already tracked, and an empty input is
+    /// a no-op so a daemon with no quota data cannot erase local observations.
+    public func replacePercentHistory(
+        _ samples: [(kind: LimitWindow.Kind, date: Date, percent: Double)],
+        for service: ServiceID
+    ) {
+        guard !samples.isEmpty else { return }
+        let trimCutoff = (samples.map(\.date).max() ?? Date()).addingTimeInterval(-60 * 60)
+        var rebuilt: [LimitWindow.Kind: [(date: Date, percent: Double)]] = [:]
+        // The estimator walks the series in order, so it is sorted here once
+        // rather than trusted to arrive sorted.
+        for sample in samples.sorted(by: { $0.date < $1.date }) where sample.date >= trimCutoff {
+            rebuilt[sample.kind, default: []].append((date: sample.date, percent: sample.percent))
+        }
+        guard !rebuilt.isEmpty else { return }
+        daemonOwnsPercentHistory = true
+        daemonPercentHistoryAt = Date()
+        percentHistory[service] = rebuilt
     }
 
     /// 用服务的 **session5h 窗口** 时间序列估计耗尽（分钟级斜率）。

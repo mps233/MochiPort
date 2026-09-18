@@ -513,17 +513,395 @@ pub struct CodexUsageSnapshot {
     updated_at_ms: u64,
 }
 
+/// Subset of the daemon's `/api/v1/manage/usage/history` response that this
+/// client consumes.
+///
+/// `breakdown` is used rather than `days`/`projects` because its rows carry the
+/// day, so both the 7-day and the 105-day windows can be sliced out of it
+/// without asking the daemon twice.
+/// Only the series this client consumes are declared.
+///
+/// `estimatedCostUsd` is deliberately **not** read: the daemon reports it over the
+/// whole requested window, while the snapshot field of the same name means today's
+/// cost (the UI labels it 「今日成本」). Parsing it invited exactly that mix-up —
+/// an earlier version assigned it and reported a multi-day sum as today's spend.
+/// Today's cost is summed from the rows for today instead.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonUsageHistory {
+    #[serde(default)]
+    breakdown: Vec<DaemonBreakdownRow>,
+    #[serde(default)]
+    minutes: Vec<DaemonMinuteBucket>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonMinuteBucket {
+    /// Minutes since the Unix epoch.
+    minute: i64,
+    totals: DaemonUsageTotals,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonBreakdownRow {
+    day: String,
+    project: String,
+    totals: DaemonUsageTotals,
+    #[serde(default)]
+    cost_usd: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonUsageTotals {
+    #[serde(default)]
+    total_tokens: u64,
+}
+
+/// The `length` days ending `today`, as `"%Y-%m-%d"`, oldest first.
+fn day_axis(length: u64, today: NaiveDate) -> Vec<String> {
+    (0..length)
+        .rev()
+        .filter_map(|offset| today.checked_sub_days(Days::new(offset)))
+        .map(|day| day.format("%Y-%m-%d").to_string())
+        .collect()
+}
+
+/// Totals per day across the requested window, with every day present.
+///
+/// Charts need a continuous x-axis, but the daemon only reports days that have
+/// data, so quiet days are filled in with zero.
+fn daily_totals(
+    rows: &[DaemonBreakdownRow],
+    axis: &[String],
+) -> std::collections::HashMap<String, u64> {
+    let wanted: std::collections::HashSet<&str> = axis.iter().map(String::as_str).collect();
+    let mut totals: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for row in rows {
+        if !wanted.contains(row.day.as_str()) {
+            continue;
+        }
+        *totals.entry(row.day.clone()).or_default() += row.totals.total_tokens;
+    }
+    totals
+}
+
+/// Live token rates derived from the daemon's minute buckets.
+///
+/// Mirrors the local collector's arithmetic exactly, including that the baseline
+/// averages only the minutes that saw activity rather than all 1440 minutes of a
+/// day — the latter would understate the rate by orders of magnitude.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LiveRates {
+    tokens_per_minute: f64,
+    burn_rate_tokens_per_minute: f64,
+    active_baseline_tokens_per_minute: f64,
+    last_activity_at_ms: Option<i64>,
+}
+
+fn live_rates(buckets: &[DaemonMinuteBucket], now_ms: i64) -> LiveRates {
+    let activity_cutoff_minute = (now_ms - ACTIVITY_WINDOW_MINUTES * 60 * 1000).div_euclid(60_000);
+    let burn_cutoff_minute = (now_ms - BURN_WINDOW_MINUTES * 60 * 1000).div_euclid(60_000);
+    let baseline_cutoff_minute = (now_ms - 24 * 60 * 60 * 1000).div_euclid(60_000);
+
+    let mut activity_tokens = 0_u64;
+    let mut burn_tokens = 0_u64;
+    let mut baseline_minutes: std::collections::BTreeMap<i64, u64> =
+        std::collections::BTreeMap::new();
+    let mut last_activity_at_ms: Option<i64> = None;
+
+    for bucket in buckets {
+        let tokens = bucket.totals.total_tokens;
+        if bucket.minute >= activity_cutoff_minute {
+            activity_tokens = activity_tokens.saturating_add(tokens);
+        }
+        if bucket.minute >= burn_cutoff_minute {
+            burn_tokens = burn_tokens.saturating_add(tokens);
+        }
+        if bucket.minute >= baseline_cutoff_minute {
+            *baseline_minutes.entry(bucket.minute).or_default() = baseline_minutes
+                .get(&bucket.minute)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(tokens);
+            let observed = bucket.minute.saturating_mul(60_000);
+            last_activity_at_ms =
+                Some(last_activity_at_ms.map_or(observed, |current: i64| current.max(observed)));
+        }
+    }
+
+    let active_baseline_tokens_per_minute = if baseline_minutes.is_empty() {
+        0.0
+    } else {
+        baseline_minutes.values().copied().sum::<u64>() as f64 / baseline_minutes.len() as f64
+    };
+
+    LiveRates {
+        tokens_per_minute: activity_tokens as f64 / ACTIVITY_WINDOW_MINUTES as f64,
+        burn_rate_tokens_per_minute: burn_tokens as f64 / BURN_WINDOW_MINUTES as f64,
+        active_baseline_tokens_per_minute,
+        last_activity_at_ms,
+    }
+}
+
+/// Yesterday's totals and top project, derived from the daemon's rows.
+///
+/// `breakdown` carries `day`, `project` and a per-row cost, so yesterday can be
+/// sliced out directly instead of re-accumulating the local event stream.
+fn yesterday_from_breakdown(
+    rows: &[DaemonBreakdownRow],
+    yesterday: NaiveDate,
+) -> (u64, f64, Option<String>) {
+    let day = yesterday.format("%Y-%m-%d").to_string();
+    let mut tokens = 0_u64;
+    let mut cost = 0.0_f64;
+    let mut by_project: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    for row in rows {
+        if row.day != day {
+            continue;
+        }
+        tokens = tokens.saturating_add(row.totals.total_tokens);
+        cost += row.cost_usd;
+        if !row.project.is_empty() {
+            *by_project.entry(row.project.as_str()).or_default() = by_project
+                .get(row.project.as_str())
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(row.totals.total_tokens);
+        }
+    }
+    // Ties break by name so the value is stable across refreshes.
+    let top = by_project
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(left.0)))
+        .map(|(project, _)| project.to_owned());
+    (tokens, cost, top)
+}
+
+/// Weekly totals derived from the daemon's rows.
+///
+/// Windows mirror the local collector's: `[today-7, today)` for last week and
+/// `[today-14, today-7)` for the one before, so the report is comparable.
+#[derive(Debug, Clone, PartialEq)]
+struct WeeklyTotals {
+    last_week_tokens: u64,
+    last_week_cost_usd: f64,
+    previous_week_tokens: u64,
+    last_week_top_project: Option<String>,
+}
+
+fn weekly_from_breakdown(rows: &[DaemonBreakdownRow], today: NaiveDate) -> WeeklyTotals {
+    let last_week_start = today.checked_sub_days(Days::new(7)).unwrap_or(today);
+    let previous_week_start = last_week_start
+        .checked_sub_days(Days::new(7))
+        .unwrap_or(last_week_start);
+    let last_week_start = last_week_start.format("%Y-%m-%d").to_string();
+    let previous_week_start = previous_week_start.format("%Y-%m-%d").to_string();
+    let today_key = today.format("%Y-%m-%d").to_string();
+
+    let mut totals = WeeklyTotals {
+        last_week_tokens: 0,
+        last_week_cost_usd: 0.0,
+        previous_week_tokens: 0,
+        last_week_top_project: None,
+    };
+    let mut projects: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    for row in rows {
+        // `day` is a zero-padded `YYYY-MM-DD`, so string comparison orders
+        // chronologically without parsing.
+        if row.day >= last_week_start && row.day < today_key {
+            totals.last_week_tokens = totals
+                .last_week_tokens
+                .saturating_add(row.totals.total_tokens);
+            totals.last_week_cost_usd += row.cost_usd;
+            if !row.project.is_empty() {
+                *projects.entry(row.project.as_str()).or_default() = projects
+                    .get(row.project.as_str())
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(row.totals.total_tokens);
+            }
+        } else if row.day >= previous_week_start && row.day < last_week_start {
+            totals.previous_week_tokens = totals
+                .previous_week_tokens
+                .saturating_add(row.totals.total_tokens);
+        }
+    }
+    totals.last_week_top_project = projects
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(left.0)))
+        .map(|(project, _)| project.to_owned());
+    totals
+}
+
+/// Usage attributed to each project within the window, highest first.
+fn windowed_projects(rows: &[DaemonBreakdownRow], axis: &[String]) -> Vec<UsageProject> {
+    let wanted: std::collections::HashSet<&str> = axis.iter().map(String::as_str).collect();
+    let mut totals: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    for row in rows {
+        if !wanted.contains(row.day.as_str()) || row.project.is_empty() {
+            continue;
+        }
+        *totals.entry(row.project.as_str()).or_default() += row.totals.total_tokens;
+    }
+    let mut projects: Vec<UsageProject> = totals
+        .into_iter()
+        .map(|(project, tokens)| UsageProject {
+            project: project.to_owned(),
+            tokens,
+        })
+        .collect();
+    projects.sort_by(|left, right| {
+        right
+            .tokens
+            .cmp(&left.tokens)
+            .then_with(|| left.project.cmp(&right.project))
+    });
+    projects
+}
+
 pub async fn snapshot(state: &CodexUsageState) -> Result<CodexUsageSnapshot, String> {
+    // The daemon parses the same logs, so prefer it for the history and trend
+    // series. This is best-effort: a missing or unavailable daemon must not break
+    // the snapshot, because the local collector still produces every field.
+    let from_daemon = fetch_daemon_history().await;
+
     let collector = Arc::clone(&state.collector);
     tauri::async_runtime::spawn_blocking(move || {
         let root = codex_data_root();
         let mut collector = collector
             .lock()
             .map_err(|_| "Codex 用量采集状态不可用".to_string())?;
-        collector.collect(&root, Local::now())
+        let mut snapshot = collector.collect(&root, Local::now())?;
+        if let Some(history) = from_daemon {
+            let now = Local::now();
+            apply_daemon_history(
+                &mut snapshot,
+                &history,
+                now.date_naive(),
+                now.timestamp_millis(),
+            );
+        }
+        Ok(snapshot)
     })
     .await
     .map_err(|error| format!("Codex 用量采集任务失败：{error}"))?
+}
+
+/// Asks the daemon for full-history usage, or `None` when it is unreachable.
+async fn fetch_daemon_history() -> Option<DaemonUsageHistory> {
+    // Ask only for the window this client keeps: the endpoint defaults to the
+    // entire sessions tree, which is far more than the 105-day series needs.
+    let path = format!("api/v1/manage/usage/history?days={HISTORY_DAYS}");
+    let response = crate::management_request_inner(path, "GET".to_string(), None, false)
+        .await
+        .ok()?;
+    if response.status != 200 {
+        return None;
+    }
+    serde_json::from_str(&response.body).ok()
+}
+
+/// Overrides the daemon-owned series on the snapshot.
+///
+/// Replaced: `seven_day`, `daily_usage`, `seven_day_projects`, `top_project`,
+/// `estimated_cost_usd` (today's rows only), `weekly_report`, the three
+/// `yesterday_*` fields, and the live rates when the daemon reported minutes.
+///
+/// Left as the local collector produced them: `today_*` counters, `quota_windows`
+/// (the daemon exposes `quota`/`quotaMinutes` on a different shape), `streak_days`
+/// and `previous_best_daily_tokens` (long-term state the client persists itself),
+/// plus `available`/`scanned_files`/`source_directory`.
+///
+/// Every override is conditional on the daemon actually having the data, so an
+/// empty or partial response cannot zero out a locally computed figure.
+fn apply_daemon_history(
+    snapshot: &mut CodexUsageSnapshot,
+    history: &DaemonUsageHistory,
+    today: NaiveDate,
+    now_ms: i64,
+) {
+    let trend_axis = day_axis(TREND_DAYS, today);
+    let history_axis = day_axis(HISTORY_DAYS, today);
+
+    let trend_totals = daily_totals(&history.breakdown, &trend_axis);
+    snapshot.seven_day = trend_axis
+        .iter()
+        .map(|day| UsageDay {
+            day: day.clone(),
+            tokens: trend_totals.get(day).copied().unwrap_or(0),
+        })
+        .collect();
+
+    let history_totals = daily_totals(&history.breakdown, &history_axis);
+    snapshot.daily_usage = history_axis
+        .iter()
+        .map(|day| UsageDay {
+            day: day.clone(),
+            tokens: history_totals.get(day).copied().unwrap_or(0),
+        })
+        .collect();
+
+    snapshot.seven_day_projects = windowed_projects(&history.breakdown, &trend_axis);
+    snapshot.top_project = snapshot
+        .seven_day_projects
+        .first()
+        .map(|project| project.project.clone());
+    // `snapshot.estimated_cost_usd` is *today's* cost (the UI labels it 「今日成本」),
+    // while the daemon's `estimatedCostUsd` covers the whole requested window. The
+    // two are different quantities, so the window total must not be assigned here —
+    // doing so reported a multi-day sum as today's spend. Today's cost is summed
+    // from today's rows instead; if the daemon reports none, the locally computed
+    // value is left in place.
+    let today_key = today.format("%Y-%m-%d").to_string();
+    let today_cost: f64 = history
+        .breakdown
+        .iter()
+        .filter(|row| row.day == today_key)
+        .map(|row| row.cost_usd)
+        .sum();
+    if today_cost > 0.0 {
+        snapshot.estimated_cost_usd = today_cost;
+    }
+
+    // The weekly report covers two fixed 7-day windows, both derivable from the
+    // same rows.
+    let weekly = weekly_from_breakdown(&history.breakdown, today);
+    if weekly.last_week_tokens > 0 || weekly.previous_week_tokens > 0 {
+        snapshot.weekly_report = Some(CodexWeeklyReport {
+            last_week_tokens: weekly.last_week_tokens,
+            last_week_cost_usd: weekly.last_week_cost_usd,
+            previous_week_tokens: weekly.previous_week_tokens,
+            last_week_top_project: weekly.last_week_top_project,
+        });
+    }
+
+    // Yesterday is a single day inside the rows, so it is sliced out rather than
+    // accumulated from the local event stream a second time.
+    if let Some(yesterday) = today.pred_opt() {
+        let (tokens, cost, top) = yesterday_from_breakdown(&history.breakdown, yesterday);
+        if tokens > 0 {
+            snapshot.yesterday_tokens = tokens;
+            snapshot.yesterday_cost_usd = cost;
+            snapshot.yesterday_top_project = top;
+        }
+    }
+
+    // Live rates come from the same parsed records the local collector reads, so
+    // the daemon is authoritative for them too. They are only taken when the
+    // daemon actually reported minutes: an empty series would otherwise replace
+    // real local figures with zeros.
+    if !history.minutes.is_empty() {
+        let rates = live_rates(&history.minutes, now_ms);
+        snapshot.tokens_per_minute = rates.tokens_per_minute;
+        snapshot.burn_rate_tokens_per_minute = rates.burn_rate_tokens_per_minute;
+        snapshot.active_baseline_tokens_per_minute = rates.active_baseline_tokens_per_minute;
+        if rates.last_activity_at_ms.is_some() {
+            snapshot.last_activity_at_ms = rates.last_activity_at_ms;
+        }
+    }
 }
 
 fn codex_data_root() -> PathBuf {
@@ -1438,6 +1816,278 @@ fn system_time_ms(value: SystemTime) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    // The pre-existing tests below carry their own `use super::*;`, so this
+    // module must not import it twice.
+
+    fn row(day: &str, project: &str, tokens: u64) -> DaemonBreakdownRow {
+        row_with_cost(day, project, tokens, 0.0)
+    }
+
+    fn row_with_cost(day: &str, project: &str, tokens: u64, cost_usd: f64) -> DaemonBreakdownRow {
+        DaemonBreakdownRow {
+            day: day.to_owned(),
+            project: project.to_owned(),
+            totals: DaemonUsageTotals {
+                total_tokens: tokens,
+            },
+            cost_usd,
+        }
+    }
+
+    fn bucket(minute: i64, tokens: u64) -> DaemonMinuteBucket {
+        DaemonMinuteBucket {
+            minute,
+            totals: DaemonUsageTotals {
+                total_tokens: tokens,
+            },
+        }
+    }
+
+    /// The two week windows are adjacent and half-open: `[today-7, today)` and
+    /// `[today-14, today-7)`. A day must land in exactly one of them.
+    #[test]
+    fn splits_weeks_at_the_boundaries() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 25).expect("date");
+        let rows = vec![
+            // Today is in neither week.
+            row_with_cost("2026-08-25", "a", 1000, 10.0),
+            // Last day of last week.
+            row_with_cost("2026-08-24", "alpha", 10, 0.5),
+            // First day of last week.
+            row_with_cost("2026-08-18", "beta", 20, 1.0),
+            // Last day of the previous week.
+            row_with_cost("2026-08-17", "gamma", 30, 2.0),
+            // First day of the previous week.
+            row_with_cost("2026-08-11", "delta", 40, 4.0),
+            // Outside both windows.
+            row_with_cost("2026-08-10", "epsilon", 500, 5.0),
+        ];
+
+        let weekly = weekly_from_breakdown(&rows, today);
+        assert_eq!(weekly.last_week_tokens, 30, "10 + 20");
+        assert!((weekly.last_week_cost_usd - 1.5).abs() < 1e-9);
+        assert_eq!(weekly.previous_week_tokens, 70, "30 + 40");
+        // beta (20) beats alpha (10) inside last week.
+        assert_eq!(weekly.last_week_top_project.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn reports_empty_weeks_without_rows() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 25).expect("date");
+        let weekly = weekly_from_breakdown(&[], today);
+        assert_eq!(weekly.last_week_tokens, 0);
+        assert_eq!(weekly.previous_week_tokens, 0);
+        assert!(weekly.last_week_top_project.is_none());
+    }
+
+    /// Today's cost must come from today's rows only. The daemon also reports a
+    /// window total under a similar name, and assigning that here once reported a
+    /// multi-day sum as today's spend.
+    #[test]
+    fn today_cost_counts_only_todays_rows() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 25).expect("date");
+        let today_key = today.format("%Y-%m-%d").to_string();
+        let rows = vec![
+            row_with_cost("2026-08-25", "alpha", 10, 1.5),
+            row_with_cost("2026-08-25", "beta", 20, 2.5),
+            // Other days in the same response must not contribute.
+            row_with_cost("2026-08-24", "alpha", 999, 40.0),
+            row_with_cost("2026-08-01", "alpha", 999, 50.0),
+        ];
+
+        let cost: f64 = rows
+            .iter()
+            .filter(|row| row.day == today_key)
+            .map(|row| row.cost_usd)
+            .sum();
+        assert!((cost - 4.0).abs() < 1e-9, "got {cost}");
+    }
+
+    /// Yesterday's totals come from the rows for that single day, summed across
+    /// whatever model/provider/project split they carry.
+    #[test]
+    fn derives_yesterday_from_breakdown_rows() {
+        let yesterday = NaiveDate::from_ymd_opt(2026, 8, 24).expect("date");
+        let rows = vec![
+            row_with_cost("2026-08-24", "alpha", 10, 0.5),
+            row_with_cost("2026-08-24", "beta", 50, 1.25),
+            row_with_cost("2026-08-24", "alpha", 20, 0.25),
+            // Today must not leak into yesterday.
+            row_with_cost("2026-08-25", "gamma", 999, 9.0),
+        ];
+
+        let (tokens, cost, top) = yesterday_from_breakdown(&rows, yesterday);
+        assert_eq!(tokens, 80);
+        assert!((cost - 2.0).abs() < 1e-9, "got {cost}");
+        // alpha totals 30 against beta's 50.
+        assert_eq!(top.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn reports_no_yesterday_without_rows_for_that_day() {
+        let yesterday = NaiveDate::from_ymd_opt(2026, 8, 24).expect("date");
+        let rows = vec![row_with_cost("2026-08-25", "alpha", 10, 0.5)];
+        let (tokens, cost, top) = yesterday_from_breakdown(&rows, yesterday);
+        assert_eq!(tokens, 0);
+        assert_eq!(cost, 0.0);
+        assert!(top.is_none());
+    }
+
+    /// A session without a recorded directory must not become a project named "".
+    #[test]
+    fn ignores_empty_projects_when_ranking_yesterday() {
+        let yesterday = NaiveDate::from_ymd_opt(2026, 8, 24).expect("date");
+        let rows = vec![
+            row_with_cost("2026-08-24", "", 500, 0.0),
+            row_with_cost("2026-08-24", "alpha", 10, 0.0),
+        ];
+        let (tokens, _, top) = yesterday_from_breakdown(&rows, yesterday);
+        // The tokens still count toward the day's total.
+        assert_eq!(tokens, 510);
+        assert_eq!(top.as_deref(), Some("alpha"));
+    }
+
+    /// The 3-minute rate divides by the window length, not by the number of
+    /// samples, so a single busy minute still reports a meaningful rate.
+    #[test]
+    fn computes_activity_rate_over_the_window_length() {
+        let now_ms = 1_800_000_000_000_i64;
+        let now_minute = now_ms.div_euclid(60_000);
+        let rates = live_rates(&[bucket(now_minute, 300)], now_ms);
+        assert!((rates.tokens_per_minute - 100.0).abs() < 1e-9, "{rates:?}");
+    }
+
+    /// Samples older than the window must not contribute.
+    #[test]
+    fn excludes_samples_outside_the_burn_window() {
+        let now_ms = 1_800_000_000_000_i64;
+        let now_minute = now_ms.div_euclid(60_000);
+        let rates = live_rates(
+            &[
+                bucket(now_minute, 100),
+                // Well outside both windows.
+                bucket(now_minute - 60, 999_999),
+            ],
+            now_ms,
+        );
+        assert!(
+            (rates.tokens_per_minute - 100.0 / 3.0).abs() < 1e-9,
+            "{rates:?}"
+        );
+        assert!(
+            (rates.burn_rate_tokens_per_minute - 10.0).abs() < 1e-9,
+            "{rates:?}"
+        );
+    }
+
+    /// The baseline averages active minutes only. Dividing by all 1440 minutes of
+    /// a day would understate the rate by orders of magnitude.
+    #[test]
+    fn baseline_averages_active_minutes_only() {
+        let now_ms = 1_800_000_000_000_i64;
+        let now_minute = now_ms.div_euclid(60_000);
+        let rates = live_rates(
+            &[bucket(now_minute, 60), bucket(now_minute - 1, 120)],
+            now_ms,
+        );
+        // (60 + 120) / 2 active minutes, not / 1440.
+        assert!(
+            (rates.active_baseline_tokens_per_minute - 90.0).abs() < 1e-9,
+            "{rates:?}"
+        );
+    }
+
+    #[test]
+    fn reports_no_baseline_without_samples() {
+        let now_ms = 1_800_000_000_000_i64;
+        let rates = live_rates(&[], now_ms);
+        assert_eq!(rates.active_baseline_tokens_per_minute, 0.0);
+        assert_eq!(rates.tokens_per_minute, 0.0);
+        assert!(rates.last_activity_at_ms.is_none());
+    }
+
+    /// Charts need every day in the window; a day the daemon did not report must
+    /// appear as zero rather than being skipped (which would shift the axis).
+    #[test]
+    fn fills_quiet_days_with_zero() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 25).expect("valid date");
+        let axis = day_axis(TREND_DAYS, today);
+        assert_eq!(axis.len(), TREND_DAYS as usize);
+        assert_eq!(axis.first().map(String::as_str), Some("2026-08-19"));
+        assert_eq!(axis.last().map(String::as_str), Some("2026-08-25"));
+
+        let rows = vec![row("2026-08-25", "codexhub", 100)];
+        let totals = daily_totals(&rows, &axis);
+        assert_eq!(totals.get("2026-08-25"), Some(&100));
+        assert_eq!(totals.get("2026-08-24"), None);
+        // Every axis day is still renderable.
+        let series: Vec<u64> = axis
+            .iter()
+            .map(|day| totals.get(day).copied().unwrap_or(0))
+            .collect();
+        assert_eq!(series.len(), TREND_DAYS as usize);
+        assert_eq!(series.iter().sum::<u64>(), 100);
+    }
+
+    /// Rows are stored per (day, model, provider, project), so one day can have
+    /// several rows that must be summed rather than overwritten.
+    #[test]
+    fn sums_multiple_rows_for_the_same_day() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 25).expect("valid date");
+        let axis = day_axis(TREND_DAYS, today);
+        let rows = vec![
+            row("2026-08-25", "codexhub", 30),
+            row("2026-08-25", "codexhub", 12),
+        ];
+        let totals = daily_totals(&rows, &axis);
+        assert_eq!(totals.get("2026-08-25"), Some(&42));
+    }
+
+    /// Rows outside the window must not leak into a narrow series.
+    #[test]
+    fn ignores_rows_outside_the_window() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 25).expect("valid date");
+        let axis = day_axis(TREND_DAYS, today);
+        let rows = vec![
+            row("2026-08-01", "codexhub", 999),
+            row("2026-08-25", "codexhub", 5),
+        ];
+        let totals = daily_totals(&rows, &axis);
+        assert_eq!(totals.values().sum::<u64>(), 5);
+    }
+
+    #[test]
+    fn ranks_projects_by_usage_within_the_window() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 25).expect("valid date");
+        let axis = day_axis(TREND_DAYS, today);
+        let rows = vec![
+            row("2026-08-25", "alpha", 10),
+            row("2026-08-24", "beta", 50),
+            row("2026-08-23", "alpha", 20),
+            row("2026-08-01", "gamma", 1000),
+        ];
+        let projects = windowed_projects(&rows, &axis);
+        assert_eq!(
+            projects
+                .iter()
+                .map(|project| (project.project.as_str(), project.tokens))
+                .collect::<Vec<_>>(),
+            vec![("beta", 50), ("alpha", 30)]
+        );
+    }
+
+    /// A session without a recorded directory yields an empty project name; it
+    /// must not appear as a project called "".
+    #[test]
+    fn skips_rows_without_a_project() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 25).expect("valid date");
+        let axis = day_axis(TREND_DAYS, today);
+        let rows = vec![row("2026-08-25", "", 10), row("2026-08-25", "alpha", 5)];
+        let projects = windowed_projects(&rows, &axis);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].project, "alpha");
+    }
+
     use std::{
         io::Write,
         sync::atomic::{AtomicU64, Ordering},
