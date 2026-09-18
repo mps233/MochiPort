@@ -100,8 +100,10 @@ where
                     return Poll::Ready(Some(Err(std::io::Error::other(e.to_string()))));
                 }
                 Poll::Ready(None) => {
-                    // 流结束，确保所有事件都已生成
-                    this.state.handle_done(&mut this.output_queue);
+                    // The upstream body ended. If it never sent `[DONE]` (nor a
+                    // `finish_reason`) the answer was truncated, which must be
+                    // reported as a failure rather than a completed response.
+                    this.state.handle_stream_ended(&mut this.output_queue);
                     if let Some(bytes) = this.output_queue.pop_front() {
                         return Poll::Ready(Some(Ok(bytes)));
                     }
@@ -292,7 +294,21 @@ impl ResponsesStreamState {
         }
 
         // finish_reason
-        if let Some(reason) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+        //
+        // An empty string means "still generating", exactly like `null` — the
+        // OpenAI stream contract puts a real reason only on the final chunk.
+        // Some gateways (measured: CodeBuddy) instead emit `"finish_reason": ""`
+        // on *every* chunk, so treating it as a finish closed the message item
+        // after each token fragment and the next fragment opened a new one. The
+        // client then rendered one message per fragment — the reply appeared
+        // broken into single words. `content`/`reasoning_content` are filtered the
+        // same way below.
+        if let Some(reason) = choice
+            .get("finish_reason")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+        {
             self.finish_reason = Some(reason.to_string());
             self.handle_finish(queue);
         }
@@ -708,8 +724,8 @@ impl ResponsesStreamState {
         }
     }
 
-    fn handle_finish(&mut self, queue: &mut VecDeque<Bytes>) {
-        // 关闭所有打开的 item
+    /// Close every open item and mark the stream finished.
+    fn finish_open_items(&mut self, queue: &mut VecDeque<Bytes>) {
         if self.reasoning_item_started {
             self.close_reasoning_item(queue);
         }
@@ -720,6 +736,10 @@ impl ResponsesStreamState {
             self.close_tool_calls(queue);
         }
         self.finished = true;
+    }
+
+    fn handle_finish(&mut self, queue: &mut VecDeque<Bytes>) {
+        self.finish_open_items(queue);
 
         // 如果已有 usage，立即完成
         if self.usage.is_some() {
@@ -727,6 +747,7 @@ impl ResponsesStreamState {
         }
     }
 
+    /// The upstream sent the `[DONE]` sentinel: the answer is genuinely over.
     fn handle_done(&mut self, queue: &mut VecDeque<Bytes>) {
         if !self.has_started {
             return;
@@ -738,6 +759,35 @@ impl ResponsesStreamState {
         if !self.response_completed {
             self.emit_response_completed(queue);
         }
+    }
+
+    /// The upstream body ended *without* the `[DONE]` sentinel.
+    ///
+    /// The chat-completions contract is that a stream carries a chunk with
+    /// `finish_reason` set and then `[DONE]`. A body that simply stops mid-answer
+    /// — upstream crash, proxy idle timeout, a restarted gateway — never sent
+    /// either. Reporting that as `response.completed` told the client the
+    /// truncated text *was* the whole answer, so the turn ended on a half-written
+    /// reply and nothing retried it. That is the "answers stop halfway and never
+    /// come back" symptom.
+    ///
+    /// A missing `finish_reason` is positive evidence of truncation, so the
+    /// response is failed instead of completed. Codex recognises
+    /// `response.failed` and retries the sampling request; it does not recognise
+    /// `response.incomplete`, so that would strand the stream just as the
+    /// silent completion did.
+    fn handle_stream_ended(&mut self, queue: &mut VecDeque<Bytes>) {
+        if !self.has_started {
+            return;
+        }
+        if self.finish_reason.is_none() && !self.response_completed {
+            self.finish_open_items(queue);
+            self.emit_response_failed(queue, "upstream stream ended before the response completed");
+            return;
+        }
+        // A `finish_reason` did arrive, so the answer is as complete as the
+        // upstream intended even though `[DONE]` is missing.
+        self.handle_done(queue);
     }
 
     fn emit_response_created(&mut self, queue: &mut VecDeque<Bytes>) {
@@ -787,6 +837,27 @@ impl ResponsesStreamState {
                 "type": event_type,
                 "sequence_number": seq,
                 "response": self.response_object(status),
+            }),
+        );
+
+        self.response_completed = true;
+    }
+
+    /// Terminal event for a stream that ended without a usable answer.
+    fn emit_response_failed(&mut self, queue: &mut VecDeque<Bytes>, message: &str) {
+        let seq = self.next_seq();
+        let mut response = self.response_object("failed");
+        response["error"] = json!({
+            "code": "upstream_stream_incomplete",
+            "message": message,
+        });
+        emit_sse(
+            queue,
+            "response.failed",
+            json!({
+                "type": "response.failed",
+                "sequence_number": seq,
+                "response": response,
             }),
         );
 
@@ -987,6 +1058,22 @@ mod tests {
         parse_events(&queue)
     }
 
+    /// Drive the real `ChatSseToResponsesSse` stream over a raw SSE body and
+    /// collect the emitted events. Unlike `feed_chunks`, this exercises the
+    /// `poll_next` wiring, so it covers how EOF is classified — which is exactly
+    /// where a truncated body has to be told apart from a finished one.
+    async fn collect_sse_events(body: &'static str) -> Vec<(String, Value)> {
+        let input = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from_static(
+            body.as_bytes(),
+        ))]);
+        let mut stream = ChatSseToResponsesSse::new(input, "test-model".to_string());
+        let mut queue = VecDeque::new();
+        while let Some(chunk) = stream.next().await {
+            queue.push_back(chunk.expect("stream chunk"));
+        }
+        parse_events(&queue)
+    }
+
     /// 解析 SSE 事件队列为 (event_type, data_json) 列表。
     fn parse_events(queue: &VecDeque<Bytes>) -> Vec<(String, Value)> {
         let mut events = Vec::new();
@@ -1148,6 +1235,161 @@ mod tests {
     }
 
     // ─── 基本文本流 ────────────────────────────────────────────
+
+    /// A body that stops mid-answer must not be reported as complete.
+    ///
+    /// The chat-completions contract is a chunk carrying `finish_reason`, then
+    /// `[DONE]`. A dropped upstream connection sends neither. Treating that EOF
+    /// as success ended the turn on a half-written reply, and because the client
+    /// believed the response was complete it never retried — the reported symptom
+    /// was answers stopping halfway and never resuming.
+    #[tokio::test]
+    async fn test_stream_ended_without_done_fails_instead_of_completing() {
+        // Two content chunks, then the body simply ends: no `finish_reason`, no
+        // `[DONE]`.
+        let events = collect_sse_events(concat!(
+            "data:{\"id\":\"chatcmpl_truncated\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"半截回复\"}}]}\n\n",
+            "data:{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"然后就断了\"}}]}\n\n",
+        ))
+        .await;
+        let types = event_types(&events);
+
+        assert!(
+            types.contains(&"response.failed"),
+            "a truncated stream must fail: {types:?}"
+        );
+        assert!(
+            !types.contains(&"response.completed"),
+            "a truncated stream must not report success: {types:?}"
+        );
+
+        let failed = events
+            .iter()
+            .find(|(t, _)| t == "response.failed")
+            .expect("failure event");
+        assert_eq!(failed.1["response"]["status"], "failed");
+        assert_eq!(
+            failed.1["response"]["error"]["code"],
+            "upstream_stream_incomplete"
+        );
+        // The partial text is still delivered; it is the *completion* claim that
+        // must not be made.
+        assert!(
+            types.contains(&"response.output_text.delta"),
+            "partial text should still stream: {types:?}"
+        );
+    }
+
+    /// A stream that ends without `[DONE]` but *did* report a `finish_reason`
+    /// carries a complete answer and must still complete.
+    ///
+    /// Some gateways close the body right after the final chunk without sending
+    /// the sentinel; failing those would break working providers.
+    #[tokio::test]
+    async fn test_stream_ended_after_finish_reason_still_completes() {
+        let events = collect_sse_events(concat!(
+            "data:{\"id\":\"chatcmpl_ok\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"完整回复\"}}]}\n\n",
+            "data:{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"total_tokens\":8}}\n\n",
+        ))
+        .await;
+        let types = event_types(&events);
+
+        assert!(
+            types.contains(&"response.completed"),
+            "a real finish_reason means the answer is complete: {types:?}"
+        );
+        assert!(
+            !types.contains(&"response.failed"),
+            "a real finish_reason must not fail: {types:?}"
+        );
+    }
+
+    /// A `[DONE]` sentinel still completes normally.
+    #[tokio::test]
+    async fn test_done_sentinel_still_completes() {
+        let events = collect_sse_events(concat!(
+            "data:{\"id\":\"chatcmpl_done\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"正常结束\"}}]}\n\n",
+            "data:{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data:[DONE]\n\n",
+        ))
+        .await;
+        let types = event_types(&events);
+        assert!(types.contains(&"response.completed"), "{types:?}");
+        assert!(!types.contains(&"response.failed"), "{types:?}");
+    }
+
+    /// A gateway that stamps `"finish_reason": ""` on every chunk must not end
+    /// the stream after each one.
+    ///
+    /// Measured upstream (CodeBuddy / WorkBuddy): every chunk carries
+    /// `finish_reason: ""` and `reasoning_content: ""` while still generating.
+    /// Treating the empty string as a finish closed the message item after each
+    /// fragment and reopened one for the next, so a single reply arrived as one
+    /// message per fragment — the user saw the answer broken into single words.
+    #[test]
+    fn test_empty_finish_reason_keeps_one_message_item() {
+        let chunk = |content: &str| {
+            json!({
+                "id": "cmb-1",
+                "model": "codebuddy-model",
+                "created": 1700000000,
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "content": content,
+                        "reasoning_content": "",
+                        "function_call": null,
+                        "refusal": "",
+                        "tool_calls": [],
+                    },
+                    "finish_reason": "",
+                }],
+                "usage": null,
+            })
+        };
+        let mut chunks: Vec<Value> = vec![chunk(""), chunk("你好"), chunk("！"), chunk("有什么")];
+        // Only the final chunk carries a real reason, as the contract requires.
+        chunks.push(json!({
+            "id": "cmb-1",
+            "model": "codebuddy-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "我可以帮忙"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 8, "total_tokens": 13},
+        }));
+
+        let events = feed_chunks(&chunks);
+        let types = event_types(&events);
+
+        let added = types
+            .iter()
+            .filter(|t| **t == "response.output_item.added")
+            .count();
+        assert_eq!(
+            added, 1,
+            "the reply is one message item, not one per fragment: {types:?}"
+        );
+        assert_eq!(
+            types
+                .iter()
+                .filter(|t| **t == "response.output_text.done")
+                .count(),
+            1,
+            "the text part is closed once, at the real finish"
+        );
+
+        // The fragments concatenate into the single expected reply.
+        let completed = events
+            .iter()
+            .find(|(t, _)| t == "response.completed")
+            .expect("stream completes");
+        assert_eq!(
+            completed.1["response"]["output"][0]["content"][0]["text"],
+            "你好！有什么我可以帮忙"
+        );
+    }
 
     #[test]
     fn test_simple_text_stream() {
