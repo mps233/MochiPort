@@ -10,7 +10,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 #[cfg(unix)]
@@ -49,6 +49,11 @@ const MANAGEMENT_LEASE_DURATION_MS: u64 = 30_000;
 /// turn to finish, short enough that a leaked permit cannot pin the daemon in
 /// `Draining` indefinitely.
 const LIFECYCLE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// Hard upper bound on the *whole* restart, not just the permit wait: stopping
+/// the IM bridge, both snapshots, the lease lock and the shutdown signal are
+/// all part of the drain. Larger than `LIFECYCLE_DRAIN_TIMEOUT` so a stuck
+/// permit keeps its own, more precise error message.
+const LIFECYCLE_DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(330);
 const CREDENTIAL_ROTATION_REASON_TAKEOVER: &str = "trustedTakeover";
 const CREDENTIAL_ROTATION_REASON_LEAK: &str = "leakRecovery";
 
@@ -313,24 +318,70 @@ pub(crate) async fn request_restart_with_drain(
     .await
 }
 
-async fn request_shutdown_with_drain_inner(
+/// Keeps `Draining` from outliving the request that entered it.
+///
+/// Only the permit wait was bounded, but the drain also stops the IM bridge,
+/// takes two snapshots, acquires the lease lock and sends the shutdown signal.
+/// When the handler future is dropped while awaiting one of those — the caller
+/// disconnects, or a proxy gives up on the request — the admission used to stay
+/// `Draining` with no owner left to leave it. Every gateway request then failed
+/// with `daemon_draining` (503) for as long as the process lived, and `launchd`
+/// kept quiet because `KeepAlive` only reacts to an exit, which never came.
+/// Measured on 2026-09-18: three hours of 503s until the daemon was restarted
+/// by hand.
+///
+/// Releasing on drop makes that state unreachable: `cancel_draining` only wins
+/// its compare-exchange while the admission is `Draining`, so a guard whose
+/// drain finished deliberately — restored, or committed to shutdown — is a
+/// no-op.
+struct DrainingGuard {
+    state: SharedState,
+}
+
+impl DrainingGuard {
+    fn new(state: &SharedState) -> Self {
+        Self {
+            state: Arc::clone(state),
+        }
+    }
+}
+
+impl Drop for DrainingGuard {
+    fn drop(&mut self) {
+        if !self.state.lifecycle_admission.cancel_draining() {
+            return;
+        }
+        // The drain stopped the bridge before parking; put it back. `Drop`
+        // cannot await, so hand the restart to the runtime. With no runtime
+        // context the process is going away anyway.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let state = Arc::clone(&self.state);
+        handle.spawn(async move {
+            let _ = crate::web::start_bridge_if_ready(&state, "lifecycle drain abandoned").await;
+        });
+    }
+}
+
+/// Stop the IM bridge, wait out protected work, then commit the shutdown.
+///
+/// Split out of `request_shutdown_with_drain_inner` so the whole sequence can
+/// sit behind one deadline.
+async fn drain_until_shutdown(
     state: &SharedState,
     force: bool,
     event_message: &'static str,
     lease_installation_id: Option<String>,
     lease_generation: Option<u64>,
 ) -> LifecycleShutdownResult {
-    if !state.lifecycle_admission.begin_draining() {
-        return LifecycleShutdownResult::AlreadyInProgress;
-    }
-
     state
         .push_event("warn", "shutdown_requested", event_message)
         .await;
 
     let initial = lifecycle_snapshot(state).await;
     if initial.protected_work_items.total > 0 && !force {
-        state.lifecycle_admission.cancel_draining();
+        cancel_draining_and_restore_bridge(state).await;
         return LifecycleShutdownResult::ProtectedWork(initial.protected_work_items);
     }
 
@@ -397,6 +448,56 @@ async fn request_shutdown_with_drain_inner(
         }
         cancel_draining_and_restore_bridge(state).await;
         LifecycleShutdownResult::NotRunning
+    }
+}
+
+async fn request_shutdown_with_drain_inner(
+    state: &SharedState,
+    force: bool,
+    event_message: &'static str,
+    lease_installation_id: Option<String>,
+    lease_generation: Option<u64>,
+) -> LifecycleShutdownResult {
+    if !state.lifecycle_admission.begin_draining() {
+        return LifecycleShutdownResult::AlreadyInProgress;
+    }
+    // Armed the moment the admission leaves `Active`, and dropped on every
+    // return *and* on cancellation, so the daemon can never be left draining
+    // without an owner.
+    let _guard = DrainingGuard::new(state);
+
+    let drained = tokio::time::timeout(
+        LIFECYCLE_DRAIN_DEADLINE,
+        drain_until_shutdown(
+            state,
+            force,
+            event_message,
+            lease_installation_id,
+            lease_generation,
+        ),
+    )
+    .await;
+    match drained {
+        Ok(result) => result,
+        Err(_) => {
+            // A single unbounded await inside the drain would otherwise hang
+            // this request forever. Restore service and report it as a drain
+            // failure so the caller retries instead of waiting on a dead call.
+            let outstanding = state.lifecycle_admission.active_permit_count();
+            state
+                .push_event(
+                    "error",
+                    "lifecycle_drain_deadline",
+                    format!(
+                        "lifecycle restart exceeded its {}s deadline with {} protected work permit(s) outstanding; aborting the restart",
+                        LIFECYCLE_DRAIN_DEADLINE.as_secs(),
+                        outstanding
+                    ),
+                )
+                .await;
+            cancel_draining_and_restore_bridge(state).await;
+            LifecycleShutdownResult::DrainTimedOut { outstanding }
+        }
     }
 }
 
@@ -2295,5 +2396,105 @@ mod tests {
         .expect("write replacement");
         drop(guard);
         assert!(locator_path.exists(), "old guard removed newer locator");
+    }
+
+    // ─── drain 不能把 daemon 留在 Draining ──────────────────────
+
+    fn draining_test_state() -> (SharedState, tempfile::TempDir) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("user-domain/config.toml");
+        let mut config = crate::config::AppConfig::default();
+        config.state_path = temp.path().join("state.json");
+        let state = crate::app_state::AppState::new(config_path, config, None, None);
+        (state, temp)
+    }
+
+    /// Dropping a restart while it is draining must restore `Active`.
+    ///
+    /// The drain parks on work that outlives the request that started it. When
+    /// the caller disconnects — or a proxy abandons the call — the handler
+    /// future is dropped mid-drain. Before `DrainingGuard`, the admission then
+    /// stayed `Draining` forever: every gateway request answered
+    /// `daemon_draining`, and nothing ever moved it back, because only the
+    /// dropped future would have.
+    #[tokio::test]
+    async fn dropping_a_restart_during_drain_restores_active_admission() {
+        let (state, _temp) = draining_test_state();
+        let admission = std::sync::Arc::clone(&state.lifecycle_admission);
+        assert_eq!(
+            admission.state(),
+            crate::app_state::LifecycleAdmissionState::Active
+        );
+
+        // Hold a permit so the drain cannot finish on its own: it must park,
+        // which is the window where cancellation used to strand the daemon.
+        let permit = admission.try_admit().expect("admit protected work");
+
+        let restart = request_shutdown_with_drain(&state, false, "test restart");
+        let dropped = tokio::time::timeout(std::time::Duration::from_millis(250), restart).await;
+        assert!(
+            dropped.is_err(),
+            "the drain should still be parked on the outstanding permit"
+        );
+
+        // The timeout dropped the future. The guard must have run on drop.
+        assert_eq!(
+            admission.state(),
+            crate::app_state::LifecycleAdmissionState::Active,
+            "a cancelled drain left the daemon draining with no owner"
+        );
+
+        drop(permit);
+    }
+
+    /// A drain that parks past its deadline must still restore service.
+    ///
+    /// Only the permit wait used to be bounded. A stuck await in the lease or
+    /// shutdown path hung the request forever, so no error was ever returned
+    /// and the caller had nothing to retry.
+    #[tokio::test]
+    async fn drain_deadline_restores_active_admission() {
+        let (state, _temp) = draining_test_state();
+        let admission = std::sync::Arc::clone(&state.lifecycle_admission);
+        let permit = admission.try_admit().expect("admit protected work");
+
+        // Drive the sequence directly under a short deadline, matching what
+        // `request_shutdown_with_drain_inner` wraps around it.
+        assert!(admission.begin_draining());
+        let guard = DrainingGuard::new(&state);
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            drain_until_shutdown(&state, false, "test restart", None, None),
+        )
+        .await;
+        drop(guard);
+
+        assert!(
+            outcome.is_err(),
+            "an outstanding permit must park the drain"
+        );
+        assert_eq!(
+            admission.state(),
+            crate::app_state::LifecycleAdmissionState::Active,
+            "the deadline must leave the daemon serving"
+        );
+        drop(permit);
+    }
+
+    /// The guard must not undo a drain that already committed to shutting down.
+    #[tokio::test]
+    async fn draining_guard_keeps_a_committed_shutdown() {
+        let (state, _temp) = draining_test_state();
+        let admission = std::sync::Arc::clone(&state.lifecycle_admission);
+        assert!(admission.begin_draining());
+        assert!(admission.commit_shutdown());
+
+        drop(DrainingGuard::new(&state));
+
+        assert_eq!(
+            admission.state(),
+            crate::app_state::LifecycleAdmissionState::ShutdownCommitted,
+            "the guard must not resurrect a daemon that already committed"
+        );
     }
 }

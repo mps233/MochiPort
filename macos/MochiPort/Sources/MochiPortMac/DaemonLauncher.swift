@@ -702,10 +702,12 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
                 )
             }
             switch launchdServiceState(from: printResult.output) {
-            case .running:
+            case .running, .spawning:
                 // The caller has already received an accepted drain response.
                 // Keep the job loaded and let bootout stop the draining process
-                // before bootstrap starts the staged runtime.
+                // before bootstrap starts the staged runtime. A job launchd is
+                // still spawning is equally loaded, and must be booted out
+                // rather than bootstrapped on top of.
                 serviceLoaded = true
             case .stopped:
                 serviceLoaded = true
@@ -1269,6 +1271,11 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
                 // Health may still be converging, but a running daemon must
                 // never be restarted just because the GUI cannot reach it yet.
                 return .alreadyRunning
+            case .spawning:
+                // launchd owns an in-progress start. Issuing kickstart or
+                // bootstrap here would race it, and the caller's readiness
+                // probe already gives the spawn time to finish.
+                return .alreadyRunning
             case .stopped:
                 guard loadedPID(from: printResult.output) == nil else {
                     throw DaemonLaunchError.launchctlFailed("无法确认已登记后台服务的运行状态。")
@@ -1324,6 +1331,13 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
 
     private enum LaunchdServiceState {
         case running
+        /// The job is registered and launchd owns an in-progress start:
+        /// `spawn scheduled` means the spawn is queued, `spawning` that it is
+        /// already underway. Neither has a usable pid yet, and both are
+        /// transient. Callers must treat the job as owned and wait rather than
+        /// issuing their own `kickstart`/`bootstrap`, which would race the
+        /// startup launchd is already performing.
+        case spawning
         case stopped
         case unknown
     }
@@ -1337,10 +1351,13 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         else {
             return .unknown
         }
+        // `launchd`'s own vocabulary. Anything outside it keeps failing closed.
         switch state {
         case "running":
             return .running
-        case "waiting", "exited", "throttled", "not running":
+        case "spawn scheduled", "spawning":
+            return .spawning
+        case "waiting", "exited", "throttled", "not running", "terminated":
             return .stopped
         default:
             return .unknown

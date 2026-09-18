@@ -1272,8 +1272,131 @@ final class APIContractTests: XCTestCase {
         )
     }
 
+    /// `spawn scheduled` is a real `launchctl print` state, not a mystery.
+    ///
+    /// It means launchd has the job registered and its start is queued, so the
+    /// job is owned even though no pid exists yet. Treating it as unknown made
+    /// the launcher fail closed and abort an otherwise healthy switch; measured
+    /// on 2026-09-18 a MochiPort job was reported exactly this way between a
+    /// failed bootout and the following bootstrap.
+    func testDaemonLauncherTreatsSpawnScheduledAsOwnedStart() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        _ = try installDaemonRuntime(build: "389", fixture: fixture)
+        let spawningOutput = launchctlOutput(
+            program: fixture.configuration.activeHelperURL(),
+            configuration: fixture.configuration,
+            build: "389",
+            state: "spawn scheduled",
+            pid: nil
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments.first == "print" {
+                return CommandResult(exitCode: 0, output: spawningOutput)
+            }
+            return CommandResult(exitCode: 1, output: "unexpected command")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
 
+        let outcome = try await launcher.startIfNeeded()
 
+        // launchd owns the in-progress start; the caller waits for health.
+        XCTAssertEqual(outcome, .alreadyRunning)
+        XCTAssertEqual(
+            commands.arguments.map(\.first),
+            ["print"],
+            "a job launchd is spawning must not be kickstarted or bootstrapped"
+        )
+    }
+
+    /// The same state during activation must boot the old job out, not fail.
+    func testDaemonLauncherActivatesWhileLaunchdIsSpawning() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        _ = try installDaemonRuntime(build: "388", fixture: fixture)
+        let spawningOutput = launchctlOutput(
+            program: fixture.configuration.activeHelperURL(),
+            configuration: fixture.configuration,
+            build: "388",
+            state: "spawning",
+            pid: nil
+        )
+        let versions = StringSequence([
+            "mochiport 0.5.6 (build 388)\n",
+            "mochiport 0.5.6 (build 389)\n",
+            "mochiport 0.5.6 (build 389)\n",
+        ])
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: versions.next() ?? "")
+            }
+            if arguments.first == "print" {
+                return CommandResult(exitCode: 0, output: spawningOutput)
+            }
+            if arguments.first == "bootout" || arguments.first == "bootstrap" {
+                return CommandResult(exitCode: 0, output: "")
+            }
+            return CommandResult(exitCode: 1, output: "unexpected command")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
+        let preparation = try await launcher.prepareDaemonUpgradeIfNeeded()
+        let outcome = try await launcher.activateDaemonUpgrade(preparation)
+
+        XCTAssertEqual(
+            outcome,
+            .activated(previousBuildIdentifier: "388", buildIdentifier: "389")
+        )
+        XCTAssertEqual(
+            commands.arguments.map(\.first),
+            ["--version", "--version", "--version", "print", "bootout", "bootstrap"]
+        )
+    }
+
+    /// `terminated` is a stopped job, not an unreadable one.
+    func testDaemonLauncherResumesTerminatedService() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        _ = try installDaemonRuntime(build: "389", fixture: fixture)
+        let terminatedOutput = launchctlOutput(
+            program: fixture.configuration.activeHelperURL(),
+            configuration: fixture.configuration,
+            build: "389",
+            state: "terminated",
+            pid: nil
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            // The stopped path re-validates the active runtime before it
+            // kickstarts, exactly as the real launcher does.
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "mochiport 0.5.6 (build 389)\n")
+            }
+            if arguments.first == "print" {
+                return CommandResult(exitCode: 0, output: terminatedOutput)
+            }
+            if arguments.first == "kickstart" {
+                return CommandResult(exitCode: 0, output: "")
+            }
+            return CommandResult(exitCode: 1, output: "unexpected command")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
+
+        let outcome = try await launcher.startIfNeeded()
+
+        XCTAssertEqual(outcome, .resumedStoppedService)
+        XCTAssertEqual(
+            commands.arguments.map(\.first),
+            ["print", "--version", "kickstart"]
+        )
+    }
 
     func testDaemonLauncherActivatesAStoppedOrDrainingLoadedService() async throws {
         let fixture = try makeDaemonLauncherFixture()
