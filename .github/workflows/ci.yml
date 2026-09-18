@@ -68,6 +68,21 @@ jobs:
           workspaces: |
             . -> target
 
+      # `tauri.windows.conf.json` declares the daemon as an `externalBin`
+      # sidecar, and Tauri's build script hard-fails when the file is missing —
+      # it never runs for a plain `cargo check` otherwise. The real binary is
+      # produced by `scripts/build-sidecar.ps1` during a release; a stand-in is
+      # enough here, where the only goal is to compile this crate. The daemon's
+      # own Windows build is covered by the `release-windows` workflow.
+      - name: Provide sidecar stand-in
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $target = "x86_64-pc-windows-msvc"
+          $directory = "windows\MochiPort\src-tauri\binaries"
+          New-Item -ItemType Directory -Force $directory | Out-Null
+          Set-Content -Path "$directory\mochiport-daemon-$target.exe" -Value "" -NoNewline
+
       - name: Check
         run: cargo check --locked -p mochiport-windows --all-targets
 

@@ -1,5 +1,6 @@
-#[cfg(target_os = "macos")]
 use schemars::JsonSchema;
+
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::{
     collections::{HashMap, HashSet},
