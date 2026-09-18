@@ -34,8 +34,7 @@ use uuid::Uuid;
 
 use crate::{
     app_state::SharedState,
-    daemon_process::{DAEMON_SERVICE_NAME, DaemonIdentity},
-    storage_migration,
+    daemon::process::{DAEMON_SERVICE_NAME, DaemonIdentity},
     types::now_ms,
     version,
 };
@@ -481,7 +480,7 @@ pub fn management_token(config_path: &Path) -> Result<String, AuthError> {
 }
 
 pub fn active_daemon_locator_path() -> Result<PathBuf, AuthError> {
-    Ok(storage_migration::current_storage_home().join(ACTIVE_DAEMON_FILE_NAME))
+    Ok(crate::daemon::storage_migration::current_storage_home().join(ACTIVE_DAEMON_FILE_NAME))
 }
 
 pub fn publish_active_daemon_locator(

@@ -30,4 +30,6 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+# Pinned to the version the daemon uses so the workspace resolves a single
+# windows-sys build. Win32_Foundation and Win32_System_Threading exist in both.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

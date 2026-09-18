@@ -20,12 +20,13 @@ use crate::{
     },
     chain_log,
     config::AppConfig,
-    manage_api, remote_control_backend,
+    remote_control_backend,
     types::ImPlatformKind,
 };
 
 mod codex_app;
 mod im_api;
+pub(crate) mod manage;
 mod manage_workspace;
 mod oauth;
 mod onboarding;
@@ -67,31 +68,31 @@ pub fn router(state: SharedState) -> Router {
     // Initialize the shared user-domain credential before serving requests.
     // Errors are surfaced as a protected-route 500 without exposing secrets;
     // legacy routes remain available during the migration window.
-    let _ = manage_api::ensure_management_token(&state.config_path);
+    let _ = manage::ensure_management_token(&state.config_path);
     let manage_routes = Router::new()
-        .route("/status", get(manage_api::status))
+        .route("/status", get(manage::status))
         .route("/lifecycle", get(manage_lifecycle))
         .route(
             "/lifecycle/lease/claim",
-            post(manage_api::claim_lifecycle_lease),
+            post(manage::claim_lifecycle_lease),
         )
         .route(
             "/lifecycle/lease/renew",
-            post(manage_api::renew_lifecycle_lease),
+            post(manage::renew_lifecycle_lease),
         )
         .route(
             "/lifecycle/lease/release",
-            post(manage_api::release_lifecycle_lease),
+            post(manage::release_lifecycle_lease),
         )
         .route(
             "/lifecycle/lease/takeover",
-            post(manage_api::takeover_lifecycle_lease),
+            post(manage::takeover_lifecycle_lease),
         )
         .route(
             "/lifecycle/credential/rotate",
-            post(manage_api::rotate_management_credential),
+            post(manage::rotate_management_credential),
         )
-        .route("/lifecycle/restart", post(manage_api::restart_lifecycle))
+        .route("/lifecycle/restart", post(manage::restart_lifecycle))
         .route("/bridge/start", post(im_api::start_bridge))
         .route("/bridge/stop", post(im_api::stop_bridge))
         .route("/dashboard", get(manage_dashboard))
@@ -256,7 +257,7 @@ pub fn router(state: SharedState) -> Router {
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            manage_api::require_bearer,
+            manage::require_bearer,
         ));
 
     // Legacy management paths remain available for compatibility, but write-capable
@@ -305,7 +306,7 @@ pub fn router(state: SharedState) -> Router {
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            manage_api::require_bearer,
+            manage::require_bearer,
         ));
 
     // The compatibility shutdown endpoints predate the versioned management
@@ -316,11 +317,11 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/shutdown/instance", post(shutdown_instance))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            manage_api::require_bearer,
+            manage::require_bearer,
         ));
 
     Router::new()
-        .route("/healthz", get(manage_api::healthz))
+        .route("/healthz", get(manage::healthz))
         .nest("/api/v1/manage", manage_routes)
         .merge(legacy_im_manage_routes)
         .route("/oauth/authorize", get(oauth::oauth_authorize))
@@ -386,8 +387,8 @@ pub fn router(state: SharedState) -> Router {
         .with_state(state)
 }
 
-async fn manage_lifecycle(State(state): State<SharedState>) -> Json<manage_api::LifecycleResponse> {
-    Json(manage_api::lifecycle_snapshot(&state).await)
+async fn manage_lifecycle(State(state): State<SharedState>) -> Json<manage::LifecycleResponse> {
+    Json(manage::lifecycle_snapshot(&state).await)
 }
 
 async fn access_log(request: Request<Body>, next: Next) -> impl IntoResponse {
@@ -485,7 +486,7 @@ async fn status_snapshot(state: &SharedState) -> StatusResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManageDashboardResponse {
-    service: manage_api::ManageStatusResponse,
+    service: manage::ManageStatusResponse,
     bridge_running: bool,
     remote_control_connected: bool,
     remote_control_healthy: bool,
@@ -587,7 +588,7 @@ fn im_account_counts<T>(
 }
 
 async fn manage_dashboard(State(state): State<SharedState>) -> Json<ManageDashboardResponse> {
-    let service = manage_api::status_snapshot(&state);
+    let service = manage::status_snapshot(&state);
     let bridge_running = state
         .bridge_task
         .lock()
@@ -729,16 +730,16 @@ async fn perform_shutdown(
     state: &SharedState,
     event_message: &'static str,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match manage_api::request_shutdown_with_drain(state, false, event_message).await {
-        manage_api::LifecycleShutdownResult::Accepted => (
+    match manage::request_shutdown_with_drain(state, false, event_message).await {
+        manage::LifecycleShutdownResult::Accepted => (
             StatusCode::OK,
             Json(json!({ "ok": true, "accepted": true })),
         ),
-        manage_api::LifecycleShutdownResult::NotRunning => (
+        manage::LifecycleShutdownResult::NotRunning => (
             StatusCode::OK,
             Json(json!({ "ok": true, "accepted": false })),
         ),
-        manage_api::LifecycleShutdownResult::AlreadyInProgress => (
+        manage::LifecycleShutdownResult::AlreadyInProgress => (
             StatusCode::CONFLICT,
             Json(json!({
                 "ok": false,
@@ -747,7 +748,7 @@ async fn perform_shutdown(
                 "error": "后台服务正在关闭或重启，请稍后重试。",
             })),
         ),
-        manage_api::LifecycleShutdownResult::ProtectedWork(protected_work_items) => (
+        manage::LifecycleShutdownResult::ProtectedWork(protected_work_items) => (
             StatusCode::CONFLICT,
             Json(json!({
                 "ok": false,
@@ -760,7 +761,7 @@ async fn perform_shutdown(
                 "protectedWorkItems": protected_work_items,
             })),
         ),
-        manage_api::LifecycleShutdownResult::DrainTimedOut { outstanding } => (
+        manage::LifecycleShutdownResult::DrainTimedOut { outstanding } => (
             StatusCode::CONFLICT,
             Json(json!({
                 "ok": false,
@@ -772,7 +773,7 @@ async fn perform_shutdown(
                 "outstandingProtectedWork": outstanding,
             })),
         ),
-        manage_api::LifecycleShutdownResult::LeaseRejected(_) => (
+        manage::LifecycleShutdownResult::LeaseRejected(_) => (
             StatusCode::CONFLICT,
             Json(json!({
                 "ok": false,
@@ -895,7 +896,7 @@ mod tests {
         ai_gateway::config::{ProviderConfig, Sub2ApiAdminConfig},
         app_state::{AppState, ImAccountRuntimeState, RemoteControlServerConnection},
         config::{FeishuConfig, TelegramConfig, WechatConfig, WecomConfig},
-        daemon_process::DaemonIdentity,
+        daemon::process::DaemonIdentity,
         types::ImPlatformKind,
     };
 
@@ -910,9 +911,9 @@ mod tests {
         let config_path = temp.path().join("user-domain/config.toml");
         config.state_path = temp.path().join(CANARY_STATE_PATH);
         let state = AppState::new(config_path.clone(), config, None, None);
-        manage_api::ensure_management_token(&config_path).expect("create management control file");
+        manage::ensure_management_token(&config_path).expect("create management control file");
         let control: Value = serde_json::from_slice(
-            &std::fs::read(manage_api::control_file_path(&config_path))
+            &std::fs::read(manage::control_file_path(&config_path))
                 .expect("read management control file"),
         )
         .expect("parse management control file");
@@ -982,7 +983,7 @@ mod tests {
         daemon_instance_id: &str,
         generation: u64,
     ) {
-        let path = manage_api::control_file_path(&state.config_path);
+        let path = manage::control_file_path(&state.config_path);
         let mut control: Value =
             serde_json::from_slice(&std::fs::read(&path).expect("read management control file"))
                 .expect("parse management control file");
@@ -1001,7 +1002,7 @@ mod tests {
     }
 
     async fn lifecycle_lease_request(state: &SharedState, installation_id: &str) -> Value {
-        let lifecycle = manage_api::lifecycle_snapshot(state).await;
+        let lifecycle = manage::lifecycle_snapshot(state).await;
         json!({
             "installationId": installation_id,
             "daemonInstanceId": lifecycle.service.instance_id,
@@ -1079,7 +1080,7 @@ mod tests {
             .enhanced_launch_operations
             .begin("fixture-operation".into(), &state.lifecycle_admission)
         {
-            crate::codex_app_enhanced::EnhancedLaunchOperationBegin::Started {
+            crate::codex::app_enhanced::EnhancedLaunchOperationBegin::Started {
                 control,
                 lifecycle_permit,
                 ..
@@ -1141,7 +1142,7 @@ mod tests {
         state.enhanced_launch_operations.finish_failure(
             "fixture-operation",
             control.cancellation(),
-            crate::codex_app_enhanced::EnhancedLaunchFailure {
+            crate::codex::app_enhanced::EnhancedLaunchFailure {
                 error: "fixture cancellation".into(),
                 recovery: None,
                 cancelled: true,
@@ -3673,7 +3674,7 @@ mod tests {
             "protected-enhanced-launch".into(),
             &state.lifecycle_admission,
         ) {
-            crate::codex_app_enhanced::EnhancedLaunchOperationBegin::Started {
+            crate::codex::app_enhanced::EnhancedLaunchOperationBegin::Started {
                 control,
                 lifecycle_permit,
                 ..
@@ -3713,7 +3714,7 @@ mod tests {
             "restart-protected-enhanced-launch".into(),
             &state.lifecycle_admission,
         ) {
-            crate::codex_app_enhanced::EnhancedLaunchOperationBegin::Started {
+            crate::codex::app_enhanced::EnhancedLaunchOperationBegin::Started {
                 control,
                 lifecycle_permit,
                 ..
@@ -3871,7 +3872,7 @@ mod tests {
         let rejected_old_token =
             route_response(app.clone(), "/api/v1/manage/lifecycle", Some(&old_token)).await;
         assert_eq!(rejected_old_token.status(), StatusCode::UNAUTHORIZED);
-        let new_token = manage_api::management_token(&state.config_path).expect("new token");
+        let new_token = manage::management_token(&state.config_path).expect("new token");
         let replay = request_response(
             app,
             Method::POST,
@@ -3987,7 +3988,7 @@ mod tests {
         .await;
         assert_eq!(rejected_old_token.status(), StatusCode::UNAUTHORIZED);
         let replacement_token =
-            manage_api::management_token(&state.config_path).expect("replacement token");
+            manage::management_token(&state.config_path).expect("replacement token");
         let replay = request_response(
             app.clone(),
             Method::POST,
@@ -4453,7 +4454,7 @@ mod tests {
             );
         }
         let retained_control: Value = serde_json::from_slice(
-            &std::fs::read(manage_api::control_file_path(&state.config_path))
+            &std::fs::read(manage::control_file_path(&state.config_path))
                 .expect("read retained management control file"),
         )
         .expect("parse retained management control file");
@@ -4502,7 +4503,7 @@ mod tests {
         );
 
         let retained_control: Value = serde_json::from_slice(
-            &std::fs::read(manage_api::control_file_path(&state.config_path))
+            &std::fs::read(manage::control_file_path(&state.config_path))
                 .expect("read retained handoff control file"),
         )
         .expect("parse retained handoff control file");

@@ -1,6 +1,6 @@
 use crate::{
     app_state::SharedState,
-    im_runtime::{RouteTarget, route_from_conversation_key},
+    im::runtime::{RouteTarget, route_from_conversation_key},
     types::{ImPlatformKind, InboundMessage},
 };
 

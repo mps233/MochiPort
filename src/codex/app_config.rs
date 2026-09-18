@@ -23,8 +23,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 #[cfg(target_os = "windows")]
 use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
-#[cfg(not(test))]
-use crate::storage_migration;
 use crate::{chain_log, config::LocalConnectionMode};
 
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
@@ -3527,7 +3525,7 @@ fn mochiport_app_support_dir() -> PathBuf {
 
 #[cfg(not(test))]
 fn mochiport_app_support_dir() -> PathBuf {
-    storage_migration::current_storage_home()
+    crate::daemon::storage_migration::current_storage_home()
 }
 
 fn is_mochiport_managed_auth_file(path: &Path) -> Result<bool> {

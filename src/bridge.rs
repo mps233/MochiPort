@@ -18,6 +18,7 @@ use crate::{
         FeishuApi, FeishuSettings, flow as feishu_flow,
         ws::{listen_ws, set_account_ws_state},
     },
+    im::runtime::{PendingApproval, RouteTarget},
     im::telegram::{
         api::TelegramApi, flow as telegram_flow, polling::listen_polling, types::TelegramSettings,
     },
@@ -30,7 +31,6 @@ use crate::{
         ws::{listen_ws as listen_wecom_ws, set_account_ws_state as set_wecom_ws_state},
     },
     im::{core::outbound, events},
-    im_runtime::{PendingApproval, RouteTarget},
     remote_control_backend,
     types::{ImPlatformKind, InboundMessage},
 };

@@ -10,7 +10,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{daemon_process, types::now_ms};
+use crate::types::now_ms;
 
 pub const MOCHIPORT_HOME_ENV: &str = "MOCHIPORT_HOME";
 
@@ -114,7 +114,7 @@ fn migrate_storage_to(
         return Ok(report);
     }
 
-    if daemon_process::current_daemon_is_active_at(&destination_directory)? {
+    if crate::daemon::process::current_daemon_is_active_at(&destination_directory)? {
         anyhow::bail!(
             "MochiPort daemon is running from `{}`; stop it before migrating storage",
             destination_directory.display()
@@ -139,7 +139,7 @@ fn migrate_storage_to(
     }
     validate_legacy_source(&source_directory)?;
 
-    if let Some(active) = daemon_process::active_legacy_daemon_at(&source_directory)? {
+    if let Some(active) = crate::daemon::process::active_legacy_daemon_at(&source_directory)? {
         let owner = active
             .metadata
             .as_ref()

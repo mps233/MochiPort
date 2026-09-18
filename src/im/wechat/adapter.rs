@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use tokio::time::{Duration, sleep};
 
 use crate::{
-    app_state::SharedState, chain_log, im::core::i18n::ImText, im_runtime::PendingApproval,
+    app_state::SharedState, chain_log, im::core::i18n::ImText, im::runtime::PendingApproval,
 };
 
 use super::{api::WechatApi, store};

@@ -46,11 +46,14 @@ npm ci
 npm run tauri:build
 ```
 
-Tauri 产物位于：
+Tauri 产物位于仓库根目录的 workspace target：
 
 ```text
-src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\
+target\x86_64-pc-windows-msvc\release\bundle\msi\
 ```
+
+`src-tauri` 是根 Cargo workspace 的成员，Cargo 与 Tauri CLI 都从 workspace 根解析
+target 目录，因此产物不在 `src-tauri\target` 下。
 
 正式发布由 `.github\workflows\release-windows.yml` 完成。该 workflow 会：
 

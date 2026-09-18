@@ -9,7 +9,7 @@ use crate::{
             next_thread_routing_request_id,
         },
     },
-    im_runtime::{
+    im::runtime::{
         RouteTarget, ThreadCreateDraftState, ThreadRoutingRequestState, ThreadRoutingStage,
     },
     remote_control_backend,

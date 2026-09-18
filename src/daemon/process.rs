@@ -9,7 +9,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{storage_migration, types::now_ms};
+use crate::types::now_ms;
 
 pub const DAEMON_INSTANCE_ENV: &str = "MOCHIPORT_DAEMON_INSTANCE_ID";
 pub const DAEMON_SERVICE_NAME: &str = "mochiport";
@@ -68,8 +68,8 @@ impl DaemonInstanceLock {
     /// of a user-supplied config path. Historical locations are inspected
     /// read-only only to avoid a second daemon during migration.
     pub fn acquire(config_path: &Path, identity: &DaemonIdentity) -> Result<Self> {
-        let storage_home = storage_migration::current_storage_home();
-        let legacy_homes = storage_migration::legacy_standard_storage_homes();
+        let storage_home = crate::daemon::storage_migration::current_storage_home();
+        let legacy_homes = crate::daemon::storage_migration::legacy_standard_storage_homes();
         Self::acquire_at(config_path, identity, &storage_home, &legacy_homes)
     }
 

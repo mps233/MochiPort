@@ -16,6 +16,12 @@ jobs:
       HAS_WINDOWS_CODESIGN: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 != '' && secrets.WINDOWS_CODESIGN_PFX_PASSWORD != '' }}
       IS_WINDOWS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
       TAURI_TARGET: x86_64-pc-windows-msvc
+      # `windows/MochiPort/src-tauri` is a member of the root Cargo workspace, so
+      # Cargo resolves the target directory from the workspace root: artifacts
+      # land in `<repo>/target`, not in `src-tauri/target`. The Tauri CLI reads
+      # the same directory from `cargo metadata`, which is why the release paths
+      # below are rooted here rather than under `src-tauri`.
+      WINDOWS_TARGET_ROOT: target
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -135,9 +141,11 @@ jobs:
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
         with:
+          # One workspace now covers both crates: the daemon and the Tauri client
+          # share the root `Cargo.lock` and the root `target` directory, so there
+          # is a single cache key rather than one per crate.
           workspaces: |
             . -> target
-            windows/MochiPort/src-tauri -> target
 
       - name: Install Frontend Dependencies
         working-directory: windows/MochiPort
@@ -251,8 +259,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $files = @(
-            "windows\MochiPort\src-tauri\target\$env:TAURI_TARGET\release\mochiport-windows.exe",
-            "windows\MochiPort\src-tauri\target\$env:TAURI_TARGET\release\mochiport-daemon.exe",
+            "$env:WINDOWS_TARGET_ROOT\$env:TAURI_TARGET\release\mochiport-windows.exe",
+            "$env:WINDOWS_TARGET_ROOT\$env:TAURI_TARGET\release\mochiport-daemon.exe",
             "windows\MochiPort\src-tauri\binaries\mochiport-daemon-$env:TAURI_TARGET.exe"
           )
           foreach ($file in $files) {
@@ -294,7 +302,7 @@ jobs:
           WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
-          $bundleRoot = "windows\MochiPort\src-tauri\target\$env:TAURI_TARGET\release\bundle"
+          $bundleRoot = "$env:WINDOWS_TARGET_ROOT\$env:TAURI_TARGET\release\bundle"
           $msiFiles = @(Get-ChildItem -LiteralPath (Join-Path $bundleRoot "msi") -Filter "*.msi" -File)
           if ($msiFiles.Count -ne 1) {
             throw "Expected exactly one Tauri MSI, found $($msiFiles.Count)"
@@ -322,8 +330,8 @@ jobs:
           $ErrorActionPreference = "Stop"
           $distRoot = "target\dist"
           $zipDist = Join-Path $distRoot "MochiPort Windows x64"
-          $bundleRoot = "windows\MochiPort\src-tauri\target\$env:TAURI_TARGET\release\bundle"
-          $guiExecutable = "windows\MochiPort\src-tauri\target\$env:TAURI_TARGET\release\mochiport-windows.exe"
+          $bundleRoot = "$env:WINDOWS_TARGET_ROOT\$env:TAURI_TARGET\release\bundle"
+          $guiExecutable = "$env:WINDOWS_TARGET_ROOT\$env:TAURI_TARGET\release\mochiport-windows.exe"
           $sidecarExecutable = "windows\MochiPort\src-tauri\binaries\mochiport-daemon-$env:TAURI_TARGET.exe"
           $msiFiles = @(Get-ChildItem -LiteralPath (Join-Path $bundleRoot "msi") -Filter "*.msi" -File)
           if ($msiFiles.Count -ne 1) {

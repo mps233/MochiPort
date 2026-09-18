@@ -22,8 +22,6 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use crate::config::AppConfig;
-#[cfg(not(test))]
-use crate::storage_migration;
 
 const DB_FILE_NAME: &str = "ai-gateway-request-logs.sqlite";
 const WRITE_QUEUE_CAPACITY: usize = 256;
@@ -563,7 +561,7 @@ pub fn database_path(config: &AppConfig) -> PathBuf {
     #[cfg(not(test))]
     {
         let _ = config;
-        return storage_migration::current_storage_home().join(DB_FILE_NAME);
+        return crate::daemon::storage_migration::current_storage_home().join(DB_FILE_NAME);
     }
 
     #[allow(unreachable_code)]

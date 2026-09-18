@@ -727,7 +727,7 @@ async fn launch_and_inject_pending(
         "[codex_app_enhanced] event=launch_start model_count={}",
         models.len()
     ));
-    crate::codex_app_config::prepare_codex_app_config_recovery_snapshot(None)
+    crate::codex::app_config::prepare_codex_app_config_recovery_snapshot(None)
         .context("准备 Codex 配置恢复快照失败")?;
     let client = reqwest::Client::builder()
         .no_proxy()

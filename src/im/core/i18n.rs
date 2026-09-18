@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 use crate::{
-    app_state::SharedState, config::TelegramReplyGranularity, im_runtime::PendingApproval,
+    app_state::SharedState, config::TelegramReplyGranularity, im::runtime::PendingApproval,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

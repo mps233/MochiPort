@@ -5,7 +5,7 @@ use crate::{
     im::core::routing::{
         clear_thread_binding_with_reason, is_stale_thread_error, live_thread_binding_for_route,
     },
-    im_runtime::{RouteTarget, TurnOrigin},
+    im::runtime::{RouteTarget, TurnOrigin},
     remote_control_backend,
     types::InboundAttachment,
 };

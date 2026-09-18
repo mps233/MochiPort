@@ -21,11 +21,11 @@ use crate::{
         thread_list::{empty_thread_routing_request, load_thread_routing_page},
         turn::{TurnStartOutcome, start_turn_for_route},
     },
+    im::runtime::{PendingApproval, RouteTarget, ThreadRoutingRequestState, TurnOrigin},
     im::{
         events,
         feishu::{FeishuAdapter, FeishuApi, renderer},
     },
-    im_runtime::{PendingApproval, RouteTarget, ThreadRoutingRequestState, TurnOrigin},
     remote_control_backend,
     types::{InboundAction, InboundMessage, ThreadRouteDirection},
 };
@@ -792,7 +792,7 @@ async fn respond_to_pending_approval(
     conversation_key: &str,
     pending: PendingApproval,
     option_index: usize,
-    decision: crate::im_runtime::ApprovalDecisionOption,
+    decision: crate::im::runtime::ApprovalDecisionOption,
     outbound_tx: &ImOutboundSender,
 ) -> Result<()> {
     let next = submit_approval_decision(state, &pending, &decision).await?;

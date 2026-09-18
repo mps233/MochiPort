@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use crate::{
     app_state::SharedState,
     chain_log,
+    im::runtime::{PendingApproval, RouteTarget},
     im::{
         core::i18n::{im_locale_for_state, im_text_for_state},
         core::{accounts::ImApiRegistry, text_utils::log_text_preview},
@@ -18,7 +19,6 @@ use crate::{
         },
         wecom::{adapter::WecomAdapter, api::WecomApi},
     },
-    im_runtime::{PendingApproval, RouteTarget},
     types::ImPlatformKind,
 };
 

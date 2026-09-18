@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use crate::{
     app_state::SharedState,
     im::core::{i18n::ImText, thread::ThreadCreateDefaults, thread_list::ThreadRoutingPage},
-    im_runtime::ThreadCreateDraftState,
+    im::runtime::ThreadCreateDraftState,
     types::{InboundAction, InboundMessage},
 };
 

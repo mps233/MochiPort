@@ -593,7 +593,7 @@ async fn telegram_thread_is_bound(state: &SharedState, thread_id: &str) -> bool 
     state.persisted.lock().await.im_thread_bindings.iter().any(
         |(conversation_key, bound_thread_id)| {
             bound_thread_id == thread_id
-                && crate::im_runtime::route_from_conversation_key(conversation_key)
+                && crate::im::runtime::route_from_conversation_key(conversation_key)
                     .is_some_and(|route| route.platform == crate::types::ImPlatformKind::Telegram)
         },
     )

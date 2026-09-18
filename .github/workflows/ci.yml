@@ -29,10 +29,38 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Check
-        run: cargo check --locked --bin mochiport
+        run: cargo check --locked -p mochiport --all-targets
 
       - name: Test
-        run: cargo test --locked --bin mochiport
+        run: cargo test --locked -p mochiport --all-targets
+
+  windows-client:
+    name: Windows client crate
+    # `windows/MochiPort/src-tauri` is a member of the root workspace, but it is
+    # deliberately not covered by the `rust` job: listing it there would not work
+    # (Tauri needs the platform's webview toolchain, and cross-checking from Linux
+    # fails in `ring`'s C code without the MSVC headers). Without this job the
+    # crate would only ever be compiled during a release, so a broken build or a
+    # failing test would surface at tag time instead of on the pull request.
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Check
+        run: cargo check --locked -p mochiport-windows --all-targets
+
+      - name: Test
+        run: cargo test --locked -p mochiport-windows --all-targets
 
   swiftui:
     name: SwiftUI macOS shell

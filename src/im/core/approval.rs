@@ -4,7 +4,7 @@ use crate::{
     app_state::SharedState,
     codex::{approval_decision_by_input, approval_response},
     im::core::i18n::im_text_for_state,
-    im_runtime::{ApprovalDecisionOption, PendingApproval, approval_request_fingerprint},
+    im::runtime::{ApprovalDecisionOption, PendingApproval, approval_request_fingerprint},
     remote_control_backend,
     types::InboundMessage,
 };

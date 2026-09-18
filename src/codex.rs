@@ -1,6 +1,10 @@
+pub mod app_config;
+pub mod app_enhanced;
+pub mod vscode_patch;
+
 use serde_json::{Value, json};
 
-use crate::im_runtime::ApprovalDecisionOption;
+use crate::im::runtime::ApprovalDecisionOption;
 
 #[derive(Debug, Clone)]
 pub struct CodexNotification {
@@ -295,7 +299,7 @@ pub fn approval_response(decision: Value) -> Value {
 }
 
 pub fn approval_decision_by_input(
-    pending: &crate::im_runtime::PendingApproval,
+    pending: &crate::im::runtime::PendingApproval,
     input: &str,
 ) -> Option<(usize, ApprovalDecisionOption)> {
     let normalized = input.trim().to_ascii_lowercase();
@@ -924,7 +928,7 @@ fn is_negative_decision(decision: &Value) -> bool {
 mod tests {
     use serde_json::json;
 
-    use crate::im_runtime::PendingApproval;
+    use crate::im::runtime::PendingApproval;
 
     use super::{
         CodexNotification, approval_decision_by_input, approval_request_view, approval_response,

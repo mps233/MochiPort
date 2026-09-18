@@ -1,4 +1,4 @@
-use crate::{im::core::i18n::ImText, im_runtime::TelegramCommentaryEntry};
+use crate::{im::core::i18n::ImText, im::runtime::TelegramCommentaryEntry};
 
 /// 过程文案与工具摘要共用同一条聚合气泡，这里只挑选预算内的可见条目。
 pub(crate) const TELEGRAM_COMMENTARY_MAX_CHARS: usize = 3_600;

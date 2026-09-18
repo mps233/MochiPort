@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::im::core::{i18n::ImText, thread::ThreadCreateDefaults};
-use crate::im_runtime::PendingApproval;
+use crate::im::runtime::PendingApproval;
 
 use super::{FeishuApi, renderer};
 

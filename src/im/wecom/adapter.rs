@@ -12,7 +12,7 @@ use crate::{
         thread::{ThreadCreateDefaults, create_options_for_field},
         thread_list::ThreadRoutingPage,
     },
-    im_runtime::{PendingApproval, ThreadCreateDraftState, approval_request_fingerprint},
+    im::runtime::{PendingApproval, ThreadCreateDraftState, approval_request_fingerprint},
     types::{InboundAction, InboundCallbackKind, InboundMessage},
 };
 

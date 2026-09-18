@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::{
     im::core::i18n::ImText,
-    im_runtime::{
+    im::runtime::{
         TelegramCollabProgressSnapshot, TelegramCollabProgressStatus, TelegramCollabProgressUpdate,
     },
 };
@@ -443,7 +443,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::im_runtime::TelegramCollabProgressEntry;
+    use crate::im::runtime::TelegramCollabProgressEntry;
 
     #[test]
     fn parses_subagent_activity_without_exposing_path_or_call_id() {

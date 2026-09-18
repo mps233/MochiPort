@@ -10,7 +10,6 @@ use axum::{
 use serde_json::{Value, json};
 
 use crate::app_state::SharedState;
-use crate::codex_app_config;
 
 // Preferred ordering for locally usable curated plugins. Entries that are not
 // present in the filtered local catalog (e.g. because they need a remote OpenAI
@@ -875,7 +874,7 @@ fn display_name_from_slug(name: &str) -> String {
 }
 
 fn codex_home() -> PathBuf {
-    codex_app_config::default_codex_home()
+    crate::codex::app_config::default_codex_home()
 }
 
 #[cfg(test)]

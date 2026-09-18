@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::{
+    im::runtime::RouteTarget,
     im::{feishu::FeishuApi, telegram::api::TelegramApi, wechat::api::WechatApi, wecom::WecomApi},
-    im_runtime::RouteTarget,
     types::ImPlatformKind,
 };
 

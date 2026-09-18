@@ -1,7 +1,7 @@
 use serde_json::Value as JsonValue;
 
 use crate::im::core::i18n::ImText;
-use crate::im_runtime::ApprovalDecisionOption;
+use crate::im::runtime::ApprovalDecisionOption;
 
 use super::APPROVAL_CARD_TEMPLATE;
 use super::common::build_markdown_card;

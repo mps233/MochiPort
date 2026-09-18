@@ -3,11 +3,11 @@ use std::time::Duration;
 use crate::{
     app_state::SharedState,
     im::core::i18n::im_locale_for_state,
+    im::runtime::{RouteTarget, TelegramTypingSendAction},
     im::telegram::{
         adapter::TelegramAdapter,
         api::{TelegramApi, TelegramApiError},
     },
-    im_runtime::{RouteTarget, TelegramTypingSendAction},
 };
 
 const TELEGRAM_TYPING_RETRY_THROTTLE_MS: u128 = 300;
@@ -437,8 +437,8 @@ mod tests {
         TELEGRAM_TYPING_SEND_TIMEOUT_SECONDS, TelegramThinkingMode, turn_item_id,
         typing_retry_delay,
     };
+    use crate::im::runtime::RuntimeState;
     use crate::im::telegram::api::TelegramApiError;
-    use crate::im_runtime::RuntimeState;
 
     #[test]
     fn completed_turn_indicator_cannot_restart_after_an_early_output() {

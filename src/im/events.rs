@@ -11,6 +11,11 @@ use crate::{
         extract_agent_message_text, extract_turn_reply_text,
     },
     config::TelegramReplyGranularity,
+    im::runtime::{
+        PendingApproval, RouteTarget, TelegramCommandProgressSnapshot,
+        TelegramThreadSettingsObservation, TelegramWebSearchProgressEntry, ThreadSettingsSnapshot,
+        TurnOrigin,
+    },
     im::{
         core::{
             accounts::ImApiRegistry,
@@ -37,11 +42,6 @@ use crate::{
             typing as telegram_typing,
         },
         wechat::adapter::WechatAdapter,
-    },
-    im_runtime::{
-        PendingApproval, RouteTarget, TelegramCommandProgressSnapshot,
-        TelegramThreadSettingsObservation, TelegramWebSearchProgressEntry, ThreadSettingsSnapshot,
-        TurnOrigin,
     },
     types::ImPlatformKind,
 };
@@ -677,7 +677,7 @@ pub(crate) async fn send_next_approval(
     conversation_key: &str,
     approval: &PendingApproval,
 ) -> Result<()> {
-    let Some(route) = crate::im_runtime::route_from_conversation_key(conversation_key) else {
+    let Some(route) = crate::im::runtime::route_from_conversation_key(conversation_key) else {
         state
             .push_event(
                 "warn",
@@ -4343,12 +4343,12 @@ mod tests {
     use crate::{
         app_state::AppState,
         config::AppConfig,
+        im::runtime::{RouteTarget, WecomStreamState},
         im::{
             core::outbound::{channel as outbound_channel, try_recv_for_test},
             telegram::{api::TelegramApi, types::TelegramSettings},
             wecom::{WecomApi, WecomSettings},
         },
-        im_runtime::{RouteTarget, WecomStreamState},
     };
 
     fn test_state() -> SharedState {

@@ -32,6 +32,44 @@ def package_notice_files(package: dict[str, object]) -> list[Path]:
     )
 
 
+def root_package_id_for_manifest(metadata: dict[str, object], manifest_path: Path) -> str:
+    """Resolve the package a manifest declares.
+
+    `resolve.root` is null as soon as a manifest belongs to a workspace with
+    more than one member, so the package has to be matched by manifest path
+    instead of trusting that field.
+    """
+    expected = manifest_path.resolve()
+    for package in metadata["packages"]:
+        if Path(str(package["manifest_path"])).resolve() == expected:
+            return str(package["id"])
+    raise SystemExit(f"{manifest_path} does not declare a workspace package")
+
+
+def dependency_ids(metadata: dict[str, object], root_package_id: str) -> set[str]:
+    """Collect the transitive Cargo dependencies of one package.
+
+    Workspace metadata describes every member at once, so the inventory for one
+    manifest has to follow the dependency edges rather than take the whole
+    package list. This keeps each crate's inventory limited to its own
+    dependencies, including the ones that only apply to other platforms.
+    """
+    nodes = {
+        str(node["id"]): node
+        for node in metadata.get("resolve", {}).get("nodes", [])
+    }
+    collected: set[str] = set()
+    pending = [root_package_id]
+    while pending:
+        for dependency in nodes.get(pending.pop(), {}).get("deps", []):
+            package_id = str(dependency["pkg"])
+            if package_id not in collected:
+                collected.add(package_id)
+                pending.append(package_id)
+    collected.discard(root_package_id)
+    return collected
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Collect Cargo dependency notices into a deterministic release document."
@@ -72,9 +110,10 @@ def main() -> int:
                 encoding="utf-8",
             )
         )
-        root_package_id = metadata.get("resolve", {}).get("root")
+        root_package_id = root_package_id_for_manifest(metadata, manifest_path)
+        included_ids = dependency_ids(metadata, root_package_id)
         for package in metadata["packages"]:
-            if package["id"] != root_package_id:
+            if package["id"] in included_ids:
                 packages_by_id.setdefault(package["id"], package)
     packages = sorted(
         packages_by_id.values(),

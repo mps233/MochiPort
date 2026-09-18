@@ -319,8 +319,7 @@ fn validated_relative_path(path: &str) -> Result<String, String> {
         return Err("请求路径无效".to_string());
     }
     let normalized_path = normalized.path().trim_start_matches('/');
-    if normalized_path != "healthz" && !normalized_path.starts_with("api/v1/manage/")
-    {
+    if normalized_path != "healthz" && !normalized_path.starts_with("api/v1/manage/") {
         return Err("只允许访问 MochiPort 管理 API".to_string());
     }
 
@@ -950,10 +949,7 @@ mod tests {
             Some(PathBuf::from("C:/Users/test/custom-mochiport"))
         );
         assert_eq!(
-            current_home_directory_from(
-                None,
-                Some(PathBuf::from("C:/Users/test/AppData/Local")),
-            ),
+            current_home_directory_from(None, Some(PathBuf::from("C:/Users/test/AppData/Local")),),
             Some(PathBuf::from("C:/Users/test/AppData/Local/MochiPort"))
         );
     }
@@ -992,15 +988,12 @@ mod tests {
 
     #[test]
     fn probe_classification_rejects_stale_or_incompatible_service() {
-        let ready = response(
+        let ready = response(200, r#"{"service":"mochiport","apiMajor":1,"ready":true}"#);
+        let stale = response(
             200,
-            r#"{"service":"mochiport","apiMajor":1,"ready":true}"#,
+            r#"{"service":"threadrelay","apiMajor":1,"ready":true}"#,
         );
-        let stale = response(200, r#"{"service":"threadrelay","apiMajor":1,"ready":true}"#);
-        let incompatible = response(
-            200,
-            r#"{"service":"mochiport","apiMajor":0,"ready":true}"#,
-        );
+        let incompatible = response(200, r#"{"service":"mochiport","apiMajor":0,"ready":true}"#);
 
         assert_eq!(
             classify_endpoint_probe(Some(&ready)),

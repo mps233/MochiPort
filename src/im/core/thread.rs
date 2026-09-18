@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result, anyhow};
 
 use crate::{
-    app_state::SharedState, codex_app_config, im::core::i18n::ImText,
-    im_runtime::ThreadCreateDraftState, remote_control_backend,
+    app_state::SharedState, im::core::i18n::ImText, im::runtime::ThreadCreateDraftState,
+    remote_control_backend,
 };
 
 static THREAD_ROUTING_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -1250,7 +1250,7 @@ fn codex_config_candidate_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     push_path_once(
         &mut paths,
-        codex_app_config::default_codex_home().join("config.toml"),
+        crate::codex::app_config::default_codex_home().join("config.toml"),
     );
     for home in home_env_candidates() {
         push_path_once(

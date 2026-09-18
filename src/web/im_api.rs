@@ -23,6 +23,7 @@ use crate::{
         thread::summarize_thread_title,
     },
     im::feishu::{FeishuApi, FeishuSettings},
+    im::runtime::{RouteTarget, route_from_conversation_key},
     im::telegram::{
         api::TelegramApi,
         polling::{
@@ -31,7 +32,6 @@ use crate::{
         },
         types::TelegramSettings,
     },
-    im_runtime::{RouteTarget, route_from_conversation_key},
     remote_control_backend,
     types::{ImPlatformKind, split_telegram_message_target, telegram_message_target},
 };
@@ -211,7 +211,7 @@ pub(super) struct ImAccountsResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ManageImAccountsResponse {
-    service: crate::manage_api::ManageStatusResponse,
+    service: crate::web::manage::ManageStatusResponse,
     accounts: Vec<ImAccountItem>,
 }
 
@@ -274,7 +274,7 @@ pub(super) async fn manage_im_accounts(
 ) -> Json<ManageImAccountsResponse> {
     let accounts = im_accounts_snapshot(&state).await;
     Json(ManageImAccountsResponse {
-        service: crate::manage_api::status_snapshot(&state),
+        service: crate::web::manage::status_snapshot(&state),
         accounts: accounts.accounts,
     })
 }
@@ -2102,9 +2102,11 @@ async fn clear_im_account_bindings(state: &SharedState, platform: &str, account_
         let mut persisted = state.persisted.lock().await;
         let previous_len = persisted.im_thread_bindings.len();
         persisted.im_thread_bindings.retain(|conversation_key, _| {
-            !crate::im_runtime::route_from_conversation_key(conversation_key).is_some_and(|route| {
-                route.platform == ImPlatformKind::Telegram && route.account_id == account_id
-            })
+            !crate::im::runtime::route_from_conversation_key(conversation_key).is_some_and(
+                |route| {
+                    route.platform == ImPlatformKind::Telegram && route.account_id == account_id
+                },
+            )
         });
         if persisted.im_thread_bindings.len() == previous_len {
             None
@@ -2585,8 +2587,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        app_state::AppState, im::telegram::api::TelegramForumTopicEditOutcome,
-        im_runtime::RouteTarget, store::PersistedState,
+        app_state::AppState, im::runtime::RouteTarget,
+        im::telegram::api::TelegramForumTopicEditOutcome, store::PersistedState,
     };
 
     fn telegram_account(

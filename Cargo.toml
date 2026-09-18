@@ -55,3 +55,15 @@ tower = { version = "0.5", features = ["util"] }
 [[bin]]
 name = "mochiport"
 path = "src/main.rs"
+
+[lib]
+name = "mochiport"
+path = "src/lib.rs"
+
+[workspace]
+# The Windows desktop client ships this daemon as a Tauri sidecar. Keeping both
+# crates in one workspace gives them a single Cargo.lock, a single target
+# directory, and one dependency resolution instead of two independently
+# drifting lock files.
+members = ["windows/MochiPort/src-tauri"]
+resolver = "3"

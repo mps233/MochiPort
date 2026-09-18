@@ -202,12 +202,12 @@ pub(crate) fn overlay_path(data_dir: &Path) -> PathBuf {
 
 /// daemon 的数据目录（与请求日志库、`config.toml` 同处）。
 ///
-/// 必须用 `storage_migration::current_storage_home()`：它才是权威来源，并遵守
+/// 必须用 `crate::daemon::storage_migration::current_storage_home()`：它才是权威来源，并遵守
 /// `MOCHIPORT_HOME` 环境变量。早先版本用 `config_path.parent()` 推导，在
 /// `MOCHIPORT_HOME` 与配置文件位置不一致时会指向错误的目录（隔离环境与自定义
 /// 部署都会踩到），导致覆盖文件读取不到。
 pub(crate) fn data_directory() -> PathBuf {
-    crate::storage_migration::current_storage_home()
+    crate::daemon::storage_migration::current_storage_home()
 }
 
 fn write_overlay(path: &Path, overlay: &OfficialCatalogOverlay) -> std::io::Result<()> {

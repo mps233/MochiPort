@@ -2,8 +2,8 @@ use anyhow::Result;
 
 use crate::{
     app_state::SharedState,
+    im::runtime::TurnOrigin,
     im::{core::outbound::ImOutboundSender, wechat::flow::handle_text_inbound},
-    im_runtime::TurnOrigin,
     types::InboundMessage,
 };
 

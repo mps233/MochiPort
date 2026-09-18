@@ -781,7 +781,10 @@ fn credential_mutation_from_response(
     let mutation: CredentialMutationResponse = serde_json::from_str(&response.body)
         .map_err(|_| format!("后台服务{operation}响应格式无效"))?;
     let _ = mutation.rotated;
-    if !mutation.ok || mutation.request_id != request_id || mutation.management_token_generation == 0 {
+    if !mutation.ok
+        || mutation.request_id != request_id
+        || mutation.management_token_generation == 0
+    {
         return Err(format!("后台服务没有确认{operation}"));
     }
     Ok(mutation)
@@ -849,11 +852,8 @@ pub(crate) async fn lifecycle_takeover(
         daemon_identity: &identity,
     })
     .map_err(|error| format!("无法编码后台服务接管请求：{error}"))?;
-    let response = super::native_lifecycle_post(
-        "api/v1/manage/lifecycle/lease/takeover",
-        body,
-    )
-    .await?;
+    let response =
+        super::native_lifecycle_post("api/v1/manage/lifecycle/lease/takeover", body).await?;
     let mutation = credential_mutation_from_response(response, "接管管理权", &request_id)?;
     validated_lifecycle_after_credential_mutation(coordinator, &lifecycle, &mutation).await
 }
@@ -895,11 +895,8 @@ pub(crate) async fn lifecycle_rotate_credential(
         reason: "leakRecovery",
     })
     .map_err(|error| format!("无法编码后台服务凭据轮换请求：{error}"))?;
-    let response = super::native_lifecycle_post(
-        "api/v1/manage/lifecycle/credential/rotate",
-        body,
-    )
-    .await?;
+    let response =
+        super::native_lifecycle_post("api/v1/manage/lifecycle/credential/rotate", body).await?;
     let mutation = credential_mutation_from_response(response, "重新生成管理凭据", &request_id)?;
     validated_lifecycle_after_credential_mutation(coordinator, &lifecycle, &mutation).await
 }

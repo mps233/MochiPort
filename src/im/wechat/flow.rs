@@ -3,6 +3,7 @@ use tracing::info;
 
 use crate::{
     app_state::SharedState,
+    im::runtime::{RouteTarget, ThreadRoutingRequestState, ThreadRoutingStage, TurnOrigin},
     im::{
         core::{
             approval::{
@@ -32,7 +33,6 @@ use crate::{
         events,
         wechat::{adapter::WechatAdapter, api::WechatApi, types::WechatSettings},
     },
-    im_runtime::{RouteTarget, ThreadRoutingRequestState, ThreadRoutingStage, TurnOrigin},
     remote_control_backend,
     types::{InboundAction, InboundMessage, ThreadRouteDirection},
 };

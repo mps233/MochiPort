@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 
 use crate::{
     app_state::SharedState,
-    im_runtime::{RouteTarget, ThreadSettingsSnapshot},
+    im::runtime::{RouteTarget, ThreadSettingsSnapshot},
     remote_control_backend,
     types::ImPlatformKind,
 };

@@ -466,7 +466,7 @@ async fn remember_stream(
     let conversation_key = format!("wecom:{account_id}:{chat_id}");
     state.runtime.lock().await.wecom_streams_by_thread.insert(
         conversation_key,
-        crate::im_runtime::WecomStreamState {
+        crate::im::runtime::WecomStreamState {
             req_id: req_id.to_string(),
             stream_id: format!("stream_{}", sanitize_id(message_id)),
             content: String::new(),

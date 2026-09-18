@@ -7,8 +7,7 @@ use std::panic::AssertUnwindSafe;
 use crate::{
     ai_gateway::catalog::configured_models_response_with_etag,
     app_state::{LifecycleAdmissionPermit, SharedState},
-    codex_app_config::{self, ConfigureCodexAppOptions},
-    codex_app_enhanced,
+    codex::app_config::ConfigureCodexAppOptions,
     config::LocalConnectionMode,
     remote_control_backend,
 };
@@ -85,7 +84,7 @@ pub(super) struct ManageCodexAppStatus {
     providers: Vec<ManageCodexAppProviderStatus>,
     image_generation_enabled: bool,
     connection_mode: LocalConnectionMode,
-    provider_mode: codex_app_config::CodexProviderMode,
+    provider_mode: crate::codex::app_config::CodexProviderMode,
     provider_mode_message: String,
     active_provider: Option<String>,
 }
@@ -162,7 +161,7 @@ pub(super) async fn configure_codex_app(
             ),
         )
         .await;
-    match codex_app_config::configure_codex_app(ConfigureCodexAppOptions {
+    match crate::codex::app_config::configure_codex_app(ConfigureCodexAppOptions {
         codex_home,
         backend_url: backend_url.clone(),
         connection_mode,
@@ -173,7 +172,7 @@ pub(super) async fn configure_codex_app(
         provider_supports_websockets,
     }) {
         Ok(report) => {
-            let gui_api_base = codex_app_config::inspect_gui_api_base_url(&backend_url);
+            let gui_api_base = crate::codex::app_config::inspect_gui_api_base_url(&backend_url);
             let remote_control_switch = report.remote_control_switch.clone();
             state
                 .push_event(
@@ -231,9 +230,14 @@ pub(super) async fn set_codex_app_provider_websocket(
 
     let config = state.config.lock().await.clone();
     let backend_url = config.remote_control_base_url();
-    match codex_app_config::set_codex_app_provider_websocket(None, provider_name, request.enabled) {
+    match crate::codex::app_config::set_codex_app_provider_websocket(
+        None,
+        provider_name,
+        request.enabled,
+    ) {
         Ok(config_path) => {
-            let status = codex_app_config::inspect_codex_app_config_for_mode(None, &backend_url);
+            let status =
+                crate::codex::app_config::inspect_codex_app_config_for_mode(None, &backend_url);
             state
                 .push_event(
                     "info",
@@ -269,9 +273,10 @@ pub(super) async fn delete_codex_app_provider(
     };
     let config = state.config.lock().await.clone();
     let backend_url = config.remote_control_base_url();
-    match codex_app_config::delete_codex_app_provider(None, request.provider_name.trim()) {
+    match crate::codex::app_config::delete_codex_app_provider(None, request.provider_name.trim()) {
         Ok(config_path) => {
-            let status = codex_app_config::inspect_codex_app_config_for_mode(None, &backend_url);
+            let status =
+                crate::codex::app_config::inspect_codex_app_config_for_mode(None, &backend_url);
             state
                 .push_event(
                     "info",
@@ -304,7 +309,7 @@ pub(super) async fn uninstall_codex_app(State(state): State<SharedState>) -> imp
     let config = state.config.lock().await.clone();
     let backend_url = config.remote_control_base_url();
 
-    match codex_app_config::uninstall_codex_app(None, &backend_url) {
+    match crate::codex::app_config::uninstall_codex_app(None, &backend_url) {
         Ok(report) => {
             state
                 .push_event(
@@ -337,7 +342,7 @@ pub(super) async fn uninstall_codex_app(State(state): State<SharedState>) -> imp
 pub(super) async fn refresh_codex_app_models(
     State(state): State<SharedState>,
 ) -> impl IntoResponse {
-    let cache_removed = match codex_app_config::clear_codex_models_cache(None) {
+    let cache_removed = match crate::codex::app_config::clear_codex_models_cache(None) {
         Ok(removed) => removed,
         Err(err) => {
             state
@@ -404,7 +409,7 @@ pub(super) async fn launch_codex_app_enhanced(
         .enhanced_launch_operations
         .begin(request_id.clone(), &state.lifecycle_admission)
     {
-        codex_app_enhanced::EnhancedLaunchOperationBegin::Started {
+        crate::codex::app_enhanced::EnhancedLaunchOperationBegin::Started {
             control,
             lifecycle_permit,
             ..
@@ -428,10 +433,10 @@ pub(super) async fn launch_codex_app_enhanced(
                 ),
             }
         }
-        codex_app_enhanced::EnhancedLaunchOperationBegin::Existing(operation) => {
+        crate::codex::app_enhanced::EnhancedLaunchOperationBegin::Existing(operation) => {
             legacy_enhanced_operation_response(operation)
         }
-        codex_app_enhanced::EnhancedLaunchOperationBegin::Conflict(operation) => (
+        crate::codex::app_enhanced::EnhancedLaunchOperationBegin::Conflict(operation) => (
             StatusCode::CONFLICT,
             Json(json!({
                 "ok": false,
@@ -439,7 +444,7 @@ pub(super) async fn launch_codex_app_enhanced(
                 "operation": operation,
             })),
         ),
-        codex_app_enhanced::EnhancedLaunchOperationBegin::LifecycleUnavailable => (
+        crate::codex::app_enhanced::EnhancedLaunchOperationBegin::LifecycleUnavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "ok": false,
@@ -490,7 +495,7 @@ pub(super) async fn start_codex_app_enhanced_operation(
         .enhanced_launch_operations
         .begin(request_id.clone(), &state.lifecycle_admission)
     {
-        codex_app_enhanced::EnhancedLaunchOperationBegin::Started {
+        crate::codex::app_enhanced::EnhancedLaunchOperationBegin::Started {
             operation,
             control,
             lifecycle_permit,
@@ -507,11 +512,11 @@ pub(super) async fn start_codex_app_enhanced_operation(
                 Json(json!({ "ok": true, "operation": operation })),
             )
         }
-        codex_app_enhanced::EnhancedLaunchOperationBegin::Existing(operation) => (
+        crate::codex::app_enhanced::EnhancedLaunchOperationBegin::Existing(operation) => (
             StatusCode::OK,
             Json(json!({ "ok": true, "operation": operation })),
         ),
-        codex_app_enhanced::EnhancedLaunchOperationBegin::Conflict(operation) => (
+        crate::codex::app_enhanced::EnhancedLaunchOperationBegin::Conflict(operation) => (
             StatusCode::CONFLICT,
             Json(json!({
                 "ok": false,
@@ -519,7 +524,7 @@ pub(super) async fn start_codex_app_enhanced_operation(
                 "operation": operation,
             })),
         ),
-        codex_app_enhanced::EnhancedLaunchOperationBegin::LifecycleUnavailable => (
+        crate::codex::app_enhanced::EnhancedLaunchOperationBegin::LifecycleUnavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "ok": false,
@@ -555,15 +560,15 @@ pub(super) async fn cancel_codex_app_enhanced_operation(
         }
     };
     match state.enhanced_launch_operations.cancel(&request_id) {
-        codex_app_enhanced::EnhancedLaunchCancelResult::Accepted(operation) => (
+        crate::codex::app_enhanced::EnhancedLaunchCancelResult::Accepted(operation) => (
             StatusCode::ACCEPTED,
             Json(json!({ "ok": true, "operation": operation })),
         ),
-        codex_app_enhanced::EnhancedLaunchCancelResult::Terminal(operation) => (
+        crate::codex::app_enhanced::EnhancedLaunchCancelResult::Terminal(operation) => (
             StatusCode::OK,
             Json(json!({ "ok": true, "operation": operation })),
         ),
-        codex_app_enhanced::EnhancedLaunchCancelResult::Conflict(operation) => {
+        crate::codex::app_enhanced::EnhancedLaunchCancelResult::Conflict(operation) => {
             let error = if operation.request_id == request_id {
                 "增强启动正在完成，已经无法取消"
             } else {
@@ -574,7 +579,7 @@ pub(super) async fn cancel_codex_app_enhanced_operation(
                 Json(json!({ "ok": false, "error": error, "operation": operation })),
             )
         }
-        codex_app_enhanced::EnhancedLaunchCancelResult::NotFound => (
+        crate::codex::app_enhanced::EnhancedLaunchCancelResult::NotFound => (
             StatusCode::NOT_FOUND,
             Json(json!({ "ok": false, "error": "没有可取消的增强启动" })),
         ),
@@ -595,7 +600,7 @@ fn normalized_enhanced_request_id(request_id: &str) -> Result<String, &'static s
 async fn run_codex_app_enhanced_operation(
     state: SharedState,
     request_id: String,
-    control: codex_app_enhanced::EnhancedLaunchControl,
+    control: crate::codex::app_enhanced::EnhancedLaunchControl,
     lifecycle_permit: LifecycleAdmissionPermit,
 ) {
     let _lifecycle_permit = lifecycle_permit;
@@ -620,7 +625,8 @@ async fn run_codex_app_enhanced_operation(
         )
         .await;
     let result =
-        codex_app_enhanced::launch_and_inject_controlled(models, &backend_url, control).await;
+        crate::codex::app_enhanced::launch_and_inject_controlled(models, &backend_url, control)
+            .await;
     match result {
         Ok(report) => {
             let event_message = format!(
@@ -657,7 +663,7 @@ async fn run_codex_app_enhanced_operation(
 fn spawn_codex_app_enhanced_operation(
     state: SharedState,
     request_id: String,
-    control: codex_app_enhanced::EnhancedLaunchControl,
+    control: crate::codex::app_enhanced::EnhancedLaunchControl,
     lifecycle_permit: LifecycleAdmissionPermit,
     mutation: tokio::sync::OwnedMutexGuard<()>,
 ) {
@@ -678,7 +684,7 @@ fn spawn_codex_app_enhanced_operation(
             manager.finish_failure(
                 &panic_request_id,
                 panic_control.cancellation(),
-                codex_app_enhanced::EnhancedLaunchFailure {
+                crate::codex::app_enhanced::EnhancedLaunchFailure {
                     error: "增强启动后台任务异常退出".to_string(),
                     recovery: Some(
                         "请检查 Codex App 状态；如接入异常，请先在设置中修复后重试".to_string(),
@@ -703,14 +709,14 @@ fn spawn_codex_app_enhanced_operation(
 }
 
 fn legacy_enhanced_operation_response(
-    operation: codex_app_enhanced::EnhancedLaunchOperation,
+    operation: crate::codex::app_enhanced::EnhancedLaunchOperation,
 ) -> (StatusCode, Json<Value>) {
     match operation.phase {
-        codex_app_enhanced::EnhancedLaunchOperationPhase::Ready => (
+        crate::codex::app_enhanced::EnhancedLaunchOperationPhase::Ready => (
             StatusCode::OK,
             Json(json!({ "ok": true, "report": operation.report })),
         ),
-        codex_app_enhanced::EnhancedLaunchOperationPhase::Cancelled => (
+        crate::codex::app_enhanced::EnhancedLaunchOperationPhase::Cancelled => (
             StatusCode::CONFLICT,
             Json(json!({
                 "ok": false,
@@ -718,7 +724,7 @@ fn legacy_enhanced_operation_response(
                 "recovery": operation.recovery,
             })),
         ),
-        codex_app_enhanced::EnhancedLaunchOperationPhase::Failed => (
+        crate::codex::app_enhanced::EnhancedLaunchOperationPhase::Failed => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
                 "ok": false,
@@ -738,7 +744,7 @@ fn legacy_enhanced_operation_response(
 }
 
 pub(super) async fn codex_app_enhanced_preflight() -> impl IntoResponse {
-    match codex_app_enhanced::preflight().await {
+    match crate::codex::app_enhanced::preflight().await {
         Ok(status) => (
             StatusCode::OK,
             Json(json!({ "ok": true, "status": status })),
@@ -878,7 +884,7 @@ pub(super) async fn repair_codex_app_gui_environment(
     };
     let config = state.config.lock().await.clone();
     let backend_url = config.remote_control_base_url();
-    let status = codex_app_config::inspect_codex_app_config_for_mode(None, &backend_url);
+    let status = crate::codex::app_config::inspect_codex_app_config_for_mode(None, &backend_url);
     if !status.config_ok || !status.auth_ok {
         return (
             StatusCode::BAD_REQUEST,
@@ -890,7 +896,7 @@ pub(super) async fn repair_codex_app_gui_environment(
     }
 
     let remote_control_switch =
-        match codex_app_config::enable_codex_app_remote_control_switch_for_backend(
+        match crate::codex::app_config::enable_codex_app_remote_control_switch_for_backend(
             None,
             &backend_url,
         ) {
@@ -905,7 +911,7 @@ pub(super) async fn repair_codex_app_gui_environment(
                 );
             }
         };
-    let gui_api_base = codex_app_config::cleanup_gui_environment(&backend_url);
+    let gui_api_base = crate::codex::app_config::cleanup_gui_environment(&backend_url);
     state
         .push_event(
             "info",
@@ -939,7 +945,7 @@ pub(super) async fn switch_codex_app_to_direct_api_mode(
     };
     let config = state.config.lock().await.clone();
     let backend_url = config.remote_control_base_url();
-    match codex_app_config::switch_codex_app_to_direct_api_mode(None, &backend_url) {
+    match crate::codex::app_config::switch_codex_app_to_direct_api_mode(None, &backend_url) {
         Ok(report) => {
             state
                 .push_event(
@@ -962,7 +968,7 @@ pub(super) async fn switch_codex_app_to_direct_api_mode(
 
 pub(super) async fn codex_app_status(
     State(state): State<SharedState>,
-) -> Json<codex_app_config::CodexAppConfigStatus> {
+) -> Json<crate::codex::app_config::CodexAppConfigStatus> {
     Json(codex_app_status_snapshot(&state).await)
 }
 
@@ -1020,9 +1026,12 @@ pub(super) async fn manage_codex_app_status(
 
 pub(super) async fn codex_app_status_snapshot(
     state: &SharedState,
-) -> codex_app_config::CodexAppConfigStatus {
+) -> crate::codex::app_config::CodexAppConfigStatus {
     let config = state.config.lock().await.clone();
-    codex_app_config::inspect_codex_app_config_for_mode(None, &config.remote_control_base_url())
+    crate::codex::app_config::inspect_codex_app_config_for_mode(
+        None,
+        &config.remote_control_base_url(),
+    )
 }
 
 #[cfg(test)]
